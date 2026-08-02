@@ -1,0 +1,65 @@
+#pragma once
+
+#include <Foundation/Containers/DynamicArray.h>
+#include <ParticlePlugin/Type/ParticleType.h>
+#include <RendererCore/Pipeline/RenderData.h>
+#include <RendererFoundation/RendererFoundationDLL.h>
+
+using plMeshResourceHandle = plTypedResourceHandle<class plMeshResource>;
+using plMaterialResourceHandle = plTypedResourceHandle<class plMaterialResource>;
+
+class PL_PARTICLEPLUGIN_DLL plParticleTypeMeshFactory final : public plParticleTypeFactory
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleTypeMeshFactory, plParticleTypeFactory);
+
+public:
+  virtual const plRTTI* GetTypeType() const override;
+  virtual void CopyTypeProperties(plParticleType* pObject, bool bFirstTime) const override;
+
+  virtual void Save(plStreamWriter& inout_stream) const override;
+  virtual void Load(plStreamReader& inout_stream) override;
+
+  plString m_sMesh;
+  plString m_sMaterial;
+  plString m_sTintColorParameter;
+};
+
+class PL_PARTICLEPLUGIN_DLL plParticleTypeMesh final : public plParticleType
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleTypeMesh, plParticleType);
+
+public:
+  plParticleTypeMesh();
+  ~plParticleTypeMesh();
+
+  virtual void CreateRequiredStreams() override;
+
+  plMeshResourceHandle m_hMesh;
+  mutable plMaterialResourceHandle m_hMaterial;
+  plTempHashedString m_sTintColorParameter;
+
+  virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
+
+protected:
+  friend class plParticleTypeMeshFactory;
+
+  virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
+  virtual void Process(plUInt64 uiNumElements) override {}
+
+  bool QueryMeshAndMaterialInfo() const;
+
+  void RequestRequiredWorldModulesForCache(plParticleWorldModule* pParticleModule) override;
+
+  plRenderDataManager* m_pRenderDataManager = nullptr;
+
+  plProcessingStream* m_pStreamPosition = nullptr;
+  plProcessingStream* m_pStreamSize = nullptr;
+  plProcessingStream* m_pStreamColor = nullptr;
+  plProcessingStream* m_pStreamRotationSpeed = nullptr;
+  plProcessingStream* m_pStreamRotationOffset = nullptr;
+  plProcessingStream* m_pStreamAxis = nullptr;
+
+  mutable bool m_bRenderDataCached = false;
+  mutable plRenderData::Category m_RenderCategory;
+  mutable plInstanceDataOffset m_InstanceDataOffset;
+};

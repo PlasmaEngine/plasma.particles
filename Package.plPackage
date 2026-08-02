@@ -1,0 +1,42 @@
+// plasma.particles — Particles.
+//
+// The AUTHORED manifest, kept in source next to the plugin. Component hashes and sizes are NOT
+// here: the packaging step computes those and emits them into the published manifest.
+//
+// Field reference and validation rules: Docs/PluginPackageManagerPlan.html §05.
+
+PackageInfo
+{
+	string %Id{"plasma.particles"}
+	string %Version{"1.0.0"}
+	string %Publisher{"PlasmaTechnology"}
+	string %License{"MIT"}
+	string %Homepage{"https://plasmagameengine.com"}
+
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+	string %AbiTag{"win64-msvc19-0.7.0-dev"}
+
+	string %DisplayName{"Particles"}
+	string %Category{"Rendering"}
+	string %Description{"Adds support for particle effects.
+
+The particle shaders ship with the engine, so installing this needs nothing further."}
+	string %Icon{"Branding/ParticleIcon.png"}
+	string %Banner{"Branding/ParticleBanner.png"}
+
+	string %EditorPlugins{"plEditorPluginParticle"}
+	string %EditorEnginePlugins{"plEnginePluginParticle"}
+	string %RuntimePlugins{"plParticlePlugin"}
+	string %PackageDependencies{}
+
+	// ---- dependencies ---------------------------------------------------------
+	// The editor plugin builds on EditorPluginAssets, so it must load after it.
+	Requires { string %Id{"plasma.assets"} string %Range{"^1.0"} }
+
+	Component { string %Name{"manifest"} string %Platform{"any"} }
+	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
+	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
+	Component { string %Name{"icon"} string %Platform{"any"} }
+	Component { string %Name{"banner"} string %Platform{"any"} }
+}

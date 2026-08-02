@@ -1,0 +1,22 @@
+// for a description of the options see:
+// https://plengine.net/pages/docs/editor/editor-plugins.html
+
+PluginInfo
+{
+	string %DisplayName{"Particles"}
+	string %Category{"Rendering"}
+	// Artwork existed on disk but the bundle had no fields for it, so nothing displayed it.
+	string %Icon{"ParticleIcon.png"}
+	string %Banner{"ParticleBanner.png"}
+	string %MinEngineVersion{"0.7.0"}
+	string %MaxEngineVersion{"0.7.0"}
+	string %Description{"Adds support for particle effects."}
+	string %EditorPlugins{"plEditorPluginParticle"}
+	string %EditorEnginePlugins{"plEnginePluginParticle"}
+	string %RuntimePlugins{"plParticlePlugin"}
+	string %PackageDependencies{}
+	string %RequiredPlugins{}
+	string %ExclusiveFeatures{}
+	string %EnabledInTemplates{"General2D", "General3D"}
+	string %PlasmaBuildTargetName{"ParticlePlugin"}
+}
