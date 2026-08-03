@@ -8,14 +8,14 @@
 PackageInfo
 {
 	string %Id{"plasma.particles"}
-	string %Version{"1.0.0"}
+	string %Version{"1.1.0"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
 
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
-	string %AbiTag{"win64-msvc19-0.7.0-dev"}
+	string %MinEngineVersion{"0.8.0"}
+	string %MaxEngineVersion{"0.8.0"}
+	string %AbiTag{"win64-msvc19-0.8.0-dev"}
 
 	string %DisplayName{"Particles"}
 	string %Category{"Rendering"}
