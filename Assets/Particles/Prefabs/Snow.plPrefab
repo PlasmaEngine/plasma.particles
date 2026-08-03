@@ -1,0 +1,874 @@
+HeaderV2
+{
+o
+{
+	Uuid %id{u4{10391409842900952222,557663811876648748}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0x0000A040}
+	}
+}
+o
+{
+	Uuid %id{u4{16603811717813042627,1111742551685995947}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{6152432793107359260,18150921643157436316}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		Color %DefaultValue{f{0x2D86153F,0x2D86153F,0x2D86153F,0x0000803F}}
+		s %Name{"FogColor"}
+		s %Type{"plColor"}
+	}
+}
+o
+{
+	Uuid %id{u4{6696574688989455465,1624143161477138464}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0x00004040}
+	}
+}
+o
+{
+	Uuid %id{u4{15168182030045604021,1640739212347030238}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{15987099399382284940,8653981476712469500}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		s %DefaultValue{"{ 94fa9319-57c0-9207-4b62-6e58dd3c414b }"}
+		s %Name{"Effect"}
+		s %Type{"plStringView"}
+	}
+}
+o
+{
+	Uuid %id{u4{13181426357830178875,1899176477301681422}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0xCDCC4C3D}
+	}
+}
+o
+{
+	Uuid %id{u4{16450643844550549340,3738739768851411320}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{13181426357830178875,1899176477301681422}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0xCDCC4C3D}
+		s %Name{"SnowBreakupTiling"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{8545023359493115579,4988320291921520500}}
+	s %t{"plAssetDocumentInfo"}
+	u3 %v{2}
+	s %n{"Header"}
+	p
+	{
+		s %AssetType{"Prefab"}
+		VarArray %Dependencies{}
+		Uuid %DocumentID{u4{8545023359493115579,4988320291921520500}}
+		u4 %Hash{10228539423478142336}
+		VarArray %MetaInfo
+		{
+			Uuid{u4{6601191192298977132,12631439207324065678}}
+		}
+		VarArray %Outputs{}
+		VarArray %PackageDeps{}
+		VarArray %References{}
+	}
+}
+o
+{
+	Uuid %id{u4{16345787211911267706,7132007555288128488}}
+	s %t{"plClampValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		Invalid %Max{}
+		f %Min{0}
+	}
+}
+o
+{
+	Uuid %id{u4{16292616108371704955,7242315826782628833}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0x00004040}
+	}
+}
+o
+{
+	Uuid %id{u4{8406488715724179807,7337172302554626221}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{16292616108371704955,7242315826782628833}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0x00004040}
+		s %Name{"SnowStrength"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{15987099399382284940,8653981476712469500}}
+	s %t{"plAssetBrowserAttribute"}
+	u3 %v{1}
+	p
+	{
+		s %DependencyFlags{"plDependencyFlags::Package"}
+		s %Filter{";CompatibleAsset_Particle_Effect;"}
+		s %RequiredTag{""}
+	}
+}
+o
+{
+	Uuid %id{u4{10149062500183418440,9366483763211657208}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{6696574688989455465,1624143161477138464}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0x00004040}
+		s %Name{"SnowBreakup"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{17545574426375510573,10340027394562902444}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0x0000803E}
+	}
+}
+o
+{
+	Uuid %id{u4{13250815115575047677,11037702481623299652}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{17545574426375510573,10340027394562902444}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0x0000803E}
+		s %Name{"SnowWrapping"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{6601191192298977132,12631439207324065678}}
+	s %t{"plExposedParameters"}
+	u3 %v{4}
+	p
+	{
+		VarArray %Parameters
+		{
+			Uuid{u4{8406488715724179807,7337172302554626221}}
+			Uuid{u4{13250815115575047677,11037702481623299652}}
+			Uuid{u4{15549761255280711662,15185217432128158858}}
+			Uuid{u4{10149062500183418440,9366483763211657208}}
+			Uuid{u4{16450643844550549340,3738739768851411320}}
+			Uuid{u4{15168182030045604021,1640739212347030238}}
+			Uuid{u4{16096060496015176347,14300877651535323082}}
+			Uuid{u4{16603811717813042627,1111742551685995947}}
+		}
+		Uuid %SubAssetGuid{u4{0,0}}
+	}
+}
+o
+{
+	Uuid %id{u4{18117985798118425972,14131313321619723767}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		f %Value{0x0000803F}
+	}
+}
+o
+{
+	Uuid %id{u4{16096060496015176347,14300877651535323082}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{16345787211911267706,7132007555288128488}}
+			Uuid{u4{18117985798118425972,14131313321619723767}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0x0000803F}
+		s %Name{"FogDensity"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{15549761255280711662,15185217432128158858}}
+	s %t{"plExposedParameter"}
+	u3 %v{3}
+	p
+	{
+		VarArray %Attributes
+		{
+			Uuid{u4{10391409842900952222,557663811876648748}}
+		}
+		s %Category{"plPropertyCategory::Member"}
+		f %DefaultValue{0x0000A040}
+		s %Name{"SnowWrappingNoise"}
+		s %Type{"float"}
+	}
+}
+o
+{
+	Uuid %id{u4{6152432793107359260,18150921643157436316}}
+	s %t{"plDefaultValueAttribute"}
+	u3 %v{1}
+	p
+	{
+		ColorGamma %Value{u1{124,124,149,255}}
+	}
+}
+}
+Objects
+{
+o
+{
+	Uuid %id{u4{414094926023646735,167824273763246868}}
+	s %t{"plGameObject"}
+	u3 %v{1}
+	p
+	{
+		b %Active{1}
+		VarArray %Children{}
+		VarArray %Components
+		{
+			Uuid{u4{3810750915238045440,18352116154165633576}}
+		}
+		s %GlobalKey{""}
+		Vec3 %LocalPosition{f{0,0,0}}
+		Quat %LocalRotation{f{0,0,0,0x0000803F}}
+		Vec3 %LocalScaling{f{0x0000803F,0x0000803F,0x0000803F}}
+		f %LocalUniformScaling{0x0000803F}
+		s %Mode{"plObjectMode::Automatic"}
+		s %Name{"SnowParticle"}
+		VarArray %Tags
+		{
+			s{"CastShadow"}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{12407599362926021606,590618674873981812}}
+	s %t{"plGameObject"}
+	u3 %v{1}
+	p
+	{
+		b %Active{1}
+		VarArray %Children{}
+		VarArray %Components
+		{
+			Uuid{u4{14021451013406850781,935832583559695240}}
+		}
+		s %GlobalKey{""}
+		Vec3 %LocalPosition{f{0,0,0}}
+		Quat %LocalRotation{f{0,0,0,0x0000803F}}
+		Vec3 %LocalScaling{f{0x0000803F,0x0000803F,0x0000803F}}
+		f %LocalUniformScaling{0x0000803F}
+		s %Mode{"plObjectMode::Automatic"}
+		s %Name{""}
+		VarArray %Tags
+		{
+			s{"CastShadow"}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{13288593871572033292,623732021754986001}}
+	s %t{"plSnowComponent"}
+	u3 %v{3}
+	p
+	{
+		b %Active{1}
+		s %Diffuse{""}
+		s %Displacement{""}
+		s %Noise{""}
+		s %Normal{""}
+		s %ORM{""}
+		f %SnowBreakup{0x00004040}
+		f %SnowBreakupTiling{0xCDCC4C3D}
+		f %SnowStrength{0x00004040}
+		f %SnowTiling{0x0000803F}
+		f %SnowWrapping{0x0000803E}
+		f %SnowWrappingNoise{0x0000A040}
+	}
+}
+o
+{
+	Uuid %id{u4{14021451013406850781,935832583559695240}}
+	s %t{"plFogComponent"}
+	u3 %v{3}
+	p
+	{
+		b %Active{1}
+		Color %Color{f{0x2D86153F,0x2D86153F,0x2D86153F,0x0000803F}}
+		f %Density{0x0000803F}
+		f %HeightFalloff{0x00004843}
+		b %ModulateWithSkyColor{1}
+		f %SkyDistance{0x00007A44}
+		f %StartDistance{0}
+	}
+}
+o
+{
+	Uuid %id{u4{12561398261492666288,4629792052230608883}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"FogDensity"}
+		Uuid %Object{u4{14021451013406850781,935832583559695240}}
+		s %PropertyPath{"Density"}
+	}
+}
+o
+{
+	Uuid %id{u4{5299134468049974687,4743028264028937184}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"FogColor"}
+		Uuid %Object{u4{14021451013406850781,935832583559695240}}
+		s %PropertyPath{"Color"}
+	}
+}
+o
+{
+	Uuid %id{u4{2526769371141277056,4909699907639099509}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"SnowStrength"}
+		Uuid %Object{u4{13288593871572033292,623732021754986001}}
+		s %PropertyPath{"SnowStrength"}
+	}
+}
+o
+{
+	Uuid %id{u4{3969876444067889340,5165996631461380128}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"SnowBreakupTiling"}
+		Uuid %Object{u4{13288593871572033292,623732021754986001}}
+		s %PropertyPath{"SnowBreakupTiling"}
+	}
+}
+o
+{
+	Uuid %id{u4{15859758789165123470,5356109410754932962}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"SnowWrapping"}
+		Uuid %Object{u4{13288593871572033292,623732021754986001}}
+		s %PropertyPath{"SnowWrapping"}
+	}
+}
+o
+{
+	Uuid %id{u4{1381793870532432285,5590363256842289221}}
+	s %t{"plPrefabDocumentSettings"}
+	u3 %v{1}
+	p
+	{
+		VarArray %ExposedProperties
+		{
+			Uuid{u4{2526769371141277056,4909699907639099509}}
+			Uuid{u4{15859758789165123470,5356109410754932962}}
+			Uuid{u4{18172449612120324513,5735676297825926180}}
+			Uuid{u4{16084400295715085972,5691602195188686707}}
+			Uuid{u4{3969876444067889340,5165996631461380128}}
+			Uuid{u4{8138473256163401386,5678751901723444674}}
+			Uuid{u4{12561398261492666288,4629792052230608883}}
+			Uuid{u4{5299134468049974687,4743028264028937184}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{8138473256163401386,5678751901723444674}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"Effect"}
+		Uuid %Object{u4{3810750915238045440,18352116154165633576}}
+		s %PropertyPath{"Effect"}
+	}
+}
+o
+{
+	Uuid %id{u4{16084400295715085972,5691602195188686707}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"SnowBreakup"}
+		Uuid %Object{u4{13288593871572033292,623732021754986001}}
+		s %PropertyPath{"SnowBreakup"}
+	}
+}
+o
+{
+	Uuid %id{u4{18172449612120324513,5735676297825926180}}
+	s %t{"plExposedSceneProperty"}
+	u3 %v{1}
+	p
+	{
+		s %Name{"SnowWrappingNoise"}
+		Uuid %Object{u4{13288593871572033292,623732021754986001}}
+		s %PropertyPath{"SnowWrappingNoise"}
+	}
+}
+o
+{
+	Uuid %id{u4{18096612296587978288,6449934965513159559}}
+	s %t{"plSceneDocumentRoot"}
+	u3 %v{2}
+	s %n{"ObjectTree"}
+	p
+	{
+		VarArray %Children
+		{
+			Uuid{u4{13251283080431762799,14667199305444932036}}
+		}
+		Uuid %Settings{u4{1381793870532432285,5590363256842289221}}
+	}
+}
+o
+{
+	Uuid %id{u4{13251283080431762799,14667199305444932036}}
+	s %t{"plGameObject"}
+	u3 %v{1}
+	p
+	{
+		b %Active{1}
+		VarArray %Children
+		{
+			Uuid{u4{414094926023646735,167824273763246868}}
+			Uuid{u4{12407599362926021606,590618674873981812}}
+		}
+		VarArray %Components
+		{
+			Uuid{u4{13288593871572033292,623732021754986001}}
+		}
+		s %GlobalKey{""}
+		Vec3 %LocalPosition{f{0,0,0}}
+		Quat %LocalRotation{f{0,0,0,0x0000803F}}
+		Vec3 %LocalScaling{f{0x0000803F,0x0000803F,0x0000803F}}
+		f %LocalUniformScaling{0x0000803F}
+		s %Mode{"plObjectMode::Automatic"}
+		s %Name{"<Prefab-Root>"}
+		VarArray %Tags
+		{
+			s{"CastShadow"}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{3810750915238045440,18352116154165633576}}
+	s %t{"plParticleComponent"}
+	u3 %v{5}
+	p
+	{
+		b %Active{1}
+		s %Effect{"{ 94fa9319-57c0-9207-4b62-6e58dd3c414b }"}
+		b %IgnoreOwnerRotation{0}
+		Time %MinRestartDelay{d{0}}
+		s %OnFinishedAction{"plOnComponentFinishedAction2::None"}
+		VarDict %Parameters{}
+		u4 %RandomSeed{0}
+		Time %RestartDelayRange{d{0}}
+		s %SharedInstanceName{""}
+		b %SpawnAtStart{1}
+		s %SpawnDirection{"plBasisAxis::PositiveZ"}
+	}
+}
+}
+Types
+{
+o
+{
+	Uuid %id{u4{5090140418944865950,3172852594581671215}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plDocumentRoot"}
+		s %PluginName{"plEditorPluginScene"}
+		VarArray %Properties{}
+		s %TypeName{"plSceneDocumentRoot"}
+		u3 %TypeVersion{2}
+	}
+}
+o
+{
+	Uuid %id{u4{4354761075647005938,3324213114232904763}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plSettingsComponent"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plSnowComponent"}
+		u3 %TypeVersion{3}
+	}
+}
+o
+{
+	Uuid %id{u4{17505295369992244956,3448774077196009344}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plRenderComponent"}
+		s %PluginName{"plEditorPluginParticle"}
+		VarArray %Properties{}
+		s %TypeName{"plParticleComponent"}
+		u3 %TypeVersion{5}
+	}
+}
+o
+{
+	Uuid %id{u4{18162597306170337891,4562171257299198088}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Abstract|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plComponent"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plSettingsComponent"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{14187911491586291717,6357927790796962117}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::IsEnum|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plEnumBase"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plObjectMode"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{10411385167834517523,6666974454840060292}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Abstract|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plComponent"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plRenderComponent"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{7009381072334277535,9659459603664967231}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plDocumentRoot"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{8399423596297715122,9970706930732107724}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Abstract|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plComponent"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{9213520253374621870,10188580803895808800}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::IsEnum|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plEnumBase"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plOnComponentFinishedAction2"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{16819636187740221814,11089501717885464587}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plEnumBase"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{14209585135339028478,11308263336862562356}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plPropertyAttribute"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{10799938453523757431,11702988725276979427}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"plEditorPluginScene"}
+		VarArray %Properties{}
+		s %TypeName{"plSceneDocumentSettingsBase"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{17344855267500754522,12198870391063964378}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plSceneDocumentSettingsBase"}
+		s %PluginName{"plEditorPluginScene"}
+		VarArray %Properties{}
+		s %TypeName{"plPrefabDocumentSettings"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{12621501544260860891,15719976691117957393}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plReflectedClass"}
+		s %PluginName{"plEditorPluginScene"}
+		VarArray %Properties{}
+		s %TypeName{"plExposedSceneProperty"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{4862719181471848392,16023915775579166190}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plGameObject"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{11429040935103710277,16330217769000791100}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plSettingsComponent"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plFogComponent"}
+		u3 %TypeVersion{3}
+	}
+}
+o
+{
+	Uuid %id{u4{6853598190348858983,16453551367257532047}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plPropertyAttribute"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plCategoryAttribute"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{13033624727069548121,17368468367984449402}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::Class|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{""}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plReflectedClass"}
+		u3 %TypeVersion{1}
+	}
+}
+o
+{
+	Uuid %id{u4{698364993276436088,17804542439804637414}}
+	s %t{"plReflectedTypeDescriptor"}
+	u3 %v{1}
+	p
+	{
+		VarArray %Attributes{}
+		s %Flags{"plTypeFlags::IsEnum|plTypeFlags::Minimal"}
+		VarArray %Functions{}
+		s %ParentTypeName{"plEnumBase"}
+		s %PluginName{"Static"}
+		VarArray %Properties{}
+		s %TypeName{"plBasisAxis"}
+		u3 %TypeVersion{1}
+	}
+}
+}

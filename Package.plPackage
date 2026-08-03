@@ -8,7 +8,7 @@
 PackageInfo
 {
 	string %Id{"plasma.particles"}
-	string %Version{"1.1.0"}
+	string %Version{"1.1.1"}
 	string %Publisher{"PlasmaTechnology"}
 	string %License{"MIT"}
 	string %Homepage{"https://plasmagameengine.com"}
@@ -34,6 +34,13 @@ The particle shaders ship with the engine, so installing this needs nothing furt
 	// The editor plugin builds on EditorPluginAssets, so it must load after it.
 	Requires { string %Id{"plasma.assets"} string %Range{"^1.0"} }
 
+	// ---- assets ---------------------------------------------------------------
+	// Mounted as a data directory when the package is installed. The layout below Assets/
+	// mirrors where this content sat inside the engine, so every shader include, shape icon
+	// lookup and asset reference resolves exactly as it did before.
+	Mount { string %Path{"Assets"} string %RootName{"plasma.particles"} bool %Writable{false} }
+
+	Component { string %Name{"assets"} string %Platform{"any"} }
 	Component { string %Name{"manifest"} string %Platform{"any"} }
 	Component { string %Name{"runtime-win64"} string %Platform{"win64"} }
 	Component { string %Name{"editor-win64"} string %Platform{"win64"} }
