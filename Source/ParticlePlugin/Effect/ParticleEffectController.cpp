@@ -83,6 +83,26 @@ void plParticleEffectController::SetTransform(const plTransform& t, const plVec3
   }
 }
 
+void plParticleEffectController::SetOwnerTags(const plTagSet& tags) const
+{
+  // shared effects are rendered by many owners; a single owner's tags would be wrong for the others
+  plParticleEffectInstance* pEffect = GetInstance();
+  if (pEffect && m_pSharedInstanceOwner == nullptr)
+  {
+    pEffect->SetOwnerTags(tags);
+  }
+}
+
+void plParticleEffectController::SetSkinnedMeshComponent(const plComponentHandle& hComponent) const
+{
+  // shared effects are simulated once for many owners; a single owner's mesh would be wrong
+  plParticleEffectInstance* pEffect = GetInstance();
+  if (pEffect && m_pSharedInstanceOwner == nullptr)
+  {
+    pEffect->SetSkinnedMeshComponent(hComponent);
+  }
+}
+
 void plParticleEffectController::CombineSystemBoundingVolumes()
 {
   if (plParticleEffectInstance* pEffect = GetInstance())

@@ -17,6 +17,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory_SpherePosition, 2, 
     PL_MEMBER_PROPERTY("PositionOffset", m_vPositionOffset),
     PL_MEMBER_PROPERTY("Radius", m_fRadius)->AddAttributes(new plDefaultValueAttribute(0.25f), new plClampValueAttribute(0.01f, 100.0f)),
     PL_MEMBER_PROPERTY("OnSurface", m_bSpawnOnSurface),
+    PL_MEMBER_PROPERTY("ShellThickness", m_fShellThickness)->AddAttributes(new plClampValueAttribute(0.0f, 100.0f)),
     PL_MEMBER_PROPERTY("SetVelocity", m_bSetVelocity),
     PL_MEMBER_PROPERTY("Speed", m_Speed),
     PL_MEMBER_PROPERTY("ScaleRadiusParam", m_sScaleRadiusParameter),
@@ -54,6 +55,7 @@ void plParticleInitializerFactory_SpherePosition::CopyInitializerProperties(plPa
   const float fScale = pInitializer->GetOwnerEffect()->GetFloatParameter(plTempHashedString(m_sScaleRadiusParameter.GetData()), 1.0f);
 
   pInitializer->m_fRadius = plMath::Max(m_fRadius * fScale, 0.01f); // prevent 0 radius
+  pInitializer->m_fShellThickness = plMath::Clamp(m_fShellThickness * fScale, 0.0f, pInitializer->m_fRadius);
   pInitializer->m_bSpawnOnSurface = m_bSpawnOnSurface;
   pInitializer->m_bSetVelocity = m_bSetVelocity;
   pInitializer->m_Speed = m_Speed;
@@ -92,7 +94,7 @@ float plParticleInitializerFactory_SpherePosition::GetSpawnCountMultiplier(const
 
 void plParticleInitializerFactory_SpherePosition::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 3;
+  const plUInt8 uiVersion = 4;
   inout_stream << uiVersion;
 
   inout_stream << m_fRadius;
@@ -106,6 +108,9 @@ void plParticleInitializerFactory_SpherePosition::Save(plStreamWriter& inout_str
 
   // version 3
   inout_stream << m_sScaleRadiusParameter;
+
+  // version 4
+  inout_stream << m_fShellThickness;
 }
 
 void plParticleInitializerFactory_SpherePosition::Load(plStreamReader& inout_stream)
@@ -127,6 +132,11 @@ void plParticleInitializerFactory_SpherePosition::Load(plStreamReader& inout_str
   if (uiVersion >= 3)
   {
     inout_stream >> m_sScaleRadiusParameter;
+  }
+
+  if (uiVersion >= 4)
+  {
+    inout_stream >> m_fShellThickness;
   }
 }
 
@@ -176,7 +186,19 @@ void plParticleInitializer_SpherePosition::InitializeElements(plUInt64 uiStartIn
     }
 
     if (m_bSpawnOnSurface)
-      pos = normalPos * m_fRadius;
+    {
+      if (m_fShellThickness > 0.0f)
+      {
+        // uniform density inside the shell [Radius - Thickness, Radius]: r = cbrt(lerp(inner^3, outer^3, u))
+        const float fInner = m_fRadius - m_fShellThickness;
+        const float fR3 = plMath::Lerp(fInner * fInner * fInner, m_fRadius * m_fRadius * m_fRadius, (float)rng.DoubleZeroToOneInclusive());
+        pos = normalPos * plMath::Pow(fR3, 1.0f / 3.0f);
+      }
+      else
+      {
+        pos = normalPos * m_fRadius;
+      }
+    }
 
     pos += m_vPositionOffset;
 

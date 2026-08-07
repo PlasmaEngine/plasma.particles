@@ -18,10 +18,11 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSystemDescriptor, 2, plRTTIDefaultAllo
   {
     PL_MEMBER_PROPERTY("Name", m_sName),
     PL_MEMBER_PROPERTY("Visible", m_bVisible)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_ENUM_MEMBER_PROPERTY("SimulationTarget", plParticleSimulationTarget, m_SimulationTarget),
     PL_MEMBER_PROPERTY("LifeTime", m_LifeTime)->AddAttributes(new plDefaultValueAttribute(plTime::MakeFromSeconds(2)), new plClampValueAttribute(plTime::MakeFromSeconds(0.0), plVariant())),
     PL_MEMBER_PROPERTY("LifeScaleParam", m_sLifeScaleParameter),
     PL_MEMBER_PROPERTY("OnDeathEvent", m_sOnDeathEvent),
-    PL_ARRAY_MEMBER_PROPERTY("Emitters", m_EmitterFactories)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plMaxArraySizeAttribute(1)),
+    PL_ARRAY_MEMBER_PROPERTY("Emitters", m_EmitterFactories)->AddFlags(plPropertyFlags::PointerOwner),
     PL_SET_ACCESSOR_PROPERTY("Initializers", GetInitializerFactories, AddInitializerFactory, RemoveInitializerFactory)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plPreventDuplicatesAttribute()),
     PL_SET_ACCESSOR_PROPERTY("Behaviors", GetBehaviorFactories, AddBehaviorFactory, RemoveBehaviorFactory)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plPreventDuplicatesAttribute()),
     PL_SET_ACCESSOR_PROPERTY("Types", GetTypeFactories, AddTypeFactory, RemoveTypeFactory)->AddFlags(plPropertyFlags::PointerOwner),
@@ -156,6 +157,7 @@ enum class ParticleSystemVersion
   Version_5, // added default processors
   Version_6, // changed lifetime variance
   Version_7, // added life scale param
+  Version_8, // added simulation target
 
   // insert new version numbers above
   Version_Count,
@@ -196,6 +198,7 @@ void plParticleSystemDescriptor::Save(plStreamWriter& inout_stream) const
   inout_stream << m_LifeTime.m_fVariance;
   inout_stream << m_sOnDeathEvent;
   inout_stream << m_sLifeScaleParameter;
+  inout_stream << m_SimulationTarget;
   inout_stream << uiNumEmitters;
   inout_stream << uiNumInitializers;
   inout_stream << uiNumBehaviors;
@@ -270,6 +273,11 @@ void plParticleSystemDescriptor::Load(plStreamReader& inout_stream)
   if (uiVersion >= 7)
   {
     inout_stream >> m_sLifeScaleParameter;
+  }
+
+  if (uiVersion >= 8)
+  {
+    inout_stream >> m_SimulationTarget;
   }
 
   inout_stream >> uiNumEmitters;

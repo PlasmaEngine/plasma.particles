@@ -8,6 +8,7 @@
 #include <Foundation/Threading/TaskSystem.h>
 #include <ParticlePlugin/Components/ParticleComponent.h>
 #include <ParticlePlugin/Components/ParticleFinisherComponent.h>
+#include <ParticlePlugin/Components/ParticleForceFieldComponent.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
 #include <ParticlePlugin/Module/ParticleModule.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
@@ -188,6 +189,23 @@ void plParticleWorldModule::CacheWorldModule(const plRTTI* pRtti)
   m_WorldModuleCache[pRtti] = GetWorld()->GetOrCreateModule(pRtti);
 }
 
+void plParticleWorldModule::RegisterForceField(const plParticleForceFieldComponent* pComponent)
+{
+  PL_LOCK(m_Mutex);
+
+  if (!m_ForceFields.Contains(pComponent))
+  {
+    m_ForceFields.PushBack(pComponent);
+  }
+}
+
+void plParticleWorldModule::UnregisterForceField(const plParticleForceFieldComponent* pComponent)
+{
+  PL_LOCK(m_Mutex);
+
+  m_ForceFields.RemoveAndSwap(pComponent);
+}
+
 void plParticleWorldModule::CreateFinisherComponent(plParticleEffectInstance* pEffect)
 {
   if (pEffect && !pEffect->IsSharedEffect())
@@ -202,7 +220,7 @@ void plParticleWorldModule::CreateFinisherComponent(plParticleEffectInstance* pE
     go.m_LocalPosition = transform.m_vPosition;
     go.m_LocalRotation = transform.m_qRotation;
     go.m_LocalScaling = transform.m_vScale;
-    // go.m_Tags = GetOwner()->GetTags(); // TODO: pass along tags -> needed for rendering filters
+    go.m_Tags = pEffect->GetOwnerTags(); // keeps tag-based rendering filters working on the dying effect
 
     plGameObject* pFinisher;
     pWorld->CreateObject(go, pFinisher);
@@ -230,6 +248,7 @@ void plParticleWorldModule::WorldClear()
   m_ParticleSystems.Clear();
   m_ParticleEffectsFreeList.Clear();
   m_ParticleSystemFreeList.Clear();
+  m_ForceFieldData.Clear();
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_WorldModule_ParticleWorldModule);

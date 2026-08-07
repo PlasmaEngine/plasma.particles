@@ -1,9 +1,11 @@
 #pragma once
 
+#include <Core/World/Declarations.h>
 #include <Foundation/Math/Transform.h>
 #include <Foundation/SimdMath/SimdVec4i.h>
 #include <Foundation/Threading/TaskSystem.h>
 #include <Foundation/Types/SharedPtr.h>
+#include <Foundation/Types/TagSet.h>
 
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 
@@ -57,6 +59,37 @@ public:
   const plHybridArray<plParticleSystemInstance*, 8>& GetParticleSystems() const { return m_ParticleSystems; }
 
   void AddParticleEvent(const plParticleEvent& pe);
+
+  /// \brief Tags of the game object that owns this effect. They are forwarded to the finisher
+  /// component's object, so tag-based render filters keep working while a detached effect dies out.
+  void SetOwnerTags(const plTagSet& tags) { m_OwnerTags = tags; }
+  const plTagSet& GetOwnerTags() const { return m_OwnerTags; }
+
+  /// \brief Combined dynamic spawn scale [0;1] (distance LOD x particle budget), written by the
+  /// world module each update. Emitters multiply it into their spawn counts.
+  void SetDynamicSpawnScale(float fScale) { m_fDynamicSpawnScale = fScale; }
+  float GetDynamicSpawnScale() const { return m_fDynamicSpawnScale; }
+
+  /// \brief The animated mesh this effect emits from (skeletal emission). The world module
+  /// snapshots the component's pose each update before the simulation tasks start.
+  void SetSkinnedMeshComponent(const plComponentHandle& hComponent) { m_hSkinnedMeshComponent = hComponent; }
+  const plComponentHandle& GetSkinnedMeshComponent() const { return m_hSkinnedMeshComponent; }
+
+  /// One frame's skinning data: skinning-space bone matrices (mesh bone index order) plus the
+  /// world transform of the posed mesh. Written on the main thread, read by the update tasks.
+  struct SkinningSnapshot
+  {
+    plDynamicArray<plMat4> m_BoneMatrices;
+    plTransform m_Transform = plTransform::MakeIdentity();
+    bool m_bValid = false;
+  };
+
+  const SkinningSnapshot& GetSkinningSnapshot() const { return m_SkinningSnapshot; }
+  SkinningSnapshot& GetSkinningSnapshotForWriting() { return m_SkinningSnapshot; }
+
+  float GetFadeOutStartDistance() const { return m_fFadeOutStartDistance; }
+  float GetFadeOutEndDistance() const { return m_fFadeOutEndDistance; }
+  plParticleEffectImportance::Enum GetImportance() const { return m_Importance; }
 
   plRandom& GetRNG() { return m_Random; }
 
@@ -231,6 +264,11 @@ private:
   // for deterministic randomness
   plRandom m_Random;
 
+  plTagSet m_OwnerTags;
+
+  plComponentHandle m_hSkinnedMeshComponent;
+  SkinningSnapshot m_SkinningSnapshot;
+
   plHashSet<const void*> m_SharedInstances;
   plParticleEffectHandle m_hEffectHandle;
   bool m_bEmitterEnabled = true;
@@ -239,6 +277,12 @@ private:
   plUInt8 m_uiReviveTimeout = 3;
   plInt8 m_iMinSimStepsToDo = 0;
   float m_fApplyInstanceVelocity = 0;
+  float m_fDynamicSpawnScale = 1.0f;
+  float m_fFadeOutStartDistance = 0.0f;
+  float m_fFadeOutEndDistance = 0.0f;
+  plEnum<plParticleEffectImportance> m_Importance;
+  plTime m_FixedTickStep;              // zero = variable time step
+  plUInt8 m_uiMaxTicksPerFrame = 4;
   plTime m_PreSimulateDuration;
   plParticleEffectResourceHandle m_hResource;
 

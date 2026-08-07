@@ -29,6 +29,11 @@ public:
 
   float m_fDistortionStrength = 0;
   plTexture2DResourceHandle m_hDistortionTexture;
+  plTexture2DResourceHandle m_hSixWayMapA;
+  plTexture2DResourceHandle m_hSixWayMapB;
+  float m_fSixWayAbsorption = 1.0f;
+  plTexture2DResourceHandle m_hNormalMap;
+  float m_fNormalMapStrength = 0.0f;
   plTempHashedString m_QuadModePermutation;
 
   plEnum<plParticleTypeRenderMode> m_RenderMode;
@@ -36,6 +41,13 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   plMaterialResourceHandle m_hCustomMaterial;
+
+  // GPU-simulated systems fill these buffers in the particle compute pass instead of handing over
+  // CPU arrays; when the draw-args handle is valid the renderer binds them and draws indirectly
+  plGALBufferHandle m_hGpuBaseDataBuffer;
+  plGALBufferHandle m_hGpuBillboardDataBuffer;
+  plGALBufferHandle m_hGpuTangentDataBuffer;
+  plGALBufferHandle m_hGpuDrawArgsBuffer;
 };
 
 /// \brief Implements rendering of particle systems

@@ -30,7 +30,7 @@ protected:
     TempSystemCB(plRenderContext* pRenderContext);
     ~TempSystemCB();
 
-    void SetGenericData(const plTransform& objectTransform, plTime effectLifeTime, plUInt8 uiNumVariationsX, plUInt8 uiNumVariationsY, plUInt8 uiNumFlipbookAnimsX, plUInt8 uiNumFlipbookAnimsY, float fNormalCurvature = 0, float fLightDirectionality = 0);
+    void SetGenericData(const plTransform& objectTransform, plTime effectLifeTime, plUInt8 uiNumVariationsX, plUInt8 uiNumVariationsY, plUInt8 uiNumFlipbookAnimsX, plUInt8 uiNumFlipbookAnimsY, float fNormalCurvature = 0, float fLightDirectionality = 0, float fSixWayAbsorption = 1.0f, float fNormalMapStrength = 0.0f);
 
     void SetTrailData(float fSnapshotFraction, plInt32 iNumUsedTrailPoints);
 

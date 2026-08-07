@@ -14,6 +14,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory_BoxPosition, 1, plR
   {
     PL_MEMBER_PROPERTY("PositionOffset", m_vPositionOffset),
     PL_MEMBER_PROPERTY("Size", m_vSize)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 0))),
+    PL_MEMBER_PROPERTY("OnSurface", m_bSpawnOnSurface),
     PL_MEMBER_PROPERTY("ScaleXParam", m_sScaleXParameter),
     PL_MEMBER_PROPERTY("ScaleYParam", m_sScaleYParameter),
     PL_MEMBER_PROPERTY("ScaleZParam", m_sScaleZParameter),
@@ -57,6 +58,7 @@ void plParticleInitializerFactory_BoxPosition::CopyInitializerProperties(plParti
 
   pInitializer->m_vPositionOffset = m_vPositionOffset;
   pInitializer->m_vSize = vSize;
+  pInitializer->m_bSpawnOnSurface = m_bSpawnOnSurface;
 }
 
 float plParticleInitializerFactory_BoxPosition::GetSpawnCountMultiplier(const plParticleEffectInstance* pEffect) const
@@ -81,7 +83,7 @@ float plParticleInitializerFactory_BoxPosition::GetSpawnCountMultiplier(const pl
 
 void plParticleInitializerFactory_BoxPosition::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 3;
+  const plUInt8 uiVersion = 4;
   inout_stream << uiVersion;
 
   inout_stream << m_vSize;
@@ -93,6 +95,9 @@ void plParticleInitializerFactory_BoxPosition::Save(plStreamWriter& inout_stream
   inout_stream << m_sScaleXParameter;
   inout_stream << m_sScaleYParameter;
   inout_stream << m_sScaleZParameter;
+
+  // version 4
+  inout_stream << m_bSpawnOnSurface;
 }
 
 void plParticleInitializerFactory_BoxPosition::Load(plStreamReader& inout_stream)
@@ -112,6 +117,11 @@ void plParticleInitializerFactory_BoxPosition::Load(plStreamReader& inout_stream
     inout_stream >> m_sScaleXParameter;
     inout_stream >> m_sScaleYParameter;
     inout_stream >> m_sScaleZParameter;
+  }
+
+  if (uiVersion >= 4)
+  {
+    inout_stream >> m_bSpawnOnSurface;
   }
 }
 
@@ -145,11 +155,38 @@ void plParticleInitializer_BoxPosition::InitializeElements(plUInt64 uiStartIndex
     float p0[4];
     p0[3] = 0;
 
+    // face areas for area-weighted surface sampling; a box that is flat in one axis
+    // degenerates to a plane / line, where only the non-zero faces have weight
+    const float fAreaXY = m_vSize.x * m_vSize.y; // +/- Z faces
+    const float fAreaXZ = m_vSize.x * m_vSize.z; // +/- Y faces
+    const float fAreaYZ = m_vSize.y * m_vSize.z; // +/- X faces
+    const float fTotalArea = fAreaXY + fAreaXZ + fAreaYZ;
+
+    const bool bOnSurface = m_bSpawnOnSurface && fTotalArea > 0.0f;
+
     for (plUInt64 i = uiStartIndex; i < uiStartIndex + uiNumElements; ++i)
     {
-      p0[0] = (float)(rng.DoubleMinMax(-m_vSize.x, m_vSize.x) * 0.5) + m_vPositionOffset.x;
-      p0[1] = (float)(rng.DoubleMinMax(-m_vSize.y, m_vSize.y) * 0.5) + m_vPositionOffset.y;
-      p0[2] = (float)(rng.DoubleMinMax(-m_vSize.z, m_vSize.z) * 0.5) + m_vPositionOffset.z;
+      p0[0] = (float)(rng.DoubleMinMax(-m_vSize.x, m_vSize.x) * 0.5);
+      p0[1] = (float)(rng.DoubleMinMax(-m_vSize.y, m_vSize.y) * 0.5);
+      p0[2] = (float)(rng.DoubleMinMax(-m_vSize.z, m_vSize.z) * 0.5);
+
+      if (bOnSurface)
+      {
+        // pick the axis to clamp by face area, then a random side
+        const float fPick = (float)rng.DoubleZeroToOneExclusive() * fTotalArea;
+        const float fSign = rng.Bool() ? 0.5f : -0.5f;
+
+        if (fPick < fAreaXY)
+          p0[2] = m_vSize.z * fSign;
+        else if (fPick < fAreaXY + fAreaXZ)
+          p0[1] = m_vSize.y * fSign;
+        else
+          p0[0] = m_vSize.x * fSign;
+      }
+
+      p0[0] += m_vPositionOffset.x;
+      p0[1] += m_vPositionOffset.y;
+      p0[2] += m_vPositionOffset.z;
 
       pos.Load<4>(p0);
 

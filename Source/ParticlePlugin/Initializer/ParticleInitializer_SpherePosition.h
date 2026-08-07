@@ -22,6 +22,7 @@ public:
 public:
   plVec3 m_vPositionOffset;
   float m_fRadius;
+  float m_fShellThickness = 0.0f; // > 0 with OnSurface: spawn inside [Radius - Thickness, Radius]
   bool m_bSpawnOnSurface;
   bool m_bSetVelocity;
   plVarianceTypeFloat m_Speed;
@@ -36,6 +37,7 @@ class PL_PARTICLEPLUGIN_DLL plParticleInitializer_SpherePosition final : public 
 public:
   plVec3 m_vPositionOffset;
   float m_fRadius;
+  float m_fShellThickness = 0.0f;
   bool m_bSpawnOnSurface;
   bool m_bSetVelocity;
   plVarianceTypeFloat m_Speed;

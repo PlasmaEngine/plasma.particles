@@ -18,6 +18,7 @@ public:
   virtual void Load(plStreamReader& inout_stream) override;
 
   plVarianceTypeFloat m_Size;
+  plVarianceTypeFloat m_Aspect; // width/height ratio; != 1 stretches quads along their local X
   plCurve1DResourceHandle m_hCurve;
 };
 
@@ -28,6 +29,7 @@ class PL_PARTICLEPLUGIN_DLL plParticleInitializer_RandomSize final : public plPa
 
 public:
   plVarianceTypeFloat m_Size;
+  plVarianceTypeFloat m_Aspect;
   plCurve1DResourceHandle m_hCurve;
 
   virtual void CreateRequiredStreams() override;
@@ -36,4 +38,5 @@ protected:
   virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
 
   plProcessingStream* m_pStreamSize;
+  plProcessingStream* m_pStreamSize2 = nullptr;
 };

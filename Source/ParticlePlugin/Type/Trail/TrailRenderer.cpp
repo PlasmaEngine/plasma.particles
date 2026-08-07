@@ -22,7 +22,8 @@ bool plParticleTrailRenderData::CanBatch(const plRenderData& other0) const
 {
   const auto& other = plStaticCast<const plParticleTrailRenderData&>(other0);
 
-  return m_RenderMode == other.m_RenderMode && m_hTexture == other.m_hTexture && m_uiMaxTrailPoints == other.m_uiMaxTrailPoints && m_hCustomMaterial == other.m_hCustomMaterial && m_hDistortionTexture == other.m_hDistortionTexture;
+  // the trail length is a per-drawcall constant, not a shader permutation, so it doesn't split batches
+  return m_RenderMode == other.m_RenderMode && m_hTexture == other.m_hTexture && m_hCustomMaterial == other.m_hCustomMaterial && m_hDistortionTexture == other.m_hDistortionTexture;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -32,13 +33,9 @@ plParticleTrailRenderer::plParticleTrailRenderer()
   CreateParticleDataBuffer(m_BaseDataBuffer, sizeof(plBaseParticleShaderData), s_uiParticlesPerBatch);
   CreateParticleDataBuffer(m_TrailDataBuffer, sizeof(plTrailParticleShaderData), s_uiParticlesPerBatch);
 
-  // this is kinda stupid, apparently due to stride enforcement I cannot reuse the same buffer for different sizes
-  // and instead have to create one buffer with every size ...
-
-  CreateParticleDataBuffer(m_TrailPointsDataBuffer8, sizeof(plTrailParticlePointsData8), s_uiParticlesPerBatch);
-  CreateParticleDataBuffer(m_TrailPointsDataBuffer16, sizeof(plTrailParticlePointsData16), s_uiParticlesPerBatch);
-  CreateParticleDataBuffer(m_TrailPointsDataBuffer32, sizeof(plTrailParticlePointsData32), s_uiParticlesPerBatch);
-  CreateParticleDataBuffer(m_TrailPointsDataBuffer64, sizeof(plTrailParticlePointsData64), s_uiParticlesPerBatch);
+  // one flat float4 buffer; each particle owns MaxTrailPoints consecutive entries, the actual
+  // per-drawcall stride (NumUsedTrailPoints) is a shader constant, not a permutation
+  CreateParticleDataBuffer(m_TrailPointsDataBuffer, sizeof(plVec4), s_uiParticlesPerBatch * s_uiMaxTrailPoints);
 
   m_hShader = plResourceManager::LoadResource<plShaderResource>("Shaders/Particles/DefaultTrailParticle.plShader");
 }
@@ -47,10 +44,7 @@ plParticleTrailRenderer::~plParticleTrailRenderer()
 {
   DestroyParticleDataBuffer(m_BaseDataBuffer);
   DestroyParticleDataBuffer(m_TrailDataBuffer);
-  DestroyParticleDataBuffer(m_TrailPointsDataBuffer8);
-  DestroyParticleDataBuffer(m_TrailPointsDataBuffer16);
-  DestroyParticleDataBuffer(m_TrailPointsDataBuffer32);
-  DestroyParticleDataBuffer(m_TrailPointsDataBuffer64);
+  DestroyParticleDataBuffer(m_TrailPointsDataBuffer);
 }
 
 void plParticleTrailRenderer::GetSupportedRenderDataTypes(plHybridArray<const plRTTI*, 8>& ref_types) const
@@ -95,11 +89,10 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
     }
 
 
-    if (!ConfigureShader(pRenderData, renderViewContext))
-      continue;
+    ConfigureShader(pRenderData, renderViewContext);
 
-    const plUInt32 uiBucketSize = plParticleTypeTrail::ComputeTrailPointBucketSize(pRenderData->m_uiMaxTrailPoints);
-    const plUInt32 uiMaxTrailSegments = uiBucketSize - 1;
+    const plUInt32 uiNumTrailPoints = plMath::Min<plUInt32>(pRenderData->m_uiMaxTrailPoints, s_uiMaxTrailPoints);
+    const plUInt32 uiMaxTrailSegments = uiNumTrailPoints - 1;
     const plUInt32 uiPrimFactor = 2;
     const plUInt32 uiMaxPrimitivesToRender = s_uiParticlesPerBatch * uiMaxTrailSegments * uiPrimFactor;
 
@@ -115,7 +108,19 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
     bindGroupMaterial.BindTexture("ParticleTexture", pRenderData->m_hTexture);
 
     systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, pRenderData->m_uiNumVariationsX, pRenderData->m_uiNumVariationsY, pRenderData->m_uiNumFlipbookAnimationsX, pRenderData->m_uiNumFlipbookAnimationsY, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality);
-    systemConstants.SetTrailData(pRenderData->m_fSnapshotFraction, pRenderData->m_uiMaxTrailPoints);
+    systemConstants.SetTrailData(pRenderData->m_fSnapshotFraction, uiNumTrailPoints);
+
+    // GPU-simulated: the data is already in device buffers and only the GPU knows the count
+    if (!pRenderData->m_hGpuDrawArgsBuffer.IsInvalidated())
+    {
+      plBindGroupBuilder& bindGroupDraw = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
+      bindGroupDraw.BindBuffer("particleBaseData", pRenderData->m_hGpuBaseDataBuffer);
+      bindGroupDraw.BindBuffer("particleTrailData", pRenderData->m_hGpuTrailDataBuffer);
+      bindGroupDraw.BindBuffer("particlePointsData", pRenderData->m_hGpuTrailPointsBuffer);
+
+      pRenderContext->DrawMeshBufferIndirect(pRenderData->m_hGpuDrawArgsBuffer, 0).IgnoreResult();
+      continue;
+    }
 
     plUInt32 uiNumParticles = pRenderData->m_BaseParticleData.GetCount();
     while (uiNumParticles > 0)
@@ -123,12 +128,12 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
       // Request and bind new buffers for this batch
       plGALBufferHandle hBaseDataBuffer = m_BaseDataBuffer.GetNewBuffer();
       plGALBufferHandle hTrailDataBuffer = m_TrailDataBuffer.GetNewBuffer();
-      plGALBufferHandle hActiveTrailPointsDataBuffer = m_pActiveTrailPointsDataBuffer->GetNewBuffer();
+      plGALBufferHandle hTrailPointsDataBuffer = m_TrailPointsDataBuffer.GetNewBuffer();
 
       plBindGroupBuilder& bindGroupDraw = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
       bindGroupDraw.BindBuffer("particleBaseData", hBaseDataBuffer);
       bindGroupDraw.BindBuffer("particleTrailData", hTrailDataBuffer);
-      bindGroupDraw.BindBuffer("particlePointsData", hActiveTrailPointsDataBuffer);
+      bindGroupDraw.BindBuffer("particlePointsData", hTrailPointsDataBuffer);
 
       // upload this batch of particle data
       const plUInt32 uiNumParticlesInBatch = plMath::Min<plUInt32>(uiNumParticles, s_uiParticlesPerBatch);
@@ -140,8 +145,8 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
       pGALCommandEncoder->UpdateBuffer(hTrailDataBuffer, 0, plMakeArrayPtr(pParticleTrailData, uiNumParticlesInBatch).ToByteArray(), plGALUpdateMode::AheadOfTime);
       pParticleTrailData += uiNumParticlesInBatch;
 
-      pGALCommandEncoder->UpdateBuffer(hActiveTrailPointsDataBuffer, 0, plMakeArrayPtr(pParticlePointsData, uiNumParticlesInBatch * uiBucketSize).ToByteArray(), plGALUpdateMode::AheadOfTime);
-      pParticlePointsData += uiNumParticlesInBatch * uiBucketSize;
+      pGALCommandEncoder->UpdateBuffer(hTrailPointsDataBuffer, 0, plMakeArrayPtr(pParticlePointsData, uiNumParticlesInBatch * uiNumTrailPoints).ToByteArray(), plGALUpdateMode::AheadOfTime);
+      pParticlePointsData += uiNumParticlesInBatch * uiNumTrailPoints;
 
       // do one drawcall
       pRenderContext->DrawMeshBuffer(uiNumParticlesInBatch * uiMaxTrailSegments * uiPrimFactor).IgnoreResult();
@@ -149,7 +154,7 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
   }
 }
 
-bool plParticleTrailRenderer::ConfigureShader(const plParticleTrailRenderData* pRenderData, const plRenderViewContext& renderViewContext) const
+void plParticleTrailRenderer::ConfigureShader(const plParticleTrailRenderData* pRenderData, const plRenderViewContext& renderViewContext) const
 {
   auto pRenderContext = renderViewContext.m_pRenderContext;
 
@@ -183,31 +188,6 @@ bool plParticleTrailRenderer::ConfigureShader(const plParticleTrailRenderData* p
       pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");
       break;
   }
-
-  switch (plParticleTypeTrail::ComputeTrailPointBucketSize(pRenderData->m_uiMaxTrailPoints))
-  {
-    case 8:
-      renderViewContext.m_pRenderContext->SetShaderPermutationVariable("PARTICLE_TRAIL_POINTS", "PARTICLE_TRAIL_POINTS_COUNT8");
-      m_pActiveTrailPointsDataBuffer = &m_TrailPointsDataBuffer8;
-      break;
-    case 16:
-      renderViewContext.m_pRenderContext->SetShaderPermutationVariable("PARTICLE_TRAIL_POINTS", "PARTICLE_TRAIL_POINTS_COUNT16");
-      m_pActiveTrailPointsDataBuffer = &m_TrailPointsDataBuffer16;
-      break;
-    case 32:
-      renderViewContext.m_pRenderContext->SetShaderPermutationVariable("PARTICLE_TRAIL_POINTS", "PARTICLE_TRAIL_POINTS_COUNT32");
-      m_pActiveTrailPointsDataBuffer = &m_TrailPointsDataBuffer32;
-      break;
-    case 64:
-      renderViewContext.m_pRenderContext->SetShaderPermutationVariable("PARTICLE_TRAIL_POINTS", "PARTICLE_TRAIL_POINTS_COUNT64");
-      m_pActiveTrailPointsDataBuffer = &m_TrailPointsDataBuffer64;
-      break;
-
-    default:
-      return false;
-  }
-
-  return true;
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_Type_Trail_TrailRenderer);

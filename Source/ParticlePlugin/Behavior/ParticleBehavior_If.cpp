@@ -85,14 +85,14 @@ void plParticleBehaviorFactory_If::Load(plStreamReader& inout_stream)
 void plParticleBehavior_If::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
-  CreateStream("Velocity", plProcessingStream::DataType::Half4, &m_pStreamVelocity, false);
+  CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
 }
 
 void plParticleBehavior_If::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
 }
 
 void plParticleBehavior_If::Process(plUInt64 uiNumElements)

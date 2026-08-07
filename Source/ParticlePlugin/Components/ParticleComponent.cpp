@@ -6,6 +6,7 @@
 #include <Core/World/WorldModule.h>
 #include <Core/WorldSerializer/WorldReader.h>
 #include <Core/WorldSerializer/WorldWriter.h>
+#include <GameEngine/Animation/Skeletal/AnimatedMeshComponent.h>
 #include <ParticlePlugin/Components/ParticleComponent.h>
 #include <ParticlePlugin/Components/ParticleFinisherComponent.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
@@ -61,7 +62,7 @@ void plParticleComponentManager::UpdatePfxTransformsAndBounds()
 //////////////////////////////////////////////////////////////////////////
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plParticleComponent, 5, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plParticleComponent, 6, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -74,6 +75,7 @@ PL_BEGIN_COMPONENT_TYPE(plParticleComponent, 5, plComponentMode::Static)
     PL_ENUM_MEMBER_PROPERTY("SpawnDirection", plBasisAxis, m_SpawnDirection)->AddAttributes(new plDefaultValueAttribute((plInt32)plBasisAxis::PositiveZ)),
     PL_MEMBER_PROPERTY("IgnoreOwnerRotation", m_bIgnoreOwnerRotation),
     PL_MEMBER_PROPERTY("SharedInstanceName", m_sSharedInstanceName),
+    PL_ACCESSOR_PROPERTY("SkinnedMeshObject", DummyGetter, SetSkinnedMeshObject)->AddAttributes(new plGameObjectReferenceAttribute()),
     PL_MAP_ACCESSOR_PROPERTY("Parameters", GetParameters, GetParameter, SetParameter, RemoveParameter)->AddAttributes(new plExposedParametersAttribute("Effect"), new plExposeColorAlphaAttribute),
   }
   PL_END_PROPERTIES;
@@ -155,6 +157,9 @@ void plParticleComponent::SerializeComponent(plWorldWriter& inout_stream) const
   // version 5
   s << m_SpawnDirection;
 
+  // version 6
+  inout_stream.WriteGameObjectHandle(m_hSkinnedMeshObject);
+
   /// \todo store effect state
 }
 
@@ -219,6 +224,57 @@ void plParticleComponent::DeserializeComponent(plWorldReader& inout_stream)
   {
     s >> m_SpawnDirection;
   }
+
+  if (uiVersion >= 6)
+  {
+    m_hSkinnedMeshObject = inout_stream.ReadGameObjectHandle();
+  }
+}
+
+void plParticleComponent::SetSkinnedMeshObject(const char* szReference)
+{
+  auto resolver = GetWorld()->GetGameObjectReferenceResolver();
+
+  if (!resolver.IsValid())
+    return;
+
+  m_hSkinnedMeshObject = resolver(szReference, GetHandle(), "SkinnedMeshObject");
+
+  if (m_EffectController.IsValid())
+  {
+    ResolveSkinnedMeshComponent();
+  }
+}
+
+void plParticleComponent::ResolveSkinnedMeshComponent()
+{
+  plComponentHandle hAnimMesh;
+
+  // explicit reference first, otherwise the owner hierarchy upwards
+  plGameObject* pSearchObject = nullptr;
+  if (!m_hSkinnedMeshObject.IsInvalidated())
+  {
+    GetWorld()->TryGetObject(m_hSkinnedMeshObject, pSearchObject);
+  }
+  else
+  {
+    pSearchObject = GetOwner();
+  }
+
+  while (pSearchObject != nullptr)
+  {
+    plAnimatedMeshComponent* pAnimMesh = nullptr;
+    if (pSearchObject->TryGetComponentOfBaseType(pAnimMesh))
+    {
+      hAnimMesh = pAnimMesh->GetHandle();
+      break;
+    }
+
+    // only walk up the hierarchy when searching implicitly from the owner
+    pSearchObject = m_hSkinnedMeshObject.IsInvalidated() ? pSearchObject->GetParent() : nullptr;
+  }
+
+  m_EffectController.SetSkinnedMeshComponent(hAnimMesh);
 }
 
 bool plParticleComponent::StartEffect()
@@ -231,6 +287,8 @@ bool plParticleComponent::StartEffect()
     plParticleWorldModule* pModule = GetWorld()->GetOrCreateModule<plParticleWorldModule>();
 
     m_EffectController.Create(m_hEffectResource, pModule, m_uiRandomSeed, m_sSharedInstanceName, this, m_FloatParams, m_ColorParams);
+    m_EffectController.SetOwnerTags(GetOwner()->GetTags());
+    ResolveSkinnedMeshComponent();
 
     UpdatePfxTransformAndBounds();
 

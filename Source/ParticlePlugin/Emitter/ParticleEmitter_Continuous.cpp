@@ -199,8 +199,7 @@ plUInt32 plParticleEmitter_Continuous::ComputeSpawnCount(const plTime& tDiff)
     }
   }
 
-  const float spawnCountScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSpawnCountScaleParameter, 1.0f), 0.0f);
-  fSpawnFactor *= spawnCountScale;
+  fSpawnFactor *= GetSpawnCountScale(m_sSpawnCountScaleParameter);
 
   m_fCurSpawnCounter += fSpawnFactor * m_fCurSpawnPerSec * (float)tDiff.GetSeconds();
 

@@ -24,27 +24,20 @@ public:
   // GPU buffer handles
   plGALBufferHandle m_hParticleBuffer;
   plGALBufferHandle m_hCounterBuffer;
+  plGALBufferHandle m_hAliveListBuffer;
+  plGALBufferHandle m_hDrawArgsBuffer;
 
-  // Emission data
+  // Emission data (kept alive for the compute pass via the frame allocator)
   plArrayPtr<plGPUParticle> m_NewParticles;
-  plUInt32 m_uiEmitStartIndex = 0;
 
-  // Simulation parameters
-  float m_fGravity = 9.81f;
-  float m_fDragCoefficient = 0.0f;
-  float m_fWindStrength = 0.0f;
   bool m_bEnableDepthCollision = false;
   bool m_bEnableSDFCollision = false;
   plUInt8 m_uiCollisionReaction = 0;
-  float m_fCollisionBounceFactor = 0.5f;
-  float m_fCollisionSlideFactor = 0.5f;
-  float m_fCollisionThickness = 0.5f;
-  plColor m_ColorStart = plColor::White;
-  plColor m_ColorEnd = plColor(1, 1, 1, 0);
 
   // Multi-type rendering
   plUInt8 m_uiGPURenderType = 0;
   plUInt32 m_uiMaxTrailPoints = 16;
+  plUInt32 m_uiTrailWriteIndex = 0;
   plGALBufferHandle m_hTrailPositionBuffer;
   float m_fVelocityStretch = 1.0f;
 };
@@ -63,4 +56,8 @@ public:
 
 protected:
   void ConfigureRenderMode(const plGPUParticleRenderData* pRenderData, plRenderContext* pRenderContext) const;
+
+  // the render VS reads GPUPartVelocityStretch / trail fields; the renderer must bind its own
+  // constants rather than relying on whatever the compute pass left bound (stale-value bug)
+  plConstantBufferStorageHandle m_hGPUConstantBuffer;
 };

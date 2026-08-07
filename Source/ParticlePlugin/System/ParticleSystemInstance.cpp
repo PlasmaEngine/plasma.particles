@@ -14,6 +14,8 @@
 #include <ParticlePlugin/Streams/ParticleStream.h>
 #include <ParticlePlugin/System/ParticleSystemDescriptor.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
+#include <ParticlePlugin/Type/GPU/ParticleGPULowering.h>
+#include <ParticlePlugin/Type/GPU/ParticleTypeGPU.h>
 #include <ParticlePlugin/Type/ParticleType.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
@@ -122,6 +124,39 @@ void plParticleSystemInstance::ConfigureFromTemplate(const plParticleSystemDescr
     info.m_bInUse = false;
   }
 
+  // decide whether the per-frame simulation is lowered onto the GPU
+  {
+    bool bLower = false;
+
+    if (pTemplate->m_SimulationTarget != plParticleSimulationTarget::CPU)
+    {
+      // a system already authored with the GPU type needs no lowering
+      bool bAlreadyGPU = false;
+      for (const auto* pTypeFactory : pTemplate->GetTypeFactories())
+      {
+        bAlreadyGPU |= pTypeFactory->GetTypeType() == plGetStaticRTTI<plParticleTypeGPU>();
+      }
+
+      if (!bAlreadyGPU)
+      {
+        const plStringView sBlocker = plParticleGPULowering::FindLoweringBlocker(pTemplate);
+
+        if (sBlocker.IsEmpty())
+        {
+          bLower = true;
+        }
+        else if (pTemplate->m_SimulationTarget == plParticleSimulationTarget::GPU)
+        {
+          plLog::Warning("Particle system cannot run on the GPU ({0}) - simulating on the CPU instead.", sBlocker);
+        }
+      }
+    }
+
+    m_bLoweredToGPU = bLower;
+  }
+
+  // when lowered, the instance module lists never mirror the factory lists, so the
+  // equality checks below correctly fail and the processors are fully recreated
   const bool allProcessorsEqual = IsEmitterConfigEqual(pTemplate) && IsInitializerConfigEqual(pTemplate) && IsBehaviorConfigEqual(pTemplate) && IsTypeConfigEqual(pTemplate) && IsFinalizerConfigEqual(pTemplate);
 
   if (!allProcessorsEqual)
@@ -213,11 +248,15 @@ void plParticleSystemInstance::CreateStreamProcessors(const plParticleSystemDesc
   {
     m_Behaviors.Clear();
 
-    for (const auto pFactory : pTemplate->GetBehaviorFactories())
+    // when lowered to the GPU, the behaviors run inside the GPU simulate shader instead
+    if (!m_bLoweredToGPU)
     {
-      plParticleBehavior* pBehavior = pFactory->CreateBehavior(this);
-      m_StreamGroup.AddProcessor(pBehavior);
-      m_Behaviors.PushBack(pBehavior);
+      for (const auto pFactory : pTemplate->GetBehaviorFactories())
+      {
+        plParticleBehavior* pBehavior = pFactory->CreateBehavior(this);
+        m_StreamGroup.AddProcessor(pBehavior);
+        m_Behaviors.PushBack(pBehavior);
+      }
     }
   }
 
@@ -237,11 +276,25 @@ void plParticleSystemInstance::CreateStreamProcessors(const plParticleSystemDesc
   {
     m_Types.Clear();
 
-    for (const auto pFactory : pTemplate->GetTypeFactories())
+    if (m_bLoweredToGPU)
     {
-      plParticleType* pType = pFactory->CreateType(this);
+      // replace the authored render type with a GPU type configured from the behavior modules
+      plParticleTypeGPU* pType = plGetStaticRTTI<plParticleTypeGPU>()->GetAllocator()->Allocate<plParticleTypeGPU>();
+      pType->Reset(this);
+      plParticleGPULowering::ConfigureLoweredType(pType, pTemplate, this);
+      pType->CreateRequiredStreams();
+
       m_StreamGroup.AddProcessor(pType);
       m_Types.PushBack(pType);
+    }
+    else
+    {
+      for (const auto pFactory : pTemplate->GetTypeFactories())
+      {
+        plParticleType* pType = pFactory->CreateType(this);
+        m_StreamGroup.AddProcessor(pType);
+        m_Types.PushBack(pType);
+      }
     }
   }
 }
@@ -492,7 +545,15 @@ void plParticleSystemInstance::CreateStream(const char* szName, plProcessingStre
   }
   else
   {
-    PL_ASSERT_DEV(pSubStream->GetDataType() == type, "Particle stream '{}' already exists with data type {} (!= {}).", szName, (int)pSubStream->GetDataType(), (int)type);
+    // A type mismatch between two creators of the same stream makes every consumer of the smaller type
+    // read/write out of bounds (each caller casts the data blindly). Surface it loudly in ALL builds,
+    // because in release this otherwise silently corrupts memory.
+    if (pSubStream->GetDataType() != type)
+    {
+      plLog::Error("Particle stream '{}' is requested with data type '{}' but already exists with data type '{}'. Fix the module that requests the wrong type - this would corrupt memory.",
+        szName, plProcessingStream::GetDataTypeName(type), plProcessingStream::GetDataTypeName(pSubStream->GetDataType()));
+      PL_ASSERT_DEV(false, "Particle stream '{}' type mismatch (see error log)", szName);
+    }
 
     for (auto& info : m_StreamInfo)
     {

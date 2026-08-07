@@ -22,9 +22,14 @@ bool plGPUParticleRenderData::CanBatch(const plRenderData& other0) const
 plGPUParticleRenderer::plGPUParticleRenderer()
 {
   m_hShader = plResourceManager::LoadResource<plShaderResource>("Shaders/Particles/GPUParticleRender.plShader");
+
+  m_hGPUConstantBuffer = plRenderContext::CreateConstantBufferStorage<plGPUParticleConstants>();
 }
 
-plGPUParticleRenderer::~plGPUParticleRenderer() = default;
+plGPUParticleRenderer::~plGPUParticleRenderer()
+{
+  plRenderContext::DeleteConstantBufferStorage(m_hGPUConstantBuffer);
+}
 
 void plGPUParticleRenderer::GetSupportedRenderDataTypes(plHybridArray<const plRTTI*, 8>& out_types) const
 {
@@ -87,8 +92,20 @@ void plGPUParticleRenderer::RenderBatch(const plRenderViewContext& renderViewCon
 
       pRenderContext->BindNullMeshBuffer(topology, uiPrimitiveCount);
 
+      // the render VS reads these from plGPUParticleConstants; bind our own storage with THIS
+      // system's values instead of inheriting whatever the compute pass last uploaded
+      {
+        auto* cb = plRenderContext::GetConstantBufferData<plGPUParticleConstants>(m_hGPUConstantBuffer);
+        cb->GPUPartMaxParticles = pRenderData->m_uiMaxParticles;
+        cb->GPUPartMaxTrailPoints = pRenderData->m_uiMaxTrailPoints;
+        cb->GPUPartTrailWriteIndex = pRenderData->m_uiTrailWriteIndex;
+        cb->GPUPartVelocityStretch = pRenderData->m_fVelocityStretch;
+      }
+
       plBindGroupBuilder& bindGroup = pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
+      bindGroup.BindBuffer("plGPUParticleConstants", m_hGPUConstantBuffer);
       bindGroup.BindBuffer("gpuParticlesRead", pRenderData->m_hParticleBuffer);
+      bindGroup.BindBuffer("gpuAliveListRead", pRenderData->m_hAliveListBuffer);
       bindGroup.BindTexture("ParticleTexture", pRenderData->m_hTexture);
 
       if (pRenderData->m_uiGPURenderType == plGPUParticleRenderType::Trail && !pRenderData->m_hTrailPositionBuffer.IsInvalidated())
@@ -96,7 +113,16 @@ void plGPUParticleRenderer::RenderBatch(const plRenderViewContext& renderViewCon
         bindGroup.BindBuffer("gpuTrailPositionsRead", pRenderData->m_hTrailPositionBuffer);
       }
 
-      pRenderContext->DrawMeshBuffer(uiPrimitiveCount).IgnoreResult();
+      // indirect draw: the simulate dispatch wrote vertexCount = alive * vertsPerParticle, so
+      // exactly the alive set is drawn; falls back to the watermark draw without args
+      if (!pRenderData->m_hDrawArgsBuffer.IsInvalidated())
+      {
+        pRenderContext->DrawMeshBufferIndirect(pRenderData->m_hDrawArgsBuffer, 0).IgnoreResult();
+      }
+      else
+      {
+        pRenderContext->DrawMeshBuffer(uiPrimitiveCount).IgnoreResult();
+      }
     }
   }
 }

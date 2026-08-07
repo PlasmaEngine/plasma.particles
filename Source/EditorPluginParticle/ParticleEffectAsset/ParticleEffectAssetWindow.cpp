@@ -12,6 +12,7 @@
 #include <GuiFoundation/PropertyGrid/PropertyGridWidget.moc.h>
 #include <GuiFoundation/VisualGraph/View.moc.h>
 #include <QBoxLayout>
+#include <QLineEdit>
 #include <QSettings>
 #include <SharedPluginAssets/Common/Messages.h>
 #include <ToolsFoundation/Command/TreeCommands.h>
@@ -50,7 +51,7 @@ plQtParticleEffectAssetDocumentWindow::plQtParticleEffectAssetDocumentWindow(plA
 
   // 3D View (central widget)
   {
-    SetTargetFramerate(25);
+    SetTargetFramerate(pPreferences->GetMaxFramerate());
 
     m_ViewConfig.m_Camera.LookAt(plVec3(-1.6f, 0, 0), plVec3(0, 0, 0), plVec3(0, 0, 1));
     m_ViewConfig.ApplyPerspectiveSetting(90);
@@ -87,6 +88,12 @@ plQtParticleEffectAssetDocumentWindow::plQtParticleEffectAssetDocumentWindow(plA
 
     plQtPropertyGridWidget* pPropertyGrid = new plQtPropertyGridWidget(pPropertyPanel, pDocument);
 
+    QLineEdit* pPropertyFilter = new QLineEdit(pPropertyPanel);
+    pPropertyFilter->setPlaceholderText("Filter properties...");
+    pPropertyFilter->setClearButtonEnabled(true);
+    connect(pPropertyFilter, &QLineEdit::textChanged, this, [pPropertyGrid](const QString& sText)
+      { pPropertyGrid->SetFilterText(sText.toUtf8().data()); });
+
     QWidget* pWidget = new QWidget();
     pWidget->setObjectName("Group");
     pWidget->setLayout(new QVBoxLayout());
@@ -94,6 +101,7 @@ plQtParticleEffectAssetDocumentWindow::plQtParticleEffectAssetDocumentWindow(plA
 
     pWidget->layout()->setContentsMargins(0, 0, 0, 0);
     pWidget->layout()->addWidget(new plQtAssetStatusIndicator((plAssetDocument*)GetDocument()));
+    pWidget->layout()->addWidget(pPropertyFilter);
     pWidget->layout()->addWidget(pPropertyGrid);
 
     pPropertyPanel->setWidget(pWidget, ads::CDockWidget::ForceNoScrollArea);

@@ -179,6 +179,10 @@ void plParticleEffectNodeManager::GetCreateableTypes(plHybridArray<const plRTTI*
     if (pType->GetTypeFlags().IsAnySet(plTypeFlags::Abstract))
       continue;
 
+    // retired factories stay reflected so existing assets still load, but are not offered as nodes
+    if (pType->GetAttributeByType<plHiddenAttribute>() != nullptr)
+      continue;
+
     ref_types.PushBack(pType);
   }
 
@@ -196,15 +200,7 @@ plStatus plParticleEffectNodeManager::InternalCanConnect(const plVisualGraphPin&
     return plStatus("Pin categories do not match.");
   }
 
-  // Emitter is 1:1 (only one emitter per system)
-  if (srcPin.m_Category == plParticleGraphPinCategory::Emitter)
-  {
-    out_result = CanConnectResult::Connect1to1;
-  }
-  else
-  {
-    out_result = CanConnectResult::ConnectNtoN;
-  }
+  out_result = CanConnectResult::ConnectNtoN;
 
   return plStatus(PL_SUCCESS);
 }

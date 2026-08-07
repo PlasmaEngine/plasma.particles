@@ -14,16 +14,25 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleAttractorTarget, 1)
   PL_ENUM_CONSTANT(plParticleAttractorTarget::CustomPosition),
 PL_END_STATIC_REFLECTED_ENUM;
 
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleAttractorShape, 1)
+  PL_ENUM_CONSTANT(plParticleAttractorShape::Point),
+  PL_ENUM_CONSTANT(plParticleAttractorShape::Line),
+  PL_ENUM_CONSTANT(plParticleAttractorShape::Vortex),
+PL_END_STATIC_REFLECTED_ENUM;
+
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_AttractToPosition, 1, plRTTIDefaultAllocator<plParticleBehaviorFactory_AttractToPosition>)
 {
   PL_BEGIN_PROPERTIES
   {
     PL_ENUM_MEMBER_PROPERTY("Target", plParticleAttractorTarget, m_Target),
+    PL_ENUM_MEMBER_PROPERTY("Shape", plParticleAttractorShape, m_Shape),
     PL_MEMBER_PROPERTY("CustomPosition", m_vCustomPosition),
+    PL_MEMBER_PROPERTY("Axis", m_vAxis)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
     PL_MEMBER_PROPERTY("Force", m_fForce)->AddAttributes(new plDefaultValueAttribute(5.0f)),
     PL_MEMBER_PROPERTY("MaxDistance", m_fMaxDistance)->AddAttributes(new plDefaultValueAttribute(10.0f), new plClampValueAttribute(0.0f, {})),
     PL_MEMBER_PROPERTY("MinDistance", m_fMinDistance)->AddAttributes(new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.001f, {})),
     PL_MEMBER_PROPERTY("AffectVelocity", m_bAffectVelocity)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_MEMBER_PROPERTY("Repel", m_bRepel),
   }
   PL_END_PROPERTIES;
 }
@@ -45,11 +54,14 @@ void plParticleBehaviorFactory_AttractToPosition::CopyBehaviorProperties(plParti
   plParticleBehavior_AttractToPosition* pBehavior = static_cast<plParticleBehavior_AttractToPosition*>(pObject);
 
   pBehavior->m_Target = m_Target;
+  pBehavior->m_Shape = m_Shape;
   pBehavior->m_vCustomPosition = m_vCustomPosition;
+  pBehavior->m_vAxis = m_vAxis.GetLength() > 0.001f ? m_vAxis.GetNormalized() : plVec3(0, 0, 1);
   pBehavior->m_fForce = m_fForce;
   pBehavior->m_fMaxDistance = m_fMaxDistance;
   pBehavior->m_fMinDistance = m_fMinDistance;
   pBehavior->m_bAffectVelocity = m_bAffectVelocity;
+  pBehavior->m_bRepel = m_bRepel;
 }
 
 void plParticleBehaviorFactory_AttractToPosition::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -62,7 +74,7 @@ void plParticleBehaviorFactory_AttractToPosition::QueryFinalizerDependencies(plS
 
 void plParticleBehaviorFactory_AttractToPosition::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 1;
+  const plUInt8 uiVersion = 2;
   inout_stream << uiVersion;
 
   inout_stream << m_Target;
@@ -71,6 +83,11 @@ void plParticleBehaviorFactory_AttractToPosition::Save(plStreamWriter& inout_str
   inout_stream << m_fMaxDistance;
   inout_stream << m_fMinDistance;
   inout_stream << m_bAffectVelocity;
+
+  // version 2
+  inout_stream << m_Shape;
+  inout_stream << m_vAxis;
+  inout_stream << m_bRepel;
 }
 
 void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_stream)
@@ -78,7 +95,7 @@ void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_str
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
 
-  PL_ASSERT_DEV(uiVersion <= 1, "Invalid version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion <= 2, "Invalid version {0}", uiVersion);
 
   inout_stream >> m_Target;
   inout_stream >> m_vCustomPosition;
@@ -86,12 +103,19 @@ void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_str
   inout_stream >> m_fMaxDistance;
   inout_stream >> m_fMinDistance;
   inout_stream >> m_bAffectVelocity;
+
+  if (uiVersion >= 2)
+  {
+    inout_stream >> m_Shape;
+    inout_stream >> m_vAxis;
+    inout_stream >> m_bRepel;
+  }
 }
 
 void plParticleBehavior_AttractToPosition::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
-  CreateStream("Velocity", plProcessingStream::DataType::Half4, &m_pStreamVelocity, false);
+  CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
 }
 
 void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
@@ -102,11 +126,14 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
   if (tDiff <= 0.0f)
     return;
 
-  // Determine attractor world position
+  // Determine attractor world position and axis
   plVec3 vTarget;
+  plVec3 vAxis = m_vAxis;
+
   if (m_Target == plParticleAttractorTarget::EffectOrigin)
   {
     vTarget = GetOwnerEffect()->GetTransform().m_vPosition;
+    vAxis = GetOwnerEffect()->GetTransform().m_qRotation * m_vAxis;
   }
   else
   {
@@ -115,72 +142,65 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
 
   const float fMaxDistSqr = m_fMaxDistance * m_fMaxDistance;
   const float fMinDistSqr = m_fMinDistance * m_fMinDistance;
+  const float fForce = m_bRepel ? -m_fForce : m_fForce;
+
+  // vector from the particle to the closest point of the attractor geometry
+  auto GetToTarget = [&](const plVec3& pos) -> plVec3
+  {
+    if (m_Shape == plParticleAttractorShape::Point)
+      return vTarget - pos;
+
+    // Line / Vortex: closest point on the line through vTarget along vAxis
+    const plVec3 toPos = pos - vTarget;
+    return (vTarget + vAxis * toPos.Dot(vAxis)) - pos;
+  };
 
   plProcessingStreamIterator<plSimdVec4f> itPosition(m_pStreamPosition, uiNumElements, 0);
-  plProcessingStreamIterator<plFloat16Vec4> itVelocity(m_pStreamVelocity, uiNumElements, 0);
+  plProcessingStreamIterator<plVec3> itVelocity(m_pStreamVelocity, uiNumElements, 0);
 
-  if (m_bAffectVelocity)
+  while (!itPosition.HasReachedEnd())
   {
-    while (!itPosition.HasReachedEnd())
+    const plSimdVec4f simPos = itPosition.Current();
+    const plVec3 pos(simPos.GetComponent<0>(), simPos.GetComponent<1>(), simPos.GetComponent<2>());
+
+    const plVec3 toTarget = GetToTarget(pos);
+    const float distSqr = toTarget.GetLengthSquared();
+
+    if (distSqr < fMaxDistSqr && distSqr > fMinDistSqr)
     {
-      const plSimdVec4f simPos = itPosition.Current();
-      const plVec3 pos(simPos.GetComponent<0>(), simPos.GetComponent<1>(), simPos.GetComponent<2>());
+      const float dist = plMath::Sqrt(distSqr);
+      const plVec3 dirToTarget = toTarget / dist;
 
-      const plVec3 toTarget = vTarget - pos;
-      const float distSqr = toTarget.GetLengthSquared();
+      // Linear falloff: full force at minDist, zero at maxDist
+      const float falloff = 1.0f - (dist - m_fMinDistance) / (m_fMaxDistance - m_fMinDistance);
+      const float amount = fForce * falloff * tDiff;
 
-      if (distSqr < fMaxDistSqr && distSqr > fMinDistSqr)
+      plVec3 vDir = dirToTarget;
+
+      if (m_Shape == plParticleAttractorShape::Vortex)
       {
-        const float dist = plMath::Sqrt(distSqr);
-        const plVec3 dirToTarget = toTarget / dist;
-
-        // Linear falloff: full force at minDist, zero at maxDist
-        const float falloff = 1.0f - (dist - m_fMinDistance) / (m_fMaxDistance - m_fMinDistance);
-        const float acceleration = m_fForce * falloff * tDiff;
-
-        // Decompose velocity: (dirX, dirY, dirZ, speed)
-        const plVec4 vel = itVelocity.Current();
-        const plVec3 dir(vel.x, vel.y, vel.z);
-        const float speed = vel.w;
-
-        const plVec3 newVel = dir * speed + dirToTarget * acceleration;
-        const float newSpeed = newVel.GetLength();
-        const plVec3 newDir = newSpeed > 0.0f ? newVel / newSpeed : plVec3(0, 0, 1);
-
-        itVelocity.Current() = plVec4(newDir.x, newDir.y, newDir.z, newSpeed);
+        // swirl around the axis; repel spins the other way
+        vDir = vAxis.CrossRH(-dirToTarget);
+        vDir.NormalizeIfNotZero(dirToTarget).IgnoreResult();
       }
 
-      itPosition.Advance();
-      itVelocity.Advance();
-    }
-  }
-  else
-  {
-    // Direct position mode
-    while (!itPosition.HasReachedEnd())
-    {
-      const plSimdVec4f simPos = itPosition.Current();
-      const plVec3 pos(simPos.GetComponent<0>(), simPos.GetComponent<1>(), simPos.GetComponent<2>());
-
-      const plVec3 toTarget = vTarget - pos;
-      const float distSqr = toTarget.GetLengthSquared();
-
-      if (distSqr < fMaxDistSqr && distSqr > fMinDistSqr)
+      if (m_bAffectVelocity)
       {
-        const float dist = plMath::Sqrt(distSqr);
-        const plVec3 dirToTarget = toTarget / dist;
-
-        const float falloff = 1.0f - (dist - m_fMinDistance) / (m_fMaxDistance - m_fMinDistance);
-        const float moveAmount = m_fForce * falloff * tDiff;
-
-        const plVec3 newPos = pos + dirToTarget * plMath::Min(moveAmount, dist - m_fMinDistance);
-
-        itPosition.Current() = plSimdConversion::ToVec3(newPos);
+        itVelocity.Current() += vDir * amount;
       }
-
-      itPosition.Advance();
-      itVelocity.Advance();
+      else if (m_Shape == plParticleAttractorShape::Vortex)
+      {
+        itPosition.Current() = plSimdConversion::ToVec3(pos + vDir * amount);
+      }
+      else
+      {
+        // don't overshoot past the min distance when snapping positions
+        itPosition.Current() = plSimdConversion::ToVec3(pos + vDir * plMath::Min(amount, dist - m_fMinDistance));
+      }
     }
+
+    itPosition.Advance();
+    itVelocity.Advance();
   }
 }
 

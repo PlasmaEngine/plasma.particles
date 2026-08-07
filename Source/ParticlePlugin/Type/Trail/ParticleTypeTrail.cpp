@@ -84,10 +84,8 @@ void plParticleTypeTrailFactory::CopyTypeProperties(plParticleType* pObject, boo
     pType->m_LastSnapshot = pType->GetOwnerEffect()->GetTotalEffectLifeTime();
   }
 
-  // m_uiMaxPoints = plMath::Min<plUInt16>(8, m_uiMaxPoints);
-
-  // clamp the number of points to the maximum possible count
-  pType->m_uiMaxPoints = plMath::Min<plUInt16>(pType->m_uiMaxPoints, pType->ComputeTrailPointBucketSize(pType->m_uiMaxPoints));
+  // clamp to the CPU-side ring buffer capacity
+  pType->m_uiMaxPoints = plMath::Min<plUInt16>(pType->m_uiMaxPoints, 64);
 
   pType->m_uiCurFirstIndex = 1;
 }
@@ -247,13 +245,12 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
     const plFloat16Vec2* pLifeTime = m_pStreamLifeTime->GetData<plFloat16Vec2>();
     const plUInt32* pVariation = m_pStreamVariation ? m_pStreamVariation->GetData<plUInt32>() : nullptr;
 
-    const plUInt32 uiBucketSize = ComputeTrailPointBucketSize(m_uiMaxPoints);
-
     // this will automatically be deallocated at the end of the frame
+    // the point data is tightly packed: m_uiMaxPoints entries per particle (the GPU stride)
     m_BaseParticleData =
       PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plBaseParticleShaderData, (plUInt32)GetOwnerSystem()->GetNumActiveParticles());
     m_TrailPointsShared =
-      PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plVec4, (plUInt32)GetOwnerSystem()->GetNumActiveParticles() * uiBucketSize);
+      PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plVec4, (plUInt32)GetOwnerSystem()->GetNumActiveParticles() * m_uiMaxPoints);
     m_TrailParticleData =
       PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plTrailParticleShaderData, (plUInt32)GetOwnerSystem()->GetNumActiveParticles());
 
@@ -271,7 +268,7 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
     {
       const plVec4* pTrailPositions = GetTrailPointsPositions(pTrailData[p].m_uiIndexForTrailPoints);
 
-      plVec4* pRenderPositions = &m_TrailPointsShared[p * uiBucketSize];
+      plVec4* pRenderPositions = &m_TrailPointsShared[p * m_uiMaxPoints];
 
       /// \todo This loop could be done without a condition
       for (plUInt32 i = 0; i < m_uiMaxPoints; ++i)
@@ -477,26 +474,6 @@ const plVec4* plParticleTypeTrail::GetTrailPointsPositions(plUInt32 index) const
   //}
 }
 
-
-plUInt16 plParticleTypeTrail::ComputeTrailPointBucketSize(plUInt16 uiMaxTrailPoints)
-{
-  if (uiMaxTrailPoints > 32)
-  {
-    return 64;
-  }
-  else if (uiMaxTrailPoints > 16)
-  {
-    return 32;
-  }
-  else if (uiMaxTrailPoints > 8)
-  {
-    return 16;
-  }
-  else
-  {
-    return 8;
-  }
-}
 
 void plParticleTypeTrail::OnParticleDeath(const plStreamGroupElementRemovedEvent& e)
 {

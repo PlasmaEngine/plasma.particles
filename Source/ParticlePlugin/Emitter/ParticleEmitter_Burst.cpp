@@ -99,10 +99,7 @@ void plParticleEmitterFactory_Burst::Load(plStreamReader& inout_stream)
 
 void plParticleEmitter_Burst::OnFinalize()
 {
-  float fSpawnFactor = 1.0f;
-
-  const float spawnCountScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSpawnCountScaleParameter, 1.0f), 0.0f);
-  fSpawnFactor *= spawnCountScale;
+  const float fSpawnFactor = GetSpawnCountScale(m_sSpawnCountScaleParameter);
 
   plRandom& rng = GetRNG();
 

@@ -123,6 +123,11 @@ public:
   /// \brief The local direction into which to spawn the effect.
   plEnum<plBasisAxis> m_SpawnDirection = plBasisAxis::PositiveZ; // [ property ]
 
+  /// \brief Optional: the object whose animated mesh skeletal-emission initializers sample.
+  /// When empty, the owner object and its parents are searched for an animated mesh.
+  void SetSkinnedMeshObject(const char* szReference); // [ property ]
+  const char* DummyGetter() const { return nullptr; }
+
   /// \brief Allows more fine grain control over the effect execution.
   plParticleEffectController m_EffectController;
 
@@ -130,6 +135,9 @@ protected:
   void Update();
   plTransform GetPfxTransform() const;
   void UpdatePfxTransformAndBounds();
+  void ResolveSkinnedMeshComponent();
+
+  plGameObjectHandle m_hSkinnedMeshObject;
 
   void OnMsgExtractRenderData(plMsgExtractRenderData& msg) const;
   void OnMsgDeleteGameObject(plMsgDeleteGameObject& msg);

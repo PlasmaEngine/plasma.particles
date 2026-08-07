@@ -191,10 +191,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStreamFactory_OnOff, 1, plRTTIDefaultA
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
 plParticleStreamFactory_OnOff::plParticleStreamFactory_OnOff()
-  : plParticleStreamFactory("OnOff", plProcessingStream::DataType::Int, plGetStaticRTTI<plParticleStream_ZeroInit>())
+  : plParticleStreamFactory("OnOff", plProcessingStream::DataType::Byte, plGetStaticRTTI<plParticleStream_ZeroInit>())
 {
-  // TODO: smaller data type
-  // TODO: "Byte" type results in memory corruptions
+  // stores tri-state plInt8 values: 0 = undecided, 1 = on, -1 = off
 }
 
 //////////////////////////////////////////////////////////////////////////

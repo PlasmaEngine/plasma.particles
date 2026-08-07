@@ -52,6 +52,11 @@ public:
   float m_fApplyInstanceVelocity = 0.0f;
   plTime m_PreSimulateDuration;
   plVec3U32 m_vNumWindSamples = plVec3U32(1);
+  float m_fFadeOutStartDistance = 0.0f;
+  float m_fFadeOutEndDistance = 0.0f;
+  plEnum<plParticleEffectImportance> m_Importance;
+  float m_fFixedTickHz = 0.0f;
+  plUInt8 m_uiMaxTicksPerFrame = 4;
   plMap<plString, float> m_FloatParameters;
   plMap<plString, plColor> m_ColorParameters;
 };
@@ -67,6 +72,7 @@ class plParticleSystemNode : public plReflectedClass
 public:
   plString m_sName;
   bool m_bVisible = true;
+  plEnum<plParticleSimulationTarget> m_SimulationTarget;
   plVarianceTypeTime m_LifeTime;
   plString m_sOnDeathEvent;
   plString m_sLifeScaleParameter;

@@ -33,6 +33,19 @@ public:
   float m_fApplyInstanceVelocity = 0.0f;
   plTime m_PreSimulateDuration;
   plVec3U32 m_vNumWindSamples = plVec3U32(1);
+
+  // distance LOD: spawn count fades from 100% at the start distance to 0% at the end distance
+  // (relative to the main camera); 0 = no distance fade
+  float m_fFadeOutStartDistance = 0.0f;
+  float m_fFadeOutEndDistance = 0.0f;
+
+  // Gameplay effects are exempt from the global particle budget throttle
+  plEnum<plParticleEffectImportance> m_Importance;
+
+  // fixed-tick simulation for effects whose look depends on the step size (0 = variable step);
+  // at most MaxTicksPerFrame steps are caught up per frame, excess time is dropped
+  float m_fFixedTickHz = 0.0f;
+  plUInt8 m_uiMaxTicksPerFrame = 4;
   plMap<plString, float> m_FloatParameters;
   plMap<plString, plColor> m_ColorParameters;
 

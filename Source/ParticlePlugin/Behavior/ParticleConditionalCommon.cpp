@@ -1,6 +1,7 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
 #include <Foundation/DataProcessing/Stream/ProcessingStream.h>
+#include <Foundation/Math/Vec3.h>
 #include <ParticlePlugin/Behavior/ParticleConditionalCommon.h>
 
 // clang-format off
@@ -44,15 +45,16 @@ float plReadParticleAttribute(
     case plParticleAttribute::PositionZ:
       return pPosition ? static_cast<float>(pPosition->GetData<plSimdVec4f>()[uiIndex].GetComponent<2>()) : 0.0f;
     case plParticleAttribute::Speed:
-      return pVelocity ? static_cast<float>(pVelocity->GetData<plFloat16Vec4>()[uiIndex].w) : 0.0f;
+      return pVelocity ? pVelocity->GetData<plVec3>()[uiIndex].GetLength() : 0.0f;
     case plParticleAttribute::Size:
       return pSize ? static_cast<float>(pSize->GetData<plFloat16>()[uiIndex]) : 1.0f;
     case plParticleAttribute::LifeFraction:
     {
       if (pLifeTime)
       {
-        const plVec2& lt = pLifeTime->GetData<plVec2>()[uiIndex];
-        return 1.0f - lt.x * lt.y;
+        // LifeTime stream is Half2: x = remaining life (seconds), y = 1 / total life
+        const plFloat16Vec2& lt = pLifeTime->GetData<plFloat16Vec2>()[uiIndex];
+        return 1.0f - static_cast<float>(lt.x) * static_cast<float>(lt.y);
       }
       return 0.0f;
     }
@@ -109,8 +111,13 @@ void plWriteParticleAttribute(
     {
       if (pVelocity)
       {
-        plFloat16Vec4& v = pVelocity->GetWritableData<plFloat16Vec4>()[uiIndex];
-        v = plFloat16Vec4(plVec4(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z), fValue));
+        // rescale the velocity to the new speed; a zero velocity has no direction and stays zero
+        plVec3& v = pVelocity->GetWritableData<plVec3>()[uiIndex];
+        const float fLen = v.GetLength();
+        if (fLen > 0.0001f)
+        {
+          v *= fValue / fLen;
+        }
       }
       break;
     }

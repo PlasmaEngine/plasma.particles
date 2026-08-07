@@ -1,9 +1,16 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
 #include <Core/World/World.h>
+#include <Foundation/Configuration/CVar.h>
+#include <Foundation/Utilities/Stats.h>
+#include <GameEngine/Animation/Skeletal/AnimatedMeshComponent.h>
+#include <ParticlePlugin/Components/ParticleForceFieldComponent.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
+#include <RendererCore/Pipeline/View.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
+
+plCVarInt cvar_ParticlesMaxParticles("Particles.MaxParticles", 0, plCVarFlags::Save, "World particle budget: Cosmetic effects scale their spawn counts down when the total exceeds this (0 = unlimited).");
 
 plParticleEffectHandle plParticleWorldModule::InternalCreateEffectInstance(const plParticleEffectResourceHandle& hResource, plUInt64 uiRandomSeed,
   bool bIsShared, plArrayPtr<plParticleEffectFloatParam> floatParams, plArrayPtr<plParticleEffectColorParam> colorParams)
@@ -137,7 +144,70 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
   DestroyFinishedEffects();
   ReconfigureEffects();
 
+  // main camera position for distance LOD; effects fade their spawn counts with distance
+  plVec3 vMainCameraPos = plVec3::MakeZero();
+  bool bHasMainCamera = false;
+
+  for (const plViewHandle& hView : plRenderWorld::GetMainViews())
+  {
+    plView* pView = nullptr;
+    if (plRenderWorld::TryGetView(hView, pView) && pView->GetWorld() == GetWorld())
+    {
+      vMainCameraPos = pView->GetCullingCamera()->GetCenterPosition();
+      bHasMainCamera = true;
+      break;
+    }
+  }
+
+  // snapshot the active force fields so the update tasks can sample them lock-free
+  {
+    m_ForceFieldData.Clear();
+
+    for (const plParticleForceFieldComponent* pField : m_ForceFields)
+    {
+      if (!pField->IsActiveAndInitialized())
+        continue;
+
+      const plGameObject* pOwner = pField->GetOwner();
+
+      auto& data = m_ForceFieldData.ExpandAndGetRef();
+      data.m_vCenter = pOwner->GetGlobalPosition();
+      data.m_vAxis = pOwner->GetGlobalRotation() * plVec3(0, 0, 1);
+      data.m_qInvRotation = pOwner->GetGlobalRotation().GetInverse();
+      data.m_vInvBoxHalfExtents = plVec3(2.0f / pField->m_vExtents.x, 2.0f / pField->m_vExtents.y, 2.0f / pField->m_vExtents.z);
+      data.m_fRadius = pField->m_fRadius;
+      data.m_fStrength = pField->m_fStrength;
+      data.m_fFalloffStart = pField->m_fFalloffStart;
+      data.m_uiType = (plUInt8)pField->m_Type.GetValue();
+      data.m_uiShape = (plUInt8)pField->m_Shape.GetValue();
+    }
+  }
+
   m_EffectUpdateTaskGroup = plTaskSystem::CreateTaskGroup(plTaskPriority::LateThisFrame);
+
+  // world particle budget: when last frame's total exceeds the cvar, Cosmetic effects
+  // scale their spawn counts down proportionally; Gameplay effects are never throttled
+  plUInt64 uiTotalParticles = 0;
+  plUInt32 uiActiveEffects = 0;
+
+  for (plUInt32 i = 0; i < m_ParticleEffects.GetCount(); ++i)
+  {
+    if (!m_ParticleEffects[i].ShouldBeUpdated())
+      continue;
+
+    uiTotalParticles += m_ParticleEffects[i].GetNumActiveParticles();
+    ++uiActiveEffects;
+  }
+
+  float fBudgetScale = 1.0f;
+  if (cvar_ParticlesMaxParticles > 0 && uiTotalParticles > (plUInt64)cvar_ParticlesMaxParticles)
+  {
+    fBudgetScale = (float)cvar_ParticlesMaxParticles / (float)uiTotalParticles;
+  }
+
+  plStats::SetStat("Particles/ActiveParticles", uiTotalParticles);
+  plStats::SetStat("Particles/ActiveEffects", uiActiveEffects);
+  plStats::SetStat("Particles/BudgetSpawnScale", fBudgetScale);
 
   const plTime tDiff = GetWorld()->GetClock().GetTimeDiff();
   for (plUInt32 i = 0; i < m_ParticleEffects.GetCount(); ++i)
@@ -145,9 +215,53 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
     if (!m_ParticleEffects[i].ShouldBeUpdated())
       continue;
 
-    m_ParticleEffects[i].ProcessEventQueues();
+    auto& effect = m_ParticleEffects[i];
 
-    const plSharedPtr<plTask>& pTask = m_ParticleEffects[i].GetUpdateTask();
+    // shared effects are rendered from many positions, a single distance would be wrong
+    float fLodScale = 1.0f;
+    if (bHasMainCamera && !effect.IsSharedEffect() && effect.GetFadeOutEndDistance() > effect.GetFadeOutStartDistance())
+    {
+      const float fDistance = (effect.GetTransform().m_vPosition - vMainCameraPos).GetLength();
+      const float fFade = (fDistance - effect.GetFadeOutStartDistance()) / (effect.GetFadeOutEndDistance() - effect.GetFadeOutStartDistance());
+
+      fLodScale = 1.0f - plMath::Saturate(fFade);
+    }
+
+    const float fEffectBudgetScale = (effect.GetImportance() == plParticleEffectImportance::Gameplay) ? 1.0f : fBudgetScale;
+
+    effect.SetDynamicSpawnScale(fLodScale * fEffectBudgetScale);
+
+    // snapshot the animated mesh pose for skeletal emission; taken on the main thread BEFORE the
+    // update tasks start (and before this frame's animation update), so the tasks read a stable
+    // copy of last frame's pose
+    if (!effect.GetSkinnedMeshComponent().IsInvalidated())
+    {
+      auto& snapshot = effect.GetSkinningSnapshotForWriting();
+      snapshot.m_bValid = false;
+
+      plAnimatedMeshComponent* pAnimMesh = nullptr;
+      if (GetWorld()->TryGetComponent(effect.GetSkinnedMeshComponent(), pAnimMesh))
+      {
+        const plArrayPtr<const plShaderTransform> boneTransforms = pAnimMesh->GetSkinningTransforms();
+
+        if (!boneTransforms.IsEmpty())
+        {
+          snapshot.m_BoneMatrices.SetCountUninitialized(boneTransforms.GetCount());
+
+          for (plUInt32 b = 0; b < boneTransforms.GetCount(); ++b)
+          {
+            snapshot.m_BoneMatrices[b] = boneTransforms[b].GetAsMat4();
+          }
+
+          snapshot.m_Transform = pAnimMesh->GetOwner()->GetGlobalTransform() * pAnimMesh->GetRootTransform();
+          snapshot.m_bValid = true;
+        }
+      }
+    }
+
+    effect.ProcessEventQueues();
+
+    const plSharedPtr<plTask>& pTask = effect.GetUpdateTask();
     static_cast<plParticleEffectUpdateTask*>(pTask.Borrow())->m_UpdateDiff = tDiff;
 
     plTaskSystem::AddTaskToGroup(m_EffectUpdateTaskGroup, pTask);

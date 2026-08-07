@@ -17,6 +17,12 @@ public:
   plArrayPtr<plBillboardQuadParticleShaderData> m_BillboardParticleData;
   plTransform m_GlobalTransform;
   plTime m_TotalEffectLifeTime;
+
+  // GPU-simulated systems fill these in the particle compute pass; when the draw-args handle is
+  // set the renderer binds them directly and draws indirectly
+  plGALBufferHandle m_hGpuBaseDataBuffer;
+  plGALBufferHandle m_hGpuBillboardDataBuffer;
+  plGALBufferHandle m_hGpuDrawArgsBuffer;
 };
 
 /// \brief Implements rendering of particle systems

@@ -37,6 +37,13 @@ public:
   plEnum<plParticleLightingMode> m_LightingMode;
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
+
+  // GPU-simulated systems fill these in the particle compute pass; when the draw-args handle is
+  // set the renderer binds them directly and draws indirectly
+  plGALBufferHandle m_hGpuBaseDataBuffer;
+  plGALBufferHandle m_hGpuTrailDataBuffer;
+  plGALBufferHandle m_hGpuTrailPointsBuffer;
+  plGALBufferHandle m_hGpuDrawArgsBuffer;
 };
 
 /// \brief Implements rendering of a trail particle systems
@@ -54,15 +61,11 @@ public:
     const plRenderViewContext& renderContext, const plRenderPipelinePass* pPass, const plRenderDataBatch& batch) const override;
 
 protected:
-  bool ConfigureShader(const plParticleTrailRenderData* pRenderData, const plRenderViewContext& renderViewContext) const;
+  void ConfigureShader(const plParticleTrailRenderData* pRenderData, const plRenderViewContext& renderViewContext) const;
 
   static const plUInt32 s_uiParticlesPerBatch = 512;
+  static const plUInt32 s_uiMaxTrailPoints = 64;
   plGALBufferPool m_BaseDataBuffer;
   plGALBufferPool m_TrailDataBuffer;
-  plGALBufferPool m_TrailPointsDataBuffer8;
-  plGALBufferPool m_TrailPointsDataBuffer16;
-  plGALBufferPool m_TrailPointsDataBuffer32;
-  plGALBufferPool m_TrailPointsDataBuffer64;
-
-  mutable const plGALBufferPool* m_pActiveTrailPointsDataBuffer = nullptr;
+  plGALBufferPool m_TrailPointsDataBuffer; // tightly packed float4 points, MaxTrailPoints per particle
 };

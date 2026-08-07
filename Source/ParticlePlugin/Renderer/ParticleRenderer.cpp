@@ -12,7 +12,8 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 
 plParticleRenderer::TempSystemCB::TempSystemCB(plRenderContext* pRenderContext)
 {
-  // TODO This pattern looks like it is inefficient. Should it use the GPU pool instead somehow?
+  // Create/Delete per batch is cheap: the storage comes from plRenderContext's size-keyed
+  // free list (s_FreeConstantBufferStorage), so no GPU resource is created per call.
   m_hConstantBuffer = plRenderContext::CreateConstantBufferStorage(m_pConstants);
 
   // Must bind into the caller's (per-slot) render context, not the default instance: under multithreaded command
@@ -27,7 +28,7 @@ plParticleRenderer::TempSystemCB::~TempSystemCB()
   plRenderContext::DeleteConstantBufferStorage(m_hConstantBuffer);
 }
 
-void plParticleRenderer::TempSystemCB::SetGenericData(const plTransform& objectTransform, plTime effectLifeTime, plUInt8 uiNumVariationsX, plUInt8 uiNumVariationsY, plUInt8 uiNumFlipbookAnimsX, plUInt8 uiNumFlipbookAnimsY, float fNormalCurvature, float fLightDirectionality)
+void plParticleRenderer::TempSystemCB::SetGenericData(const plTransform& objectTransform, plTime effectLifeTime, plUInt8 uiNumVariationsX, plUInt8 uiNumVariationsY, plUInt8 uiNumFlipbookAnimsX, plUInt8 uiNumFlipbookAnimsY, float fNormalCurvature, float fLightDirectionality, float fSixWayAbsorption, float fNormalMapStrength)
 {
   plParticleSystemConstants& cb = m_pConstants->GetDataForWriting();
   cb.ObjectToWorldMatrix = objectTransform.GetAsMat4();
@@ -38,7 +39,8 @@ void plParticleRenderer::TempSystemCB::SetGenericData(const plTransform& objectT
   cb.TotalEffectLifeTime = effectLifeTime.AsFloatInSeconds();
   cb.NormalCurvature = fNormalCurvature;
   cb.LightDirectionality = fLightDirectionality;
-  cb.ParticlePadding.SetZero();
+  cb.SixWayAbsorption = fSixWayAbsorption;
+  cb.NormalMapStrength = fNormalMapStrength;
 }
 
 

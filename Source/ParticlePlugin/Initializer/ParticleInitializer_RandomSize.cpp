@@ -16,6 +16,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory_RandomSize, 2, plRT
   PL_BEGIN_PROPERTIES
   {
     PL_MEMBER_PROPERTY("Size", m_Size)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, plVariant())),
+    PL_MEMBER_PROPERTY("Aspect", m_Aspect)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.01f, 100.0f)),
     PL_RESOURCE_MEMBER_PROPERTY("SizeCurve", m_hCurve)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Curve")),
   }
   PL_END_PROPERTIES;
@@ -37,16 +38,21 @@ void plParticleInitializerFactory_RandomSize::CopyInitializerProperties(plPartic
 
   pInitializer->m_hCurve = m_hCurve;
   pInitializer->m_Size = m_Size;
+  pInitializer->m_Aspect = m_Aspect;
 }
 
 void plParticleInitializerFactory_RandomSize::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 2;
+  const plUInt8 uiVersion = 3;
   inout_stream << uiVersion;
 
   inout_stream << m_hCurve;
   inout_stream << m_Size.m_Value;
   inout_stream << m_Size.m_fVariance;
+
+  // version 3
+  inout_stream << m_Aspect.m_Value;
+  inout_stream << m_Aspect.m_fVariance;
 }
 
 void plParticleInitializerFactory_RandomSize::Load(plStreamReader& inout_stream)
@@ -57,12 +63,26 @@ void plParticleInitializerFactory_RandomSize::Load(plStreamReader& inout_stream)
   inout_stream >> m_hCurve;
   inout_stream >> m_Size.m_Value;
   inout_stream >> m_Size.m_fVariance;
+
+  if (uiVersion >= 3)
+  {
+    inout_stream >> m_Aspect.m_Value;
+    inout_stream >> m_Aspect.m_fVariance;
+  }
 }
 
 
 void plParticleInitializer_RandomSize::CreateRequiredStreams()
 {
   CreateStream("Size", plProcessingStream::DataType::Half, &m_pStreamSize, true);
+
+  m_pStreamSize2 = nullptr;
+
+  // per-axis size multipliers, consumed by the quad type for stretched sparks/shards
+  if (m_Aspect.m_Value != 1.0f || m_Aspect.m_fVariance > 0.0f)
+  {
+    CreateStream("Size2", plProcessingStream::DataType::Half2, &m_pStreamSize2, true);
+  }
 }
 
 void plParticleInitializer_RandomSize::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
@@ -72,6 +92,17 @@ void plParticleInitializer_RandomSize::InitializeElements(plUInt64 uiStartIndex,
   plFloat16* pSize = m_pStreamSize->GetWritableData<plFloat16>();
 
   plRandom& rng = GetRNG();
+
+  if (m_pStreamSize2 != nullptr)
+  {
+    plFloat16Vec2* pSize2 = m_pStreamSize2->GetWritableData<plFloat16Vec2>();
+
+    for (plUInt64 i = uiStartIndex; i < uiStartIndex + uiNumElements; ++i)
+    {
+      pSize2[i].x = plMath::Max((float)rng.DoubleVariance(m_Aspect.m_Value, m_Aspect.m_fVariance), 0.01f);
+      pSize2[i].y = 1.0f;
+    }
+  }
 
   if (!m_hCurve.IsValid())
   {

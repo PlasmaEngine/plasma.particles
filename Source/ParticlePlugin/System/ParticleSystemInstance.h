@@ -90,6 +90,7 @@ private:
 
   bool m_bVisible; // typically used in editor to hide a system
   bool m_bEmitterEnabled;
+  bool m_bLoweredToGPU = false; // behaviors replaced by a configured plParticleTypeGPU (SimulationTarget GPU/Auto)
   plParticleEffectInstance* m_pOwnerEffect;
   plWorld* m_pWorld;
   plTransform m_Transform;

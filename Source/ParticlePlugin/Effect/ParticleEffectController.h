@@ -24,6 +24,12 @@ public:
 
   void SetTransform(const plTransform& t, const plVec3& vParticleStartVelocity) const;
 
+  /// \brief Copies the owner object's tags onto the effect instance (ignored for shared instances).
+  void SetOwnerTags(const plTagSet& tags) const;
+
+  /// \brief Sets the animated mesh component that skeletal-emission initializers sample (ignored for shared instances).
+  void SetSkinnedMeshComponent(const plComponentHandle& hComponent) const;
+
   void CombineSystemBoundingVolumes();
 
   void Tick(const plTime& diff) const;

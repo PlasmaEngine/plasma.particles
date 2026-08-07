@@ -109,7 +109,7 @@ void plParticleTypeLight::CreateRequiredStreams()
 
   if (m_uiPercentage < 100)
   {
-    CreateStream("OnOff", plProcessingStream::DataType::Int, &m_pStreamOnOff, false); /// \todo Initialize (instead of during extraction)
+    CreateStream("OnOff", plProcessingStream::DataType::Byte, &m_pStreamOnOff, false); /// \todo Initialize (instead of during extraction)
   }
 }
 
@@ -125,11 +125,11 @@ void plParticleTypeLight::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
   if (pPosition == nullptr || pSize == nullptr || pColor == nullptr)
     return;
 
-  plInt32* pOnOff = nullptr;
+  plInt8* pOnOff = nullptr;
 
   if (m_pStreamOnOff)
   {
-    pOnOff = m_pStreamOnOff->GetWritableData<plInt32>();
+    pOnOff = m_pStreamOnOff->GetWritableData<plInt8>();
 
     if (pOnOff == nullptr)
       return;

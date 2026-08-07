@@ -24,6 +24,8 @@ struct PL_PARTICLEPLUGIN_DLL plQuadParticleOrientation
     FixedAxis_EmitterDir,
     FixedAxis_ParticleDir,
 
+    Fixed_StartAxis, ///< uses the Axis stream as written at spawn time (e.g. the mesh surface normal from the Mesh Position initializer)
+
     Default = Billboard
   };
 };
@@ -57,6 +59,14 @@ public:
   plEnum<plParticleLightingMode> m_LightingMode;
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
+  // six-way response maps: A = light from +right/+up/+front with density in alpha,
+  // B = the opposing three directions. The Texture slot supplies the emissive on top.
+  plString m_sSixWayMapA;
+  plString m_sSixWayMapB;
+  float m_fSixWayAbsorption = 1.0f;
+  // per-pixel lighting only: perturbs the billboard normal with a tangent-space map
+  plString m_sNormalMap;
+  float m_fNormalMapStrength = 0.0f;
   bool m_bUseCustomMaterial = false;
   plString m_sCustomMaterial;
 };
@@ -85,6 +95,11 @@ public:
   plEnum<plParticleLightingMode> m_LightingMode;
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
+  plTexture2DResourceHandle m_hSixWayMapA;
+  plTexture2DResourceHandle m_hSixWayMapB;
+  float m_fSixWayAbsorption = 1.0f;
+  plTexture2DResourceHandle m_hNormalMap;
+  float m_fNormalMapStrength = 0.0f;
   plMaterialResourceHandle m_hCustomMaterial;
 
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
@@ -114,6 +129,9 @@ protected:
   plProcessingStream* m_pStreamAxis = nullptr;
   plProcessingStream* m_pStreamVariation = nullptr;
   plProcessingStream* m_pStreamLastPosition = nullptr;
+  plProcessingStream* m_pStreamSize2 = nullptr; // optional per-axis size multipliers
+
+  virtual void QueryOptionalStreams() override;
 
   mutable plArrayPtr<plBaseParticleShaderData> m_BaseParticleData;
   mutable plArrayPtr<plBillboardQuadParticleShaderData> m_BillboardParticleData;

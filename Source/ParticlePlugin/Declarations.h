@@ -101,6 +101,8 @@ struct PL_PARTICLEPLUGIN_DLL plParticleLightingMode
   {
     Fullbright,
     VertexLit,
+    SixWay,   ///< blends six baked directional light responses, giving a flat card internal volume
+    PerPixel, ///< full clustered lighting per pixel; for small bright particles, not for smoke
     Default = Fullbright
   };
 };
@@ -128,6 +130,24 @@ struct PL_PARTICLEPLUGIN_DLL plEffectInvisibleUpdateRate
 };
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plEffectInvisibleUpdateRate);
+
+//////////////////////////////////////////////////////////////////////////
+
+/// \brief Whether an effect may be throttled when the global particle budget is exceeded.
+struct PL_PARTICLEPLUGIN_DLL plParticleEffectImportance
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Cosmetic, ///< spawn counts scale down when the world exceeds 'Particles.MaxParticles'
+    Gameplay, ///< never throttled - the effect carries gameplay-relevant information
+
+    Default = Cosmetic
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleEffectImportance);
 
 //////////////////////////////////////////////////////////////////////////
 
@@ -203,6 +223,29 @@ struct PL_PARTICLEPLUGIN_DLL plGPUParticleRenderType
 };
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGPUParticleRenderType);
+
+//////////////////////////////////////////////////////////////////////////
+
+/// Where a particle system's per-frame simulation runs.
+///
+/// Spawning always happens on the CPU. With GPU / Auto, the system's behaviors are lowered
+/// into the GPU simulate shader when every module has a GPU equivalent; Auto falls back to
+/// CPU silently, GPU falls back with a warning naming the blocking module.
+struct PL_PARTICLEPLUGIN_DLL plParticleSimulationTarget
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    CPU,
+    GPU,
+    Auto,
+
+    Default = CPU
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleSimulationTarget);
 
 //////////////////////////////////////////////////////////////////////////
 

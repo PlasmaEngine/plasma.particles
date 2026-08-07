@@ -159,14 +159,14 @@ void plParticleBehavior_Expression::CompileExpression()
 void plParticleBehavior_Expression::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
-  CreateStream("Velocity", plProcessingStream::DataType::Half4, &m_pStreamVelocity, false);
+  CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
 }
 
 void plParticleBehavior_Expression::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
 }
 
 float plParticleBehavior_Expression::ExtractValue(plParticleExpressionBinding::Enum binding, plUInt32 uiIndex) const
@@ -180,25 +180,13 @@ float plParticleBehavior_Expression::ExtractValue(plParticleExpressionBinding::E
     case plParticleExpressionBinding::PositionZ:
       return m_pStreamPosition->GetData<plSimdVec4f>()[uiIndex].GetComponent<2>();
     case plParticleExpressionBinding::VelocityX:
-    {
-      const plFloat16Vec4& v = m_pStreamVelocity->GetData<plFloat16Vec4>()[uiIndex];
-      return static_cast<float>(v.x) * static_cast<float>(v.w); // dirX * speed
-    }
+      return m_pStreamVelocity->GetData<plVec3>()[uiIndex].x;
     case plParticleExpressionBinding::VelocityY:
-    {
-      const plFloat16Vec4& v = m_pStreamVelocity->GetData<plFloat16Vec4>()[uiIndex];
-      return static_cast<float>(v.y) * static_cast<float>(v.w); // dirY * speed
-    }
+      return m_pStreamVelocity->GetData<plVec3>()[uiIndex].y;
     case plParticleExpressionBinding::VelocityZ:
-    {
-      const plFloat16Vec4& v = m_pStreamVelocity->GetData<plFloat16Vec4>()[uiIndex];
-      return static_cast<float>(v.z) * static_cast<float>(v.w); // dirZ * speed
-    }
+      return m_pStreamVelocity->GetData<plVec3>()[uiIndex].z;
     case plParticleExpressionBinding::Speed:
-    {
-      const plFloat16Vec4& v = m_pStreamVelocity->GetData<plFloat16Vec4>()[uiIndex];
-      return static_cast<float>(v.w);
-    }
+      return m_pStreamVelocity->GetData<plVec3>()[uiIndex].GetLength();
     case plParticleExpressionBinding::Size:
     {
       if (m_pStreamSize)
@@ -209,9 +197,9 @@ float plParticleBehavior_Expression::ExtractValue(plParticleExpressionBinding::E
     {
       if (m_pStreamLifeTime)
       {
-        // LifeTime stream stores (life, invMaxLife) as Float2
-        const plVec2& lt = m_pStreamLifeTime->GetData<plVec2>()[uiIndex];
-        return 1.0f - lt.x * lt.y; // 1 - (remainingLife * invMaxLife) = fraction consumed
+        // LifeTime stream is Half2: x = remaining life (seconds), y = 1 / total life
+        const plFloat16Vec2& lt = m_pStreamLifeTime->GetData<plFloat16Vec2>()[uiIndex];
+        return 1.0f - static_cast<float>(lt.x) * static_cast<float>(lt.y); // fraction consumed
       }
       return 0.0f;
     }
@@ -267,32 +255,23 @@ void plParticleBehavior_Expression::WriteValue(plParticleExpressionBinding::Enum
       break;
     }
     case plParticleExpressionBinding::VelocityX:
-    case plParticleExpressionBinding::VelocityY:
-    case plParticleExpressionBinding::VelocityZ:
-    {
-      // Reconstruct velocity from direction * speed, modify one component, re-normalize
-      plFloat16Vec4& v = m_pStreamVelocity->GetWritableData<plFloat16Vec4>()[uiIndex];
-      float vx = static_cast<float>(v.x) * static_cast<float>(v.w);
-      float vy = static_cast<float>(v.y) * static_cast<float>(v.w);
-      float vz = static_cast<float>(v.z) * static_cast<float>(v.w);
-
-      if (binding == plParticleExpressionBinding::VelocityX)
-        vx = fValue;
-      else if (binding == plParticleExpressionBinding::VelocityY)
-        vy = fValue;
-      else
-        vz = fValue;
-
-      const plVec3 newVel(vx, vy, vz);
-      const float newSpeed = newVel.GetLength();
-      const plVec3 newDir = newSpeed > 0.0f ? newVel / newSpeed : plVec3(0, 0, 1);
-      v = plFloat16Vec4(plVec4(newDir.x, newDir.y, newDir.z, newSpeed));
+      m_pStreamVelocity->GetWritableData<plVec3>()[uiIndex].x = fValue;
       break;
-    }
+    case plParticleExpressionBinding::VelocityY:
+      m_pStreamVelocity->GetWritableData<plVec3>()[uiIndex].y = fValue;
+      break;
+    case plParticleExpressionBinding::VelocityZ:
+      m_pStreamVelocity->GetWritableData<plVec3>()[uiIndex].z = fValue;
+      break;
     case plParticleExpressionBinding::Speed:
     {
-      plFloat16Vec4& v = m_pStreamVelocity->GetWritableData<plFloat16Vec4>()[uiIndex];
-      v = plFloat16Vec4(plVec4(static_cast<float>(v.x), static_cast<float>(v.y), static_cast<float>(v.z), fValue));
+      // rescale the velocity to the new speed; a zero velocity has no direction and stays zero
+      plVec3& v = m_pStreamVelocity->GetWritableData<plVec3>()[uiIndex];
+      const float fLen = v.GetLength();
+      if (fLen > 0.0001f)
+      {
+        v *= fValue / fLen;
+      }
       break;
     }
     case plParticleExpressionBinding::Size:

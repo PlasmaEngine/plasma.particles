@@ -83,7 +83,7 @@ void plParticleBehavior_ConditionalKill::CreateRequiredStreams()
 
 void plParticleBehavior_ConditionalKill::QueryOptionalStreams()
 {
-  m_pStreamVelocity = GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Half4);
+  m_pStreamVelocity = GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Float3);
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
 }
@@ -91,7 +91,7 @@ void plParticleBehavior_ConditionalKill::QueryOptionalStreams()
 static float GetAttributeValue(
   plParticleKillAttribute::Enum attr,
   const plSimdVec4f& position,
-  const plFloat16Vec4* pVelocity,
+  const plVec3* pVelocity,
   const plFloat16* pSize,
   const plFloat16Vec4* pColor)
 {
@@ -106,7 +106,7 @@ static float GetAttributeValue(
     case plParticleKillAttribute::Speed:
     {
       if (pVelocity)
-        return static_cast<float>(pVelocity->w);
+        return pVelocity->GetLength();
       return 0.0f;
     }
     case plParticleKillAttribute::Size:
@@ -149,7 +149,7 @@ void plParticleBehavior_ConditionalKill::Process(plUInt64 uiNumElements)
 
   plProcessingStreamIterator<plSimdVec4f> itPosition(m_pStreamPosition, uiNumElements, 0);
 
-  const plFloat16Vec4* pVelocityData = m_pStreamVelocity ? m_pStreamVelocity->GetData<plFloat16Vec4>() : nullptr;
+  const plVec3* pVelocityData = m_pStreamVelocity ? m_pStreamVelocity->GetData<plVec3>() : nullptr;
   const plFloat16* pSizeData = m_pStreamSize ? m_pStreamSize->GetData<plFloat16>() : nullptr;
   const plFloat16Vec4* pColorData = m_pStreamColor ? m_pStreamColor->GetData<plFloat16Vec4>() : nullptr;
 

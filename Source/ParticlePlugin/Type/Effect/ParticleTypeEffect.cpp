@@ -108,6 +108,11 @@ void plParticleTypeEffect::CreateRequiredStreams()
   CreateStream("EffectID", plProcessingStream::DataType::Int, &m_pStreamEffectID, false);
 }
 
+void plParticleTypeEffect::QueryOptionalStreams()
+{
+  m_pStreamVelocity = GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Float3);
+}
+
 void plParticleTypeEffect::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
 {
   PL_PROFILE_SCOPE("PFX: Effect");
@@ -146,6 +151,7 @@ void plParticleTypeEffect::Process(plUInt64 uiNumElements)
     return;
 
   const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
+  const plVec3* pVelocity = m_pStreamVelocity ? m_pStreamVelocity->GetData<plVec3>() : nullptr;
   plUInt32* pEffectID = m_pStreamEffectID->GetWritableData<plUInt32>();
 
   plParticleWorldModule* pWorldModule = GetOwnerEffect()->GetOwnerWorldModule();
@@ -162,6 +168,11 @@ void plParticleTypeEffect::Process(plUInt64 uiNumElements)
       plParticleEffectHandle hInstance = pWorldModule->CreateEffectInstance(m_hEffect, uiRandomSeed, /*m_sSharedInstanceName*/ nullptr, pDummy, plArrayPtr<plParticleEffectFloatParam>(), plArrayPtr<plParticleEffectColorParam>());
 
       pEffectID[i] = hInstance.GetInternalID().m_Data;
+
+      if (plParticleEffectInstance* pNewEffect = nullptr; pWorldModule->TryGetEffectInstance(hInstance, pNewEffect))
+      {
+        pNewEffect->SetOwnerTags(GetOwnerEffect()->GetOwnerTags());
+      }
     }
 
     plParticleEffectHandle hInstance = plParticleEffectHandle(plParticleEffectId(pEffectID[i]));
@@ -174,9 +185,11 @@ void plParticleTypeEffect::Process(plUInt64 uiNumElements)
       t.m_vScale.Set(1.0f);
       t.m_vPosition = pPosition[i].GetAsVec3();
 
-      // TODO: pass through velocity
+      // the sub-effect's own 'ApplyOwnerVelocity' factor decides how much of this it inherits
+      const plVec3 vInheritedVelocity = pVelocity ? pVelocity[i] : plVec3::MakeZero();
+
       pEffect->SetVisibleIf(GetOwnerEffect());
-      pEffect->SetTransformForNextFrame(t, plVec3::MakeZero());
+      pEffect->SetTransformForNextFrame(t, vInheritedVelocity);
 
       plBoundingBoxSphere bounds;
       pEffect->GetBoundingVolume(bounds);

@@ -81,7 +81,7 @@ void plParticleBehaviorFactory_Turbulence::Load(plStreamReader& inout_stream)
 void plParticleBehavior_Turbulence::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
-  CreateStream("Velocity", plProcessingStream::DataType::Half4, &m_pStreamVelocity, false);
+  CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
 }
 
 void plParticleBehavior_Turbulence::Process(plUInt64 uiNumElements)
@@ -103,7 +103,7 @@ void plParticleBehavior_Turbulence::Process(plUInt64 uiNumElements)
   const float kOffset2 = 67.123f;
 
   plProcessingStreamIterator<plSimdVec4f> itPosition(m_pStreamPosition, uiNumElements, 0);
-  plProcessingStreamIterator<plFloat16Vec4> itVelocity(m_pStreamVelocity, uiNumElements, 0);
+  plProcessingStreamIterator<plVec3> itVelocity(m_pStreamVelocity, uiNumElements, 0);
 
   const plSimdVec4f constHalf(0.5f);
   const plSimdVec4f constMul = plSimdVec4f(2.0f * m_fStrength * tDiff);
@@ -129,16 +129,7 @@ void plParticleBehavior_Turbulence::Process(plUInt64 uiNumElements)
       // Map [0,1] -> [-1,1]
       const plVec3 force = plSimdConversion::ToVec3((noise - constHalf).CompMul(constMul));
 
-      // Decompose velocity: (dirX, dirY, dirZ, speed)
-      const plVec4 vel = itVelocity.Current();
-      const plVec3 dir(vel.x, vel.y, vel.z);
-      const float speed = vel.w;
-
-      const plVec3 newVel = dir * speed + force;
-      const float newSpeed = newVel.GetLength();
-      const plVec3 newDir = newSpeed > 0.0f ? newVel / newSpeed : plVec3(0, 0, 1);
-
-      itVelocity.Current() = plVec4(newDir.x, newDir.y, newDir.z, newSpeed);
+      itVelocity.Current() += force;
 
       itPosition.Advance();
       itVelocity.Advance();

@@ -16,6 +16,11 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectDescriptor, 2, plRTTIDefaultAllo
     PL_MEMBER_PROPERTY("ApplyOwnerVelocity", m_fApplyInstanceVelocity)->AddAttributes(new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("PreSimulateDuration", m_PreSimulateDuration),
     PL_MEMBER_PROPERTY("NumWindSamples", m_vNumWindSamples)->AddAttributes(new plDefaultValueAttribute(plVec3U32(1)), new plClampValueAttribute(plVec3U32(1), plVec3U32(8))),
+    PL_MEMBER_PROPERTY("FadeOutStartDistance", m_fFadeOutStartDistance)->AddAttributes(new plClampValueAttribute(0.0f, {})),
+    PL_MEMBER_PROPERTY("FadeOutEndDistance", m_fFadeOutEndDistance)->AddAttributes(new plClampValueAttribute(0.0f, {})),
+    PL_ENUM_MEMBER_PROPERTY("Importance", plParticleEffectImportance, m_Importance),
+    PL_MEMBER_PROPERTY("FixedTickHz", m_fFixedTickHz)->AddAttributes(new plClampValueAttribute(0.0f, 120.0f)),
+    PL_MEMBER_PROPERTY("MaxTicksPerFrame", m_uiMaxTicksPerFrame)->AddAttributes(new plDefaultValueAttribute(4), new plClampValueAttribute(1, 16)),
     PL_MAP_MEMBER_PROPERTY("FloatParameters", m_FloatParameters),
     PL_MAP_MEMBER_PROPERTY("ColorParameters", m_ColorParameters)->AddAttributes(new plExposeColorAlphaAttribute),
     PL_SET_ACCESSOR_PROPERTY("ParticleSystems", GetParticleSystems, AddParticleSystem, RemoveParticleSystem)->AddFlags(plPropertyFlags::PointerOwner),
@@ -68,6 +73,9 @@ enum class ParticleEffectVersion
   Version_8,  // added event reactions
   Version_9,  // breaking change
   Version_10, // added wind samples
+  Version_11, // added distance fade
+  Version_12, // added importance
+  Version_13, // added fixed tick
 
   // insert new version numbers above
   Version_Count,
@@ -137,6 +145,17 @@ void plParticleEffectDescriptor::Save(plStreamWriter& inout_stream) const
 
   // Version 10
   inout_stream << m_vNumWindSamples;
+
+  // Version 11
+  inout_stream << m_fFadeOutStartDistance;
+  inout_stream << m_fFadeOutEndDistance;
+
+  // Version 12
+  inout_stream << m_Importance;
+
+  // Version 13
+  inout_stream << m_fFixedTickHz;
+  inout_stream << m_uiMaxTicksPerFrame;
 }
 
 
@@ -225,6 +244,23 @@ void plParticleEffectDescriptor::Load(plStreamReader& inout_stream)
   if (uiVersion >= (int)ParticleEffectVersion::Version_10)
   {
     inout_stream >> m_vNumWindSamples;
+  }
+
+  if (uiVersion >= (int)ParticleEffectVersion::Version_11)
+  {
+    inout_stream >> m_fFadeOutStartDistance;
+    inout_stream >> m_fFadeOutEndDistance;
+  }
+
+  if (uiVersion >= (int)ParticleEffectVersion::Version_12)
+  {
+    inout_stream >> m_Importance;
+  }
+
+  if (uiVersion >= (int)ParticleEffectVersion::Version_13)
+  {
+    inout_stream >> m_fFixedTickHz;
+    inout_stream >> m_uiMaxTicksPerFrame;
   }
 }
 

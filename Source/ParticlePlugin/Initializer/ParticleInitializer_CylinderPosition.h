@@ -23,6 +23,7 @@ public:
   plVec3 m_vPositionOffset;
   float m_fRadius;
   float m_fHeight;
+  float m_fShellThickness = 0.0f; // > 0 with OnSurface: spawn inside the annulus [Radius - Thickness, Radius]
   bool m_bSpawnOnSurface;
   bool m_bSetVelocity;
   plVarianceTypeFloat m_Speed;
@@ -39,6 +40,7 @@ public:
   plVec3 m_vPositionOffset;
   float m_fRadius;
   float m_fHeight;
+  float m_fShellThickness = 0.0f;
   bool m_bSpawnOnSurface;
   bool m_bSetVelocity;
   plVarianceTypeFloat m_Speed;

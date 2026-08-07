@@ -13,6 +13,22 @@ struct plResourceEvent;
 class plTaskGroupID;
 class plParticleStream;
 class plParticleStreamFactory;
+class plParticleForceFieldComponent;
+
+/// A per-frame snapshot of one active plParticleForceFieldComponent, in world space.
+/// Rebuilt on the main thread before the update tasks start, so behaviors can read it lock-free.
+struct plParticleForceFieldData
+{
+  plVec3 m_vCenter;
+  plVec3 m_vAxis; // the component's world +Z: push direction / vortex axis
+  plQuat m_qInvRotation;
+  plVec3 m_vInvBoxHalfExtents;
+  float m_fRadius;
+  float m_fStrength;
+  float m_fFalloffStart;
+  plUInt8 m_uiType;  // plParticleForceFieldType
+  plUInt8 m_uiShape; // plParticleForceFieldShape
+};
 
 /// \brief This world module stores all particle effect data that is active in a given plWorld instance
 ///
@@ -62,6 +78,13 @@ public:
   /// \brief Should be called by plParticleModule::RequestRequiredWorldModulesForCache() to cache a pointer to a world module that is needed later.
   void CacheWorldModule(const plRTTI* pRtti);
 
+  void RegisterForceField(const plParticleForceFieldComponent* pComponent);
+  void UnregisterForceField(const plParticleForceFieldComponent* pComponent);
+
+  /// \brief The per-frame force field snapshot. Only valid to read while the update tasks run
+  /// (it is rebuilt at the start of every particle update).
+  plArrayPtr<const plParticleForceFieldData> GetForceFieldData() const { return m_ForceFieldData; }
+
 private:
   virtual void WorldClear() override;
 
@@ -91,4 +114,6 @@ private:
   plTaskGroupID m_EffectUpdateTaskGroup;
   plMap<plString, plParticleStreamFactory*> m_StreamFactories;
   plHashTable<const plRTTI*, plWorldModule*> m_WorldModuleCache;
+  plDynamicArray<const plParticleForceFieldComponent*> m_ForceFields;
+  plDynamicArray<plParticleForceFieldData> m_ForceFieldData;
 };

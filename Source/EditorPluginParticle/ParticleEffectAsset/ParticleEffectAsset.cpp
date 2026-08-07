@@ -18,6 +18,7 @@
 #include <ParticlePlugin/Initializer/ParticleInitializer_SpherePosition.h>
 #include <ParticlePlugin/System/ParticleSystemDescriptor.h>
 #include <ParticlePlugin/Type/Quad/ParticleTypeQuad.h>
+#include <ParticlePlugin/Type/Ribbon/ParticleTypeRibbon.h>
 #include <ParticlePlugin/Type/Trail/ParticleTypeTrail.h>
 #include <ToolsFoundation/Command/TreeCommands.h>
 #include <ToolsFoundation/Command/VisualGraphCommands.h>
@@ -108,6 +109,20 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
       props["NormalCurvature"].m_Visibility = plPropertyUiState::Default;
       props["LightDirectionality"].m_Visibility = plPropertyUiState::Default;
     }
+  }
+  else if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plParticleTypeRibbonFactory>())
+  {
+    auto& props = *e.m_pPropertyStates;
+
+    bool useMaterial = e.m_pObject->GetTypeAccessor().GetValue("UseCustomMaterial").ConvertTo<bool>();
+    plInt64 lightingMode = e.m_pObject->GetTypeAccessor().GetValue("LightingMode").ConvertTo<plInt64>();
+    plInt64 uvMode = e.m_pObject->GetTypeAccessor().GetValue("UvMode").ConvertTo<plInt64>();
+
+    props["TileLength"].m_Visibility = (uvMode == plParticleRibbonUvMode::Tiled) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["NormalCurvature"].m_Visibility = (lightingMode == plParticleLightingMode::VertexLit) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["LightDirectionality"].m_Visibility = (lightingMode == plParticleLightingMode::VertexLit) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["Texture"].m_Visibility = useMaterial ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+    props["CustomMaterial"].m_Visibility = useMaterial ? plPropertyUiState::Default : plPropertyUiState::Invisible;
   }
   else if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plParticleBehaviorFactory_ColorGradient>())
   {
@@ -248,6 +263,11 @@ void plParticleEffectAssetDocument::BuildDescriptorFromGraph(plParticleEffectDes
     out_desc.m_fApplyInstanceVelocity = acc.GetValue("ApplyOwnerVelocity").ConvertTo<float>();
     out_desc.m_PreSimulateDuration = acc.GetValue("PreSimulateDuration").ConvertTo<plTime>();
     out_desc.m_vNumWindSamples = acc.GetValue("NumWindSamples").Get<plVec3U32>();
+    out_desc.m_fFadeOutStartDistance = acc.GetValue("FadeOutStartDistance").ConvertTo<float>();
+    out_desc.m_fFadeOutEndDistance = acc.GetValue("FadeOutEndDistance").ConvertTo<float>();
+    out_desc.m_Importance = (plParticleEffectImportance::Enum)acc.GetValue("Importance").ConvertTo<plInt64>();
+    out_desc.m_fFixedTickHz = acc.GetValue("FixedTickHz").ConvertTo<float>();
+    out_desc.m_uiMaxTicksPerFrame = acc.GetValue("MaxTicksPerFrame").ConvertTo<plUInt8>();
 
     // Copy map properties
     out_desc.m_FloatParameters.Clear();
@@ -304,8 +324,9 @@ void plParticleEffectAssetDocument::BuildDescriptorFromGraph(plParticleEffectDes
     pSysDesc->m_LifeTime = sysAcc.GetValue("LifeTime").Get<plVarianceTypeTime>();
     pSysDesc->m_sOnDeathEvent = sysAcc.GetValue("OnDeathEvent").ConvertTo<plString>();
     pSysDesc->m_sLifeScaleParameter = sysAcc.GetValue("LifeScaleParam").ConvertTo<plString>();
+    pSysDesc->m_SimulationTarget = (plParticleSimulationTarget::Enum)sysAcc.GetValue("SimulationTarget").ConvertTo<plInt32>();
 
-    // Emitter (at most 1)
+    // Emitters (a system can mix several, e.g. an initial burst plus a continuous stream)
     {
       plDynamicArray<const plDocumentObject*> emitterNodes;
       CollectConnectedNodes(pSystemNode, "Emitter", emitterNodes);

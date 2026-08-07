@@ -35,6 +35,7 @@ public:
   // plString m_sSharedInstanceName;
 
   virtual void CreateRequiredStreams() override;
+  virtual void QueryOptionalStreams() override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
 
   virtual float GetMaxParticleRadius(float fParticleSize) const override { return m_fMaxEffectRadius; }
@@ -50,4 +51,5 @@ protected:
   float m_fMaxEffectRadius = 1.0f;
   plProcessingStream* m_pStreamPosition = nullptr;
   plProcessingStream* m_pStreamEffectID = nullptr;
+  plProcessingStream* m_pStreamVelocity = nullptr; // optional; the parent particle's velocity is handed to the sub-effect
 };

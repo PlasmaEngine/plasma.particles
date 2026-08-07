@@ -83,6 +83,17 @@ void plParticleQuadRenderer::RenderBatch(const plRenderViewContext& renderViewCo
       {
         bindGroupMaterial.BindTexture("ParticleDistortionTexture", pRenderData->m_hDistortionTexture);
       }
+
+      if (pRenderData->m_LightingMode == plParticleLightingMode::SixWay)
+      {
+        bindGroupMaterial.BindTexture("ParticleSixWayMapA", pRenderData->m_hSixWayMapA);
+        bindGroupMaterial.BindTexture("ParticleSixWayMapB", pRenderData->m_hSixWayMapB);
+      }
+
+      if (pRenderData->m_LightingMode == plParticleLightingMode::PerPixel)
+      {
+        bindGroupMaterial.BindTexture("ParticleNormalMap", pRenderData->m_hNormalMap);
+      }
     }
 
     const plBaseParticleShaderData* pParticleBaseData = pRenderData->m_BaseParticleData.GetPtr();
@@ -93,7 +104,24 @@ void plParticleQuadRenderer::RenderBatch(const plRenderViewContext& renderViewCo
 
     ConfigureRenderMode(pRenderData, pRenderContext);
 
-    systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, pRenderData->m_uiNumVariationsX, pRenderData->m_uiNumVariationsY, pRenderData->m_uiNumFlipbookAnimationsX, pRenderData->m_uiNumFlipbookAnimationsY, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality);
+    // GPU-simulated: the data is already in device buffers and only the GPU knows how many
+    // particles survived, so bind them as-is and let the draw args carry the count
+    if (!pRenderData->m_hGpuDrawArgsBuffer.IsInvalidated())
+    {
+      systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, pRenderData->m_uiNumVariationsX, pRenderData->m_uiNumVariationsY, pRenderData->m_uiNumFlipbookAnimationsX, pRenderData->m_uiNumFlipbookAnimationsY, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality, pRenderData->m_fSixWayAbsorption, pRenderData->m_fNormalMapStrength);
+
+      pRenderContext->SetShaderPermutationVariable("PARTICLE_QUAD_MODE", pRenderData->m_QuadModePermutation);
+
+      plBindGroupBuilder& bindGroupDraw = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
+      bindGroupDraw.BindBuffer("particleBaseData", pRenderData->m_hGpuBaseDataBuffer);
+      bindGroupDraw.BindBuffer("particleBillboardQuadData", pRenderData->m_hGpuBillboardDataBuffer);
+      bindGroupDraw.BindBuffer("particleTangentQuadData", pRenderData->m_hGpuTangentDataBuffer);
+
+      pRenderContext->DrawMeshBufferIndirect(pRenderData->m_hGpuDrawArgsBuffer, 0).IgnoreResult();
+      continue;
+    }
+
+    systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, pRenderData->m_uiNumVariationsX, pRenderData->m_uiNumVariationsY, pRenderData->m_uiNumFlipbookAnimationsX, pRenderData->m_uiNumFlipbookAnimationsY, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality, pRenderData->m_fSixWayAbsorption, pRenderData->m_fNormalMapStrength);
 
     pRenderContext->SetShaderPermutationVariable("PARTICLE_QUAD_MODE", pRenderData->m_QuadModePermutation);
 
@@ -161,6 +189,12 @@ void plParticleQuadRenderer::ConfigureRenderMode(const plParticleQuadRenderData*
   {
     case plParticleLightingMode::Fullbright:
       pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
+      break;
+    case plParticleLightingMode::SixWay:
+      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_SIX_WAY");
+      break;
+    case plParticleLightingMode::PerPixel:
+      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_PER_PIXEL");
       break;
     case plParticleLightingMode::VertexLit:
       pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");

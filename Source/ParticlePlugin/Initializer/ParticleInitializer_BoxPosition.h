@@ -19,6 +19,7 @@ public:
 public:
   plVec3 m_vPositionOffset;
   plVec3 m_vSize;
+  bool m_bSpawnOnSurface = false; // spawn on the box faces (area-weighted) instead of inside the volume
   plString m_sScaleXParameter;
   plString m_sScaleYParameter;
   plString m_sScaleZParameter;
@@ -32,6 +33,7 @@ class PL_PARTICLEPLUGIN_DLL plParticleInitializer_BoxPosition final : public plP
 public:
   plVec3 m_vPositionOffset;
   plVec3 m_vSize;
+  bool m_bSpawnOnSurface = false;
 
   virtual void CreateRequiredStreams() override;
 

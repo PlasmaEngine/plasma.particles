@@ -22,6 +22,11 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectNode, 1, plRTTIDefaultAllocator<
     PL_MEMBER_PROPERTY("ApplyOwnerVelocity", m_fApplyInstanceVelocity)->AddAttributes(new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("PreSimulateDuration", m_PreSimulateDuration),
     PL_MEMBER_PROPERTY("NumWindSamples", m_vNumWindSamples)->AddAttributes(new plDefaultValueAttribute(plVec3U32(1)), new plClampValueAttribute(plVec3U32(1), plVec3U32(8))),
+    PL_MEMBER_PROPERTY("FadeOutStartDistance", m_fFadeOutStartDistance)->AddAttributes(new plClampValueAttribute(0.0f, {})),
+    PL_MEMBER_PROPERTY("FadeOutEndDistance", m_fFadeOutEndDistance)->AddAttributes(new plClampValueAttribute(0.0f, {})),
+    PL_ENUM_MEMBER_PROPERTY("Importance", plParticleEffectImportance, m_Importance),
+    PL_MEMBER_PROPERTY("FixedTickHz", m_fFixedTickHz)->AddAttributes(new plClampValueAttribute(0.0f, 120.0f)),
+    PL_MEMBER_PROPERTY("MaxTicksPerFrame", m_uiMaxTicksPerFrame)->AddAttributes(new plDefaultValueAttribute(4), new plClampValueAttribute(1, 16)),
     PL_MAP_MEMBER_PROPERTY("FloatParameters", m_FloatParameters),
     PL_MAP_MEMBER_PROPERTY("ColorParameters", m_ColorParameters)->AddAttributes(new plExposeColorAlphaAttribute),
   }
@@ -40,6 +45,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSystemNode, 1, plRTTIDefaultAllocator<
   {
     PL_MEMBER_PROPERTY("Name", m_sName),
     PL_MEMBER_PROPERTY("Visible", m_bVisible)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_ENUM_MEMBER_PROPERTY("SimulationTarget", plParticleSimulationTarget, m_SimulationTarget),
     PL_MEMBER_PROPERTY("LifeTime", m_LifeTime)->AddAttributes(new plDefaultValueAttribute(plTime::MakeFromSeconds(2)), new plClampValueAttribute(plTime::MakeFromSeconds(0.0), plVariant())),
     PL_MEMBER_PROPERTY("LifeScaleParam", m_sLifeScaleParameter),
     PL_MEMBER_PROPERTY("OnDeathEvent", m_sOnDeathEvent)->AddAttributes(new plDynamicStringEnumAttribute("ParticleEventNamesEnum")),

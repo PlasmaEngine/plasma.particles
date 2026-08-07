@@ -44,6 +44,11 @@ void plParticleEffectInstance::Construct(plParticleEffectHandle hEffectHandle, c
   m_pOwnerModule = pOwnerModule;
   m_hResource = hResource;
   m_bIsSharedEffect = bIsShared;
+  m_OwnerTags.Clear(); // instances are pooled; the new owner sets its tags after creation
+  m_fDynamicSpawnScale = 1.0f;
+  m_hSkinnedMeshComponent.Invalidate();
+  m_SkinningSnapshot.m_bValid = false;
+  m_SkinningSnapshot.m_BoneMatrices.Clear();
   m_bEmitterEnabled = true;
   m_bIsFinishing = false;
   m_BoundingVolume = plBoundingBoxSphere::MakeInvalid();
@@ -274,6 +279,11 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
   m_fApplyInstanceVelocity = desc.m_fApplyInstanceVelocity;
   m_bSimulateInLocalSpace = desc.m_bSimulateInLocalSpace;
   m_InvisibleUpdateRate = desc.m_InvisibleUpdateRate;
+  m_fFadeOutStartDistance = desc.m_fFadeOutStartDistance;
+  m_fFadeOutEndDistance = desc.m_fFadeOutEndDistance;
+  m_Importance = desc.m_Importance;
+  m_FixedTickStep = desc.m_fFixedTickHz > 0.0f ? plTime::MakeFromSeconds(1.0 / desc.m_fFixedTickHz) : plTime::MakeZero();
+  m_uiMaxTicksPerFrame = plMath::Max<plUInt8>(desc.m_uiMaxTicksPerFrame, 1);
 
   m_vNumWindSamples.x = desc.m_vNumWindSamples.x;
   m_vNumWindSamples.y = desc.m_vNumWindSamples.y;
@@ -324,7 +334,8 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
     m_PreSimulateDuration = desc.m_PreSimulateDuration;
   }
 
-  // TODO Check max number of particles etc. to reset
+  // a system whose max-particle count changed is cleared and recreated below,
+  // which re-sizes its stream group and re-initializes all streams
 
   if (m_ParticleSystems.GetCount() != systems.GetCount())
   {
@@ -473,6 +484,31 @@ bool plParticleEffectInstance::Update(const plTime& diff)
 
   m_ElapsedTimeSinceUpdate += diff;
   PassTransformToSystems();
+
+  // fixed-tick simulation: consume the elapsed time in constant steps, catch up at most
+  // MaxTicksPerFrame steps per frame and drop the rest (the Jolt-style death-spiral cap)
+  if (m_FixedTickStep.IsPositive())
+  {
+    if (m_ElapsedTimeSinceUpdate < plMath::Max(m_FixedTickStep, tMinStep))
+      return m_uiReviveTimeout > 0;
+
+    plUInt32 uiSteps = plMath::Min((plUInt32)(m_ElapsedTimeSinceUpdate.GetSeconds() / m_FixedTickStep.GetSeconds()), (plUInt32)m_uiMaxTicksPerFrame);
+
+    bool bAlive = m_uiReviveTimeout > 0;
+    for (plUInt32 i = 0; i < uiSteps; ++i)
+    {
+      m_ElapsedTimeSinceUpdate -= m_FixedTickStep;
+
+      bAlive = StepSimulation(m_FixedTickStep);
+      if (!bAlive)
+        return false;
+    }
+
+    // drop backlog beyond one step so a hitch doesn't cause a catch-up spiral
+    m_ElapsedTimeSinceUpdate = plMath::Min(m_ElapsedTimeSinceUpdate, m_FixedTickStep);
+
+    return bAlive;
+  }
 
   // if the time step is too big, iterate multiple times
   {

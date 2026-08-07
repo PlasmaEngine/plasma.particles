@@ -64,8 +64,6 @@ public:
   /// \todo This is a hacky guess, one would actually need to inspect the trail positions
   virtual float GetMaxParticleRadius(float fParticleSize) const override { return fParticleSize + m_uiMaxPoints * 0.05f; }
 
-  static plUInt16 ComputeTrailPointBucketSize(plUInt16 uiMaxTrailPoints);
-
 protected:
   friend class plParticleTypeTrailFactory;
 

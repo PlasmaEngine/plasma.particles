@@ -20,6 +20,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plQuadParticleOrientation, 2)
   PL_ENUM_CONSTANTS(plQuadParticleOrientation::Rotating_OrthoEmitterDir, plQuadParticleOrientation::Rotating_EmitterDir)
   PL_ENUM_CONSTANTS(plQuadParticleOrientation::Fixed_EmitterDir, plQuadParticleOrientation::Fixed_RandomDir, plQuadParticleOrientation::Fixed_WorldUp)
   PL_ENUM_CONSTANTS(plQuadParticleOrientation::FixedAxis_EmitterDir, plQuadParticleOrientation::FixedAxis_ParticleDir)
+  PL_ENUM_CONSTANTS(plQuadParticleOrientation::Fixed_StartAxis)
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeQuadFactory, 2, plRTTIDefaultAllocator<plParticleTypeQuadFactory>)
@@ -40,6 +41,11 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeQuadFactory, 2, plRTTIDefaultAlloc
     PL_MEMBER_PROPERTY("NumSpritesY", m_uiNumSpritesY)->AddAttributes(new plDefaultValueAttribute(1), new plClampValueAttribute(1, 16)),
     PL_MEMBER_PROPERTY("TintColorParam", m_sTintColorParameter),
     PL_MEMBER_PROPERTY("DistortionTexture", m_sDistortionTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("SixWayMapA", m_sSixWayMapA)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("SixWayMapB", m_sSixWayMapB)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("SixWayAbsorption", m_fSixWayAbsorption)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.05f, 8.0f)),
+    PL_MEMBER_PROPERTY("NormalMap", m_sNormalMap)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("NormalMapStrength", m_fNormalMapStrength)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("DistortionStrength", m_fDistortionStrength)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.0f, 500.0f)),
     PL_MEMBER_PROPERTY("ParticleStretch", m_fStretch)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(-100.0f, 100.0f)),
   }
@@ -88,6 +94,18 @@ void plParticleTypeQuadFactory::CopyTypeProperties(plParticleType* pObject, bool
 
     if (!m_sDistortionTexture.IsEmpty())
       pType->m_hDistortionTexture = plResourceManager::LoadResource<plTexture2DResource>(m_sDistortionTexture);
+
+    if (!m_sSixWayMapA.IsEmpty())
+      pType->m_hSixWayMapA = plResourceManager::LoadResource<plTexture2DResource>(m_sSixWayMapA);
+
+    if (!m_sSixWayMapB.IsEmpty())
+      pType->m_hSixWayMapB = plResourceManager::LoadResource<plTexture2DResource>(m_sSixWayMapB);
+
+    pType->m_fSixWayAbsorption = m_fSixWayAbsorption;
+    pType->m_fNormalMapStrength = m_fNormalMapStrength;
+
+    if (!m_sNormalMap.IsEmpty())
+      pType->m_hNormalMap = plResourceManager::LoadResource<plTexture2DResource>(m_sNormalMap);
   }
 }
 
@@ -101,6 +119,9 @@ enum class TypeQuadVersion
   Version_5, // added particle stretch
   Version_6, // added particle lighting
   Version_7, // added custom material support
+  Version_8, // added six-way lighting response maps
+  Version_9, // added six-way absorption
+  Version_10, // added per-pixel normal map
 
   // insert new version numbers above
   Version_Count,
@@ -134,6 +155,17 @@ void plParticleTypeQuadFactory::Save(plStreamWriter& inout_stream) const
   // Version 7
   inout_stream << m_bUseCustomMaterial;
   inout_stream << m_sCustomMaterial;
+
+  // Version 8
+  inout_stream << m_sSixWayMapA;
+  inout_stream << m_sSixWayMapB;
+
+  // Version 9
+  inout_stream << m_fSixWayAbsorption;
+
+  // Version 10
+  inout_stream << m_sNormalMap;
+  inout_stream << m_fNormalMapStrength;
 }
 
 void plParticleTypeQuadFactory::Load(plStreamReader& inout_stream)
@@ -189,6 +221,23 @@ void plParticleTypeQuadFactory::Load(plStreamReader& inout_stream)
     inout_stream >> m_bUseCustomMaterial;
     inout_stream >> m_sCustomMaterial;
   }
+
+  if (uiVersion >= 8)
+  {
+    inout_stream >> m_sSixWayMapA;
+    inout_stream >> m_sSixWayMapB;
+  }
+
+  if (uiVersion >= 9)
+  {
+    inout_stream >> m_fSixWayAbsorption;
+  }
+
+  if (uiVersion >= 10)
+  {
+    inout_stream >> m_sNormalMap;
+    inout_stream >> m_fNormalMapStrength;
+  }
 }
 
 void plParticleTypeQuadFactory::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -220,6 +269,13 @@ void plParticleTypeQuad::CreateRequiredStreams()
     CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, true);
   }
 
+  if (m_Orientation == plQuadParticleOrientation::Fixed_StartAxis)
+  {
+    // an initializer fills the axis at spawn time (e.g. Mesh Position writes the surface normal);
+    // without one, the stream's default initializer provides a fixed (1, 0, 0) axis
+    CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, false);
+  }
+
   if (m_TextureAtlasType == plParticleTextureAtlasType::RandomVariations || m_TextureAtlasType == plParticleTextureAtlasType::RandomYAnimatedX)
   {
     CreateStream("Variation", plProcessingStream::DataType::Int, &m_pStreamVariation, false);
@@ -229,6 +285,12 @@ void plParticleTypeQuad::CreateRequiredStreams()
   {
     CreateStream("LastPosition", plProcessingStream::DataType::Float3, &m_pStreamLastPosition, false);
   }
+}
+
+void plParticleTypeQuad::QueryOptionalStreams()
+{
+  // per-axis size multipliers, created e.g. by the Random Size initializer's aspect ratio
+  m_pStreamSize2 = GetOwnerSystem()->QueryStream("Size2", plProcessingStream::DataType::Half2);
 }
 
 struct sodComparer
@@ -249,36 +311,44 @@ void plParticleTypeQuad::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, 
 
   const bool bNeedsSorting = (m_RenderMode == plParticleTypeRenderMode::Blended) || (m_RenderMode == plParticleTypeRenderMode::BlendedForeground) || (m_RenderMode == plParticleTypeRenderMode::BlendedBackground) || (m_RenderMode == plParticleTypeRenderMode::BlendAdd);
 
-  // don't copy the data multiple times in the same frame, if the effect is instanced
-  if ((m_uiLastExtractedFrame != plRenderWorld::GetFrameCounter())
-    /*&& !bNeedsSorting*/) // TODO: in theory every shared instance has to sort the Quads, in practice this maybe should be an option
+  if (bNeedsSorting)
   {
+    // The sort order depends on the camera and the instance transform, so it cannot be cached across
+    // views or shared instances - re-extract per call. All memory comes from the frame allocator
+    // (thread-safe linear allocator, per-allocation Deallocate is a no-op) and lives until the frame
+    // is fully rendered - the same lifetime as the render data pointing into it. Extraction calls are
+    // serialized by the particle world module mutex, so the mutable members are race-free.
+    plHybridArray<sod, 64> sorted(plFrameAllocator::GetCurrentAllocator());
+    sorted.SetCountUninitialized(numParticles);
+
+    // Positions are in "particle space": world space normally, effect space when the transform is
+    // applied at render time (local-space simulation / shared instances). Move the camera into that
+    // space instead of transforming every particle into world space.
+    plVec3 vCameraPos = ref_msg.m_pView->GetCullingCamera()->GetCenterPosition();
+    if (GetOwnerEffect()->NeedsToApplyTransform())
+    {
+      vCameraPos = instanceTransform.GetInverse() * vCameraPos;
+    }
+
+    const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
+
+    for (plUInt32 p = 0; p < numParticles; ++p)
+    {
+      sorted[p].dist = (pPosition[p].GetAsVec3() - vCameraPos).GetLengthSquared();
+      sorted[p].index = p;
+    }
+
+    sorted.Sort(sodComparer());
+
+    CreateExtractedData(&sorted);
+  }
+  else if (m_uiLastExtractedFrame != plRenderWorld::GetFrameCounter())
+  {
+    // unsorted data is view- and instance-independent -> copy it only once per frame,
+    // no matter how many views or shared instances extract this effect
     m_uiLastExtractedFrame = plRenderWorld::GetFrameCounter();
 
-    if (bNeedsSorting)
-    {
-      // TODO: Using the frame allocator this way results in memory corruptions.
-      // Not sure, whether this is supposed to work.
-      plHybridArray<sod, 64> sorted; // (plFrameAllocator::GetCurrentAllocator());
-      sorted.SetCountUninitialized(numParticles);
-
-      const plVec3 vCameraPos = ref_msg.m_pView->GetCullingCamera()->GetCenterPosition();
-      const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
-
-      for (plUInt32 p = 0; p < numParticles; ++p)
-      {
-        sorted[p].dist = (pPosition[p].GetAsVec3() - vCameraPos).GetLengthSquared();
-        sorted[p].index = p;
-      }
-
-      sorted.Sort(sodComparer());
-
-      CreateExtractedData(&sorted);
-    }
-    else
-    {
-      CreateExtractedData(nullptr);
-    }
+    CreateExtractedData(nullptr);
   }
 
   AddParticleRenderData(ref_msg, instanceTransform);
@@ -319,6 +389,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
   const plVec3* pAxis = m_pStreamAxis ? m_pStreamAxis->GetData<plVec3>() : nullptr;
   const plUInt32* pVariation = m_pStreamVariation ? m_pStreamVariation->GetData<plUInt32>() : nullptr;
   const plVec3* pLastPosition = m_pStreamLastPosition ? m_pStreamLastPosition->GetData<plVec3>() : nullptr;
+  const plFloat16Vec2* pSize2 = m_pStreamSize2 ? m_pStreamSize2->GetData<plFloat16Vec2>() : nullptr;
 
   // this will automatically be deallocated at the end of the frame
   m_BaseParticleData = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plBaseParticleShaderData, numParticles);
@@ -338,6 +409,18 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
     m_BillboardParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
     m_BillboardParticleData[uiDstIdx].RotationOffset = pRotationOffset[uiSrcIdx];
     m_BillboardParticleData[uiDstIdx].RotationSpeed = pRotationSpeed[uiSrcIdx];
+    m_BillboardParticleData[uiDstIdx].ScaleX = pSize2 ? pSize2[uiSrcIdx].x : plFloat16(1.0f);
+    m_BillboardParticleData[uiDstIdx].ScaleY = pSize2 ? pSize2[uiSrcIdx].y : plFloat16(1.0f);
+  };
+
+  // per-axis size multipliers fold directly into the tangent lengths
+  auto ApplyAxisScale = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
+  {
+    if (pSize2 != nullptr)
+    {
+      m_TangentParticleData[uiDstIdx].TangentX *= (float)pSize2[uiSrcIdx].x;
+      m_TangentParticleData[uiDstIdx].TangentZ *= (float)pSize2[uiSrcIdx].y;
+    }
   };
 
   auto SetTangentDataEmitterDir = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
@@ -347,6 +430,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
     m_TangentParticleData[uiDstIdx].TangentX = mRotation * vEmitterDirOrtho;
     m_TangentParticleData[uiDstIdx].TangentZ = vEmitterDir;
+    ApplyAxisScale(uiDstIdx, uiSrcIdx);
   };
 
   auto SetTangentDataEmitterDirOrtho = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
@@ -360,6 +444,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
     m_TangentParticleData[uiDstIdx].TangentX = vOrthoDir;
     m_TangentParticleData[uiDstIdx].TangentZ = mRotation * vEmitterDir;
+    ApplyAxisScale(uiDstIdx, uiSrcIdx);
   };
 
   auto SetTangentDataFromAxis = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
@@ -377,6 +462,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
     m_TangentParticleData[uiDstIdx].TangentX = vTangentX;
     m_TangentParticleData[uiDstIdx].TangentZ = vTangentX.CrossRH(vNormal);
+    ApplyAxisScale(uiDstIdx, uiSrcIdx);
   };
 
   auto SetTangentDataAligned_Emitter = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
@@ -425,7 +511,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
         SetTangentDataEmitterDirOrtho(p, redirect(p, pSorted));
       }
     }
-    else if (m_Orientation == plQuadParticleOrientation::Fixed_EmitterDir || m_Orientation == plQuadParticleOrientation::Fixed_RandomDir || m_Orientation == plQuadParticleOrientation::Fixed_WorldUp)
+    else if (m_Orientation == plQuadParticleOrientation::Fixed_EmitterDir || m_Orientation == plQuadParticleOrientation::Fixed_RandomDir || m_Orientation == plQuadParticleOrientation::Fixed_WorldUp || m_Orientation == plQuadParticleOrientation::Fixed_StartAxis)
     {
       for (plUInt32 p = 0; p < numParticles; ++p)
       {
@@ -481,6 +567,11 @@ void plParticleTypeQuad::AddParticleRenderData(plMsgExtractRenderData& msg, cons
   pRenderData->m_uiNumFlipbookAnimationsX = 1;
   pRenderData->m_uiNumFlipbookAnimationsY = 1;
   pRenderData->m_hDistortionTexture = m_hDistortionTexture;
+  pRenderData->m_hSixWayMapA = m_hSixWayMapA;
+  pRenderData->m_hSixWayMapB = m_hSixWayMapB;
+  pRenderData->m_fSixWayAbsorption = m_fSixWayAbsorption;
+  pRenderData->m_hNormalMap = m_hNormalMap;
+  pRenderData->m_fNormalMapStrength = m_fNormalMapStrength;
   pRenderData->m_fDistortionStrength = m_fDistortionStrength;
   pRenderData->m_LightingMode = m_LightingMode;
   pRenderData->m_fNormalCurvature = m_fNormalCurvature;
@@ -497,6 +588,7 @@ void plParticleTypeQuad::AddParticleRenderData(plMsgExtractRenderData& msg, cons
     case plQuadParticleOrientation::Fixed_EmitterDir:
     case plQuadParticleOrientation::Fixed_WorldUp:
     case plQuadParticleOrientation::Fixed_RandomDir:
+    case plQuadParticleOrientation::Fixed_StartAxis:
       pRenderData->m_QuadModePermutation = "PARTICLE_QUAD_MODE_TANGENTS";
       break;
     case plQuadParticleOrientation::FixedAxis_EmitterDir:
@@ -610,33 +702,9 @@ void plParticleTypeQuad::AllocateParticleData(const plUInt32 numParticles, const
 #include <Foundation/Serialization/AbstractObjectGraph.h>
 #include <Foundation/Serialization/GraphPatch.h>
 
-class plQuadParticleOrientationPatch_1_2 final : public plGraphPatch
-{
-public:
-  plQuadParticleOrientationPatch_1_2()
-    : plGraphPatch("plQuadParticleOrientation", 2)
-  {
-  }
-
-  virtual void Patch(plGraphPatchContext& ref_context, plAbstractObjectGraph* pGraph, plAbstractObjectNode* pNode) const override
-  {
-    // TODO: this type of patch does not work
-
-    pNode->RenameProperty("FragmentOrthogonalEmitterDirection", "Rotating_OrthoEmitterDir");
-    pNode->RenameProperty("FragmentEmitterDirection", "Rotating_EmitterDir");
-
-    pNode->RenameProperty("SpriteEmitterDirection", "Fixed_EmitterDir");
-    pNode->RenameProperty("SpriteRandom", "Fixed_RandomDir");
-    pNode->RenameProperty("SpriteWorldUp", "Fixed_WorldUp");
-
-    pNode->RenameProperty("AxisAligned_Emitter", "FixedAxis_EmitterDir");
-  }
-};
-
-plQuadParticleOrientationPatch_1_2 g_plQuadParticleOrientationPatch_1_2;
-
-//////////////////////////////////////////////////////////////////////////
-
+// Enum values are serialized as string properties on the OWNING object's node - enum types never
+// appear as their own nodes in the graph, so patches registered on the enum type never fire.
+// The rename of the old plQuadParticleOrientation values is therefore done by the factory patch below.
 class plParticleTypeQuadFactory_1_2 final : public plGraphPatch
 {
 public:
@@ -648,6 +716,9 @@ public:
   virtual void Patch(plGraphPatchContext& ref_context, plAbstractObjectGraph* pGraph, plAbstractObjectNode* pNode) const override
   {
     plAbstractObjectNode::Property* pProp = pNode->FindProperty("Orientation");
+    if (pProp == nullptr || !pProp->m_Value.IsA<plString>())
+      return;
+
     const plStringBuilder sOri = pProp->m_Value.Get<plString>();
 
     if (sOri == "plQuadParticleOrientation::FragmentOrthogonalEmitterDirection")

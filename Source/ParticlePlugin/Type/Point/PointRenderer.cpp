@@ -64,6 +64,17 @@ void plParticlePointRenderer::RenderBatch(const plRenderViewContext& renderViewC
 
     systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, 1, 1, 1, 1);
 
+    // GPU-simulated: the data is already in device buffers and only the GPU knows the count
+    if (!pRenderData->m_hGpuDrawArgsBuffer.IsInvalidated())
+    {
+      plBindGroupBuilder& bindGroupDraw = renderViewContext.m_pRenderContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
+      bindGroupDraw.BindBuffer("particleBaseData", pRenderData->m_hGpuBaseDataBuffer);
+      bindGroupDraw.BindBuffer("particleBillboardQuadData", pRenderData->m_hGpuBillboardDataBuffer);
+
+      pRenderContext->DrawMeshBufferIndirect(pRenderData->m_hGpuDrawArgsBuffer, 0).IgnoreResult();
+      continue;
+    }
+
     while (uiNumParticles > 0)
     {
       // Request new buffers and bind them

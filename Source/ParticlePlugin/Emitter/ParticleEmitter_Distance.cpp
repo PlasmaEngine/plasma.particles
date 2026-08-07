@@ -126,10 +126,7 @@ plUInt32 plParticleEmitter_Distance::ComputeSpawnCount(const plTime& tDiff)
     return 0;
   }
 
-  float fSpawnFactor = 1.0f;
-
-  const float spawnCountScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSpawnCountScaleParameter, 1.0f), 0.0f);
-  fSpawnFactor *= spawnCountScale;
+  const float fSpawnFactor = GetSpawnCountScale(m_sSpawnCountScaleParameter);
 
   plUInt32 uiSpawn = m_uiSpawnCountMin;
 

@@ -18,6 +18,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory_CylinderPosition, 2
     PL_MEMBER_PROPERTY("Radius", m_fRadius)->AddAttributes(new plDefaultValueAttribute(0.25f), new plClampValueAttribute(0.01f, 100.0f)),
     PL_MEMBER_PROPERTY("Height", m_fHeight)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 100.0f)),
     PL_MEMBER_PROPERTY("OnSurface", m_bSpawnOnSurface),
+    PL_MEMBER_PROPERTY("ShellThickness", m_fShellThickness)->AddAttributes(new plClampValueAttribute(0.0f, 100.0f)),
     PL_MEMBER_PROPERTY("SetVelocity", m_bSetVelocity),
     PL_MEMBER_PROPERTY("Speed", m_Speed),
     PL_MEMBER_PROPERTY("ScaleRadiusParam", m_sScaleRadiusParameter),
@@ -60,6 +61,7 @@ void plParticleInitializerFactory_CylinderPosition::CopyInitializerProperties(pl
   pInitializer->m_vPositionOffset = m_vPositionOffset;
   pInitializer->m_fRadius = plMath::Max(m_fRadius * fScaleRadius, 0.01f); // prevent 0 radius
   pInitializer->m_fHeight = plMath::Max(m_fHeight * fScaleHeight, 0.0f);
+  pInitializer->m_fShellThickness = plMath::Clamp(m_fShellThickness * fScaleRadius, 0.0f, pInitializer->m_fRadius);
   pInitializer->m_bSpawnOnSurface = m_bSpawnOnSurface;
   pInitializer->m_bSetVelocity = m_bSetVelocity;
   pInitializer->m_Speed = m_Speed;
@@ -89,7 +91,7 @@ float plParticleInitializerFactory_CylinderPosition::GetSpawnCountMultiplier(con
 
 void plParticleInitializerFactory_CylinderPosition::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 3;
+  const plUInt8 uiVersion = 4;
   inout_stream << uiVersion;
 
   inout_stream << m_fRadius;
@@ -105,6 +107,9 @@ void plParticleInitializerFactory_CylinderPosition::Save(plStreamWriter& inout_s
   // version 3
   inout_stream << m_sScaleRadiusParameter;
   inout_stream << m_sScaleHeightParameter;
+
+  // version 4
+  inout_stream << m_fShellThickness;
 }
 
 void plParticleInitializerFactory_CylinderPosition::Load(plStreamReader& inout_stream)
@@ -128,6 +133,11 @@ void plParticleInitializerFactory_CylinderPosition::Load(plStreamReader& inout_s
   {
     inout_stream >> m_sScaleRadiusParameter;
     inout_stream >> m_sScaleHeightParameter;
+  }
+
+  if (uiVersion >= 4)
+  {
+    inout_stream >> m_fShellThickness;
   }
 }
 
@@ -192,7 +202,19 @@ void plParticleInitializer_CylinderPosition::InitializeElements(plUInt64 uiStart
     }
 
     if (m_bSpawnOnSurface)
-      pos = normalPos * m_fRadius;
+    {
+      if (m_fShellThickness > 0.0f)
+      {
+        // uniform density inside the annulus [Radius - Thickness, Radius]: r = sqrt(lerp(inner^2, outer^2, u))
+        const float fInner = m_fRadius - m_fShellThickness;
+        const float fR2 = plMath::Lerp(fInner * fInner, m_fRadius * m_fRadius, (float)rng.DoubleZeroToOneInclusive());
+        pos = normalPos * plMath::Sqrt(fR2);
+      }
+      else
+      {
+        pos = normalPos * m_fRadius;
+      }
+    }
 
     if (m_fHeight > 0)
     {

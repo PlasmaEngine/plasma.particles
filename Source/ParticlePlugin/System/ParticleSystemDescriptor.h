@@ -4,6 +4,7 @@
 #include <Foundation/DataProcessing/Stream/ProcessingStreamGroup.h>
 #include <Foundation/Reflection/Reflection.h>
 #include <Foundation/Types/VarianceTypes.h>
+#include <ParticlePlugin/Declarations.h>
 #include <ParticlePlugin/ParticlePluginDLL.h>
 
 class plParticleEmitterFactory;
@@ -41,6 +42,8 @@ public:
   plTime GetAvgLifetime() const;
 
   bool m_bVisible;
+
+  plEnum<plParticleSimulationTarget> m_SimulationTarget;
 
   plVarianceTypeTime m_LifeTime;
   plString m_sOnDeathEvent;

@@ -45,6 +45,10 @@ protected:
   virtual bool IsContinuous() const;
   virtual void Process(plUInt64 uiNumElements) final override;
 
+  /// \brief The combined spawn-count scale: the effect parameter (if set), the global
+  /// 'Particles.SpawnCountScale' cvar and the effect's distance-LOD scale.
+  float GetSpawnCountScale(const plTempHashedString& sScaleParameter) const;
+
   /// \brief Called once per update. Must return how many new particles are to be spawned.
   virtual plUInt32 ComputeSpawnCount(const plTime& tDiff) = 0;
 

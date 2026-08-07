@@ -110,10 +110,7 @@ plUInt32 plParticleEmitter_OnEvent::ComputeSpawnCount(const plTime& tDiff)
 
   m_bSpawn = false;
 
-  float fSpawnFactor = 1.0f;
-
-  const float spawnCountScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSpawnCountScaleParameter, 1.0f), 0.0f);
-  fSpawnFactor *= spawnCountScale;
+  const float fSpawnFactor = GetSpawnCountScale(m_sSpawnCountScaleParameter);
 
   return static_cast<plUInt32>((m_uiSpawnCountMin + GetRNG().UIntInRange(1 + m_uiSpawnCountRange)) * fSpawnFactor);
 }
