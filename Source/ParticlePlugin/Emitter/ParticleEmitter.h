@@ -23,6 +23,10 @@ public:
 
   virtual void Save(plStreamWriter& inout_stream) const = 0;
   virtual void Load(plStreamReader& inout_stream) = 0;
+
+  /// Authoring only: a disabled block is kept in the document but left out of the built
+  /// descriptor, so the runtime never sees it and nothing needs to serialize the flag.
+  bool m_bEnabled = true;
 };
 
 enum class plParticleEmitterState

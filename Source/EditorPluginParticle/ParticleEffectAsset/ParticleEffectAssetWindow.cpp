@@ -175,6 +175,8 @@ void plQtParticleEffectAssetDocumentWindow::SendLiveResourcePreview()
   msg.m_Data = plArrayPtr<const plUInt8>(streamStorage.GetData(), streamStorage.GetStorageSize32());
 
   plEditorEngineProcessConnection::GetSingleton()->SendMessage(&msg);
+
+  plLog::Dev("Particles: sent live preview update for '{}' ({} bytes)", msg.m_sResourceID, streamStorage.GetStorageSize32());
 }
 
 void plQtParticleEffectAssetDocumentWindow::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)

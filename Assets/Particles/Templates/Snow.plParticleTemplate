@@ -1,0 +1,143 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9500001,9500101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9500001,9500102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9500001,9500103}}
+			Uuid{u4{9500001,9500104}}
+			Uuid{u4{9500001,9500105}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9500001,9500106}}
+			Uuid{u4{9500001,9500107}}
+			Uuid{u4{9500001,9500108}}
+			Uuid{u4{9500001,9500109}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9500001,9500110}}
+		}
+		s %Name{"Snow"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{2}
+			Time %Value{d{8}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{60}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500103}}
+	s %t{"plParticleInitializerFactory_BoxPosition"}
+	u3 %v{1}
+	p
+	{
+		Vec3 %PositionOffset{f{0,0,15}}
+		Vec3 %Size{f{20,20,0.2}}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500104}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500105}}
+	s %t{"plParticleInitializerFactory_RandomRotationSpeed"}
+	u3 %v{2}
+	p
+	{
+		b %RandomStartAngle{1}
+		Angle %DegreesPerSecond{f{0.5}}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500106}}
+	s %t{"plParticleBehaviorFactory_Gravity"}
+	u3 %v{1}
+	p
+	{
+		f %GravityFactor{0.12}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500107}}
+	s %t{"plParticleBehaviorFactory_Turbulence"}
+	u3 %v{1}
+	p
+	{
+		f %Strength{0.5}
+		f %Frequency{0.3}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500108}}
+	s %t{"plParticleBehaviorFactory_Velocity"}
+	u3 %v{1}
+	p
+	{
+		f %WindInfluence{0.8}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500109}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{1}
+	}
+}
+o
+{
+	Uuid %id{u4{9500001,9500110}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{2}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Blended"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

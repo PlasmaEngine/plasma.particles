@@ -1,0 +1,148 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9200001,9200101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9200001,9200102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9200001,9200103}}
+			Uuid{u4{9200001,9200104}}
+			Uuid{u4{9200001,9200105}}
+			Uuid{u4{9200001,9200106}}
+			Uuid{u4{9200001,9200107}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9200001,9200108}}
+			Uuid{u4{9200001,9200109}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9200001,9200110}}
+		}
+		s %Name{"Smoke"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{1}
+			Time %Value{d{3}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{15}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.2}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200104}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200105}}
+	s %t{"plParticleInitializerFactory_VelocityCone"}
+	u3 %v{2}
+	p
+	{
+		Angle %Angle{f{0.3491}}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{0.3}
+			f %Value{0.8}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200106}}
+	s %t{"plParticleInitializerFactory_RandomRotationSpeed"}
+	u3 %v{2}
+	p
+	{
+		b %RandomStartAngle{1}
+		Angle %DegreesPerSecond{f{0.5236}}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200107}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{0.15,0.15,0.15,1}}
+		Color %Color2{f{0.4,0.4,0.4,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200108}}
+	s %t{"plParticleBehaviorFactory_Velocity"}
+	u3 %v{1}
+	p
+	{
+		f %RiseSpeed{0.4}
+		f %WindInfluence{0.5}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200109}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{1}
+	}
+}
+o
+{
+	Uuid %id{u4{9200001,9200110}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{2}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Blended"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

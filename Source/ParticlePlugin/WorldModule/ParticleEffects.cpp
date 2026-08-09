@@ -309,6 +309,11 @@ void plParticleWorldModule::ReconfigureEffects()
 {
   PL_LOCK(m_Mutex);
 
+  if (!m_EffectsToReconfigure.IsEmpty())
+  {
+    plLog::Dev("Reconfiguring {} live particle effect(s)", m_EffectsToReconfigure.GetCount());
+  }
+
   for (auto pEffect : m_EffectsToReconfigure)
   {
     pEffect->Reconfigure(false, plArrayPtr<plParticleEffectFloatParam>(), plArrayPtr<plParticleEffectColorParam>());

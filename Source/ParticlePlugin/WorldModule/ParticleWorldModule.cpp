@@ -133,14 +133,18 @@ void plParticleWorldModule::ResourceEventHandler(const plResourceEvent& e)
 
     plParticleEffectResourceHandle hResource((plParticleEffectResource*)(e.m_pResource));
 
+    plUInt32 uiQueued = 0;
     const plUInt32 numEffects = m_ParticleEffects.GetCount();
     for (plUInt32 i = 0; i < numEffects; ++i)
     {
       if (m_ParticleEffects[i].GetResource() == hResource)
       {
         m_EffectsToReconfigure.PushBack(&m_ParticleEffects[i]);
+        ++uiQueued;
       }
     }
+
+    plLog::Dev("Particle resource '{}' changed: {} of {} live effect(s) queued for reconfigure", e.m_pResource->GetResourceID(), uiQueued, numEffects);
   }
 }
 

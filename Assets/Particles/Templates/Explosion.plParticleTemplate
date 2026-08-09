@@ -1,0 +1,137 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9400001,9400101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9400001,9400102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9400001,9400103}}
+			Uuid{u4{9400001,9400104}}
+			Uuid{u4{9400001,9400105}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9400001,9400106}}
+			Uuid{u4{9400001,9400107}}
+			Uuid{u4{9400001,9400108}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9400001,9400109}}
+		}
+		s %Name{"Explosion"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{0.4}
+			Time %Value{d{0.9}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400102}}
+	s %t{"plParticleEmitterFactory_Burst"}
+	u3 %v{1}
+	p
+	{
+		u3 %MinSpawnCount{60}
+		u3 %SpawnCountRange{20}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.1}
+		b %SetVelocity{1}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{2}
+			f %Value{5}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400104}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400105}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{1,0.5,0.15,1}}
+		Color %Color2{f{1,0.75,0.3,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400106}}
+	s %t{"plParticleBehaviorFactory_Gravity"}
+	u3 %v{1}
+	p
+	{
+		f %GravityFactor{0.3}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400107}}
+	s %t{"plParticleBehaviorFactory_Drag"}
+	u3 %v{1}
+	p
+	{
+		f %Drag{1.5}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400108}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{2}
+	}
+}
+o
+{
+	Uuid %id{u4{9400001,9400109}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{2}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Additive"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

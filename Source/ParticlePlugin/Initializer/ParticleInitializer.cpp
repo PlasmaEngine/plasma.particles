@@ -5,8 +5,13 @@
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 
 // clang-format off
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory, 1, plRTTINoAllocator)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory, 2, plRTTINoAllocator)
 {
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
     new plCategoryAttribute("Initializer", plColorScheme::DarkUI(plColorScheme::Green)),

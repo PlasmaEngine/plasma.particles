@@ -1,0 +1,136 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9100001,9100101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9100001,9100102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9100001,9100103}}
+			Uuid{u4{9100001,9100104}}
+			Uuid{u4{9100001,9100105}}
+			Uuid{u4{9100001,9100106}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9100001,9100107}}
+			Uuid{u4{9100001,9100108}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9100001,9100109}}
+		}
+		s %Name{"Fire"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{0.3}
+			Time %Value{d{1}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{40}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.15}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100104}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100105}}
+	s %t{"plParticleInitializerFactory_VelocityCone"}
+	u3 %v{2}
+	p
+	{
+		Angle %Angle{f{0.2618}}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{0.4}
+			f %Value{1.2}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100106}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{1,0.45,0.1,1}}
+		Color %Color2{f{1,0.8,0.25,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100107}}
+	s %t{"plParticleBehaviorFactory_Velocity"}
+	u3 %v{1}
+	p
+	{
+		f %RiseSpeed{0.6}
+		f %WindInfluence{0.2}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100108}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{2}
+	}
+}
+o
+{
+	Uuid %id{u4{9100001,9100109}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{2}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Additive"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

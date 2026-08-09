@@ -22,6 +22,23 @@ public:
   static plActionDescriptorHandle s_hSimulationSpeedMenu;
   static plActionDescriptorHandle s_hSimulationSpeed[10];
   static plActionDescriptorHandle s_hRenderVisualizers;
+  static plActionDescriptorHandle s_hTemplatesMenu;
+};
+
+/// Dropdown listing every system template ('Particles/Templates' in any data directory);
+/// picking one instantiates that system into the open effect.
+class plParticleTemplatesMenuAction : public plDynamicMenuAction
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleTemplatesMenuAction, plDynamicMenuAction);
+
+public:
+  plParticleTemplatesMenuAction(const plActionContext& context, const char* szName, const char* szIconPath)
+    : plDynamicMenuAction(context, szName, szIconPath)
+  {
+  }
+
+  virtual void GetEntries(plDynamicArray<Item>& out_entries) override;
+  virtual void Execute(const plVariant& value) override;
 };
 
 class plParticleAction : public plButtonAction

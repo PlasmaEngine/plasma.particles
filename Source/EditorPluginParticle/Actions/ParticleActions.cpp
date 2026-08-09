@@ -3,8 +3,12 @@
 #include <EditorPluginParticle/Actions/ParticleActions.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAsset.h>
 #include <GuiFoundation/Action/ActionManager.h>
+#include <GuiFoundation/UIServices/UIServices.moc.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleAction, 1, plRTTINoAllocator)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTemplatesMenuAction, 1, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
 plActionDescriptorHandle plParticleActions::s_hCategory;
@@ -14,6 +18,7 @@ plActionDescriptorHandle plParticleActions::s_hAutoRestart;
 plActionDescriptorHandle plParticleActions::s_hSimulationSpeedMenu;
 plActionDescriptorHandle plParticleActions::s_hSimulationSpeed[10];
 plActionDescriptorHandle plParticleActions::s_hRenderVisualizers;
+plActionDescriptorHandle plParticleActions::s_hTemplatesMenu;
 
 
 void plParticleActions::RegisterActions()
@@ -49,6 +54,7 @@ void plParticleActions::RegisterActions()
     "PFX.Speed.10", plActionScope::Document, "Particles", "Ctrl+0", plParticleAction, plParticleAction::ActionType::SimulationSpeed, 10.0f);
   s_hRenderVisualizers = PL_REGISTER_ACTION_1(
     "PFX.Render.Visualizers", plActionScope::Document, "Particles", "V", plParticleAction, plParticleAction::ActionType::RenderVisualizers);
+  s_hTemplatesMenu = PL_REGISTER_DYNAMIC_MENU("PFX.Templates", plParticleTemplatesMenuAction, ":/GuiFoundation/Icons/DocumentAdd.svg");
 }
 
 void plParticleActions::UnregisterActions()
@@ -59,6 +65,7 @@ void plParticleActions::UnregisterActions()
   plActionManager::UnregisterAction(s_hAutoRestart);
   plActionManager::UnregisterAction(s_hSimulationSpeedMenu);
   plActionManager::UnregisterAction(s_hRenderVisualizers);
+  plActionManager::UnregisterAction(s_hTemplatesMenu);
 
   for (int i = 0; i < PL_ARRAY_SIZE(s_hSimulationSpeed); ++i)
     plActionManager::UnregisterAction(s_hSimulationSpeed[i]);
@@ -85,6 +92,7 @@ void plParticleActions::MapActions(plStringView sMapping)
     pMap->MapAction(s_hSimulationSpeed[i], sSubPath, i + 1.0f);
 
   pMap->MapAction(s_hRenderVisualizers, szSubPath, 4.0f);
+  pMap->MapAction(s_hTemplatesMenu, szSubPath, 5.0f);
 }
 
 plParticleAction::plParticleAction(const plActionContext& context, const char* szName, plParticleAction::ActionType type, float fSimSpeed)
@@ -168,6 +176,48 @@ void plParticleAction::EffectEventHandler(const plParticleEffectAssetEvent& e)
     default:
       break;
   }
+}
+
+void plParticleTemplatesMenuAction::GetEntries(plDynamicArray<Item>& out_entries)
+{
+  out_entries.Clear();
+
+  plDynamicArray<plParticleEffectAssetDocument::SystemTemplate> templates;
+  plParticleEffectAssetDocument::GetAvailableSystemTemplates(templates);
+
+  bool bPrevWasProjectLocal = false;
+  for (const auto& tmpl : templates)
+  {
+    // shipped templates come first; a separator marks where the project's own begin
+    if (tmpl.m_bProjectLocal && !bPrevWasProjectLocal && !out_entries.IsEmpty())
+    {
+      Item& sep = out_entries.ExpandAndGetRef();
+      sep.m_ItemFlags = Item::ItemFlags::Separator;
+    }
+    bPrevWasProjectLocal = tmpl.m_bProjectLocal;
+
+    Item& item = out_entries.ExpandAndGetRef();
+    item.m_sDisplay = tmpl.m_sName;
+    item.m_UserValue = tmpl.m_sFilePath;
+  }
+
+  if (out_entries.IsEmpty())
+  {
+    Item& item = out_entries.ExpandAndGetRef();
+    item.m_sDisplay = "<no templates found>";
+  }
+}
+
+void plParticleTemplatesMenuAction::Execute(const plVariant& value)
+{
+  // the "<no templates found>" placeholder has no file attached
+  if (!value.IsA<plString>())
+    return;
+
+  auto* pDocument = const_cast<plParticleEffectAssetDocument*>(static_cast<const plParticleEffectAssetDocument*>(m_Context.m_pDocument));
+
+  const plStatus status = pDocument->AddSystemFromTemplate(value.Get<plString>());
+  plQtUiServices::MessageBoxStatus(status, "Adding the system from the template failed.");
 }
 
 void plParticleAction::UpdateState()

@@ -258,48 +258,66 @@ namespace
   }
 } // namespace
 
-plStringView plParticleGPULowering::FindLoweringBlocker(const plParticleSystemDescriptor* pDescriptor)
+plStringView plParticleGPULowering::FindLoweringBlocker(
+  const plParticleSystemDescriptor* pDescriptor, BlockerKind* out_pKind, plUInt32* out_uiIndex)
 {
+  // A small helper so every early-out reports where the blocker was found.
+  auto blocked = [&](BlockerKind kind, plUInt32 uiIndex, plStringView sReason) -> plStringView
+  {
+    if (out_pKind != nullptr)
+      *out_pKind = kind;
+    if (out_uiIndex != nullptr)
+      *out_uiIndex = uiIndex;
+    return sReason;
+  };
+
+  if (out_pKind != nullptr)
+    *out_pKind = BlockerKind::None;
+  if (out_uiIndex != nullptr)
+    *out_uiIndex = 0;
+
   // ---- render type ----
   const auto& typeFactories = pDescriptor->GetTypeFactories();
 
   if (typeFactories.GetCount() != 1)
-    return "Multiple render types";
+    return blocked(BlockerKind::Type, 0, "Multiple render types");
 
   if (const auto* pQuad = plDynamicCast<const plParticleTypeQuadFactory*>(typeFactories[0]))
   {
     const plStringView sReason = CheckQuadTypeLowerable(pQuad);
     if (!sReason.IsEmpty())
-      return sReason;
+      return blocked(BlockerKind::Type, 0, sReason);
   }
   else if (plDynamicCast<const plParticleTypePointFactory*>(typeFactories[0]) == nullptr &&
            plDynamicCast<const plParticleTypeTrailFactory*>(typeFactories[0]) == nullptr)
   {
-    return typeFactories[0]->GetDynamicRTTI()->GetTypeName();
+    return blocked(BlockerKind::Type, 0, typeFactories[0]->GetDynamicRTTI()->GetTypeName());
   }
 
   // ---- behaviors: every module needs a GPU equivalent, one instance of each kind ----
   plSet<const plRTTI*> seenKinds;
+  plUInt32 uiBehaviorIndex = 0;
 
   for (const plParticleBehaviorFactory* pFactory : pDescriptor->GetBehaviorFactories())
   {
     const plRTTI* pRtti = pFactory->GetDynamicRTTI();
+    const plUInt32 uiIndex = uiBehaviorIndex++;
 
     if (seenKinds.Contains(pRtti) && pRtti != plGetStaticRTTI<plParticleBehaviorFactory_Gravity>())
-      return "Duplicate behavior (the GPU runs one instance of each kind)";
+      return blocked(BlockerKind::Behavior, uiIndex, "Duplicate behavior (the GPU runs one instance of each kind)");
     seenKinds.Insert(pRtti);
 
     if (const auto* pDrag = plDynamicCast<const plParticleBehaviorFactory_Drag*>(pFactory))
     {
       if (pDrag->m_bSizeRelative)
-        return "Size-relative drag";
+        return blocked(BlockerKind::Behavior, uiIndex, "Size-relative drag");
     }
     else if (const auto* pRaycast = plDynamicCast<const plParticleBehaviorFactory_Raycast*>(pFactory))
     {
       // the GPU approximates collision against the depth buffer and the scene SDF, which cannot
       // raise a CPU-side event or honour a physics collision layer
       if (!pRaycast->m_sOnCollideEvent.IsEmpty())
-        return "Raycast collision event";
+        return blocked(BlockerKind::Behavior, uiIndex, "Raycast collision event");
     }
     else if (plDynamicCast<const plParticleBehaviorFactory_Velocity*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_Gravity*>(pFactory) ||
              plDynamicCast<const plParticleBehaviorFactory_ColorGradient*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_SizeCurve*>(pFactory) ||
@@ -313,7 +331,7 @@ plStringView plParticleGPULowering::FindLoweringBlocker(const plParticleSystemDe
     }
     else
     {
-      return pRtti->GetTypeName();
+      return blocked(BlockerKind::Behavior, uiIndex, pRtti->GetTypeName());
     }
   }
 

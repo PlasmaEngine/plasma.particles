@@ -3,8 +3,13 @@
 #include <ParticlePlugin/Type/ParticleType.h>
 
 // clang-format off
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeFactory, 1, plRTTINoAllocator)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeFactory, 2, plRTTINoAllocator)
 {
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
     new plCategoryAttribute("Renderer", plColorScheme::DarkUI(plColorScheme::Grape)),

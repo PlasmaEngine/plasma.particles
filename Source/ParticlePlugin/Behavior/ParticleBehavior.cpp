@@ -3,8 +3,13 @@
 #include <Foundation/DataProcessing/Stream/ProcessingStreamGroup.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
 
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory, 1, plRTTINoAllocator)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory, 2, plRTTINoAllocator)
 {
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
     new plCategoryAttribute("Behavior", plColorScheme::DarkUI(plColorScheme::Orange)),

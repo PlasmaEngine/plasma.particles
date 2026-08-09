@@ -1,0 +1,125 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9600001,9600101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9600001,9600102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9600001,9600103}}
+			Uuid{u4{9600001,9600104}}
+			Uuid{u4{9600001,9600105}}
+			Uuid{u4{9600001,9600108}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9600001,9600106}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9600001,9600107}}
+		}
+		s %Name{"Trail"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{0.1}
+			Time %Value{d{0.6}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{60}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.02}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600104}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600105}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{0.7,0.85,1,1}}
+		Color %Color2{f{1,1,1,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600108}}
+	s %t{"plParticleInitializerFactory_VelocityCone"}
+	u3 %v{2}
+	p
+	{
+		Angle %Angle{f{0.3491}}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{0.5}
+			f %Value{2}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600106}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{1.5}
+	}
+}
+o
+{
+	Uuid %id{u4{9600001,9600107}}
+	s %t{"plParticleTypeTrailFactory"}
+	u3 %v{1}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Additive"}
+		u2 %Segments{12}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

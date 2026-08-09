@@ -122,6 +122,8 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Raycast);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Remap);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SceneForces);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SetAttribute);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SetBlackboardEntry);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SizeCurve);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Switch);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_VectorField);

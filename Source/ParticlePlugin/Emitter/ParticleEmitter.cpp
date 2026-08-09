@@ -7,8 +7,13 @@
 
 plCVarFloat cvar_ParticlesSpawnCountScale("Particles.SpawnCountScale", 1.0f, plCVarFlags::Save, "Global multiplier for all particle spawn counts, the main scalability lever (0 = no particles).");
 
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEmitterFactory, 1, plRTTINoAllocator)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEmitterFactory, 2, plRTTINoAllocator)
 {
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
     new plCategoryAttribute("Emitter", plColorScheme::DarkUI(plColorScheme::Yellow)),

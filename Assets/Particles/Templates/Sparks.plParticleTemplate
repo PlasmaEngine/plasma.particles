@@ -1,0 +1,146 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9300001,9300101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9300001,9300102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9300001,9300103}}
+			Uuid{u4{9300001,9300104}}
+			Uuid{u4{9300001,9300105}}
+			Uuid{u4{9300001,9300106}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9300001,9300107}}
+			Uuid{u4{9300001,9300108}}
+			Uuid{u4{9300001,9300109}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9300001,9300110}}
+		}
+		s %Name{"Sparks"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{0.3}
+			Time %Value{d{0.8}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{30}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.05}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300104}}
+	s %t{"plParticleInitializerFactory_VelocityCone"}
+	u3 %v{2}
+	p
+	{
+		Angle %Angle{f{0.4363}}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{1.5}
+			f %Value{4}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300105}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300106}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{1,0.9,0.5,1}}
+		Color %Color2{f{1,0.6,0.2,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300107}}
+	s %t{"plParticleBehaviorFactory_Gravity"}
+	u3 %v{1}
+	p
+	{
+		f %GravityFactor{1}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300108}}
+	s %t{"plParticleBehaviorFactory_Drag"}
+	u3 %v{1}
+	p
+	{
+		f %Drag{0.3}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300109}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{2}
+	}
+}
+o
+{
+	Uuid %id{u4{9300001,9300110}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{2}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Additive"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}
