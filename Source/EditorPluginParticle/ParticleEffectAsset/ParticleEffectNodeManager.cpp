@@ -361,10 +361,18 @@ void plParticleEffectNodeManager::GetNodeCreationTemplates(plDynamicArray<plVisu
 
 void plParticleEffectNodeManager::RecreateAllSystemPins()
 {
+  // TryRecreatePins adds and removes connection objects, which are children of the root object,
+  // so the nodes have to be collected before the child list is modified.
+  plHybridArray<const plDocumentObject*, 16> systemNodes;
   for (const plDocumentObject* pChild : GetRootObject()->GetChildren())
   {
     if (pChild->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleSystemNode>())
-      TryRecreatePins(pChild);
+      systemNodes.PushBack(pChild);
+  }
+
+  for (const plDocumentObject* pNode : systemNodes)
+  {
+    TryRecreatePins(pNode);
   }
 }
 
