@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
+#include <ParticlePlugin/System/ParticleProgram.h>
 
 /// Where the attractor pulls particles toward
 struct PL_PARTICLEPLUGIN_DLL plParticleAttractorTarget
@@ -49,6 +50,7 @@ public:
   virtual const plRTTI* GetBehaviorType() const override;
   virtual void CopyBehaviorProperties(plParticleBehavior* pObject, bool bFirstTime) const override;
   virtual void QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const override;
+  virtual plParticleProgramData* GetParticleProgram() override { return &m_Program; }
 
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
@@ -62,6 +64,9 @@ public:
   float m_fMinDistance = 0.1f;
   bool m_bAffectVelocity = true;
   bool m_bRepel = false;
+
+  /// Per-particle wires into Force.
+  plParticleProgramData m_Program;
 };
 
 class PL_PARTICLEPLUGIN_DLL plParticleBehavior_AttractToPosition final : public plParticleBehavior
@@ -78,6 +83,7 @@ public:
   float m_fMinDistance = 0.1f;
   bool m_bAffectVelocity = true;
   bool m_bRepel = false;
+  const plParticleProgramData* m_pProgram = nullptr;
 
 protected:
   virtual void CreateRequiredStreams() override;
@@ -85,4 +91,5 @@ protected:
 
   plProcessingStream* m_pStreamPosition = nullptr;
   plProcessingStream* m_pStreamVelocity = nullptr;
+  plParticleProgramRunner m_Runner;
 };

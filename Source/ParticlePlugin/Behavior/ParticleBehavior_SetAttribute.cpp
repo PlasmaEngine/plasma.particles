@@ -23,6 +23,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_SetAttribute, 1, plRTT
   PL_BEGIN_ATTRIBUTES
   {
     new plTitleAttribute("{Attribute} = {Value}"),
+    // replaced by the vector- and colour-aware Set Attribute (plParticleBehaviorFactory_Attribute);
+    // still reflected so existing effects load
+    new plHiddenAttribute(),
   }
   PL_END_ATTRIBUTES;
 }
@@ -111,7 +114,7 @@ void plParticleBehavior_SetAttribute::QueryOptionalStreams()
   m_pStreamVelocity = GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Float3);
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
 }
 
 void plParticleBehavior_SetAttribute::Process(plUInt64 uiNumElements)

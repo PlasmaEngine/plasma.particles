@@ -2,7 +2,12 @@
 
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectNodeManager.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectNodes.h>
+#include <EditorPluginParticle/ParticleEffectAsset/ParticleGraphCompiler.h>
+#include <ParticlePlugin/Behavior/ParticleBehavior_Attribute.h>
+#include <ParticlePlugin/Behavior/ParticleBehavior_KillIf.h>
+#include <ParticlePlugin/Initializer/ParticleInitializer_SetAttribute.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
+#include <Foundation/Strings/TranslationLookup.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
 #include <ParticlePlugin/Emitter/ParticleEmitter.h>
 #include <ParticlePlugin/Events/ParticleEventReaction.h>
@@ -174,7 +179,7 @@ void plParticleEffectNodeManager::InternalCreatePins(const plDocumentObject* pOb
           if (kind == plParticleValueKind::None)
             continue;
 
-          const plString sPinName = plParticlePropertyPin::Make(pBlock->GetGuid(), pProp->GetPropertyName());
+          const plString sPinName = plParticlePropertyPin::Make(pBlock, pProp->GetPropertyName());
 
           auto pPin = PL_DEFAULT_NEW(plParticleGraphPin, plVisualGraphPin::Type::Input, sPinName, GetValueKindColor(kind), pObject);
           pPin->m_Category = plParticleGraphPinCategory::Value;
@@ -268,10 +273,39 @@ void plParticleEffectNodeManager::GetCreateableTypes(plHybridArray<const plRTTI*
   ref_types.PushBack(plGetStaticRTTI<plParticleParameterNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleColorParameterNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleBoolParameterNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleBlackboardEntryNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleBlackboardVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleBlackboardColorNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleToBoolNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleMathNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleCompareNode>());
   ref_types.PushBack(plGetStaticRTTI<plParticleBranchNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleSystemValueNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleSystemVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleFunctionNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleRemapNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleLerpNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleClampNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleVectorMathNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleVectorFunctionNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleVectorReduceNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleColorChannelNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleExpressionNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleDotNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleScaleVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleMakeVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleSampleGradientNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleSampleCurveNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleNoiseNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleInputValueNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleInputVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleInputColorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleRandomNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleCustomFloatNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleCustomVectorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleCustomColorNode>());
+  ref_types.PushBack(plGetStaticRTTI<plParticleEventInputNode>());
 
   // Note: plParticleEffectNode is NOT in this list — it is auto-created by the document.
 }
@@ -334,7 +368,25 @@ plString plParticleEffectNodeManager::FriendlyTypeName(const plRTTI* pType)
   sName.TrimWordStart("plParticle");
   sName.TrimWordEnd("Node");
 
-  return sName;
+  return SplitWords(sName);
+}
+
+plString plParticleEffectNodeManager::SplitWords(plStringView sName)
+{
+  // "VectorMath" reads as "Vector Math"
+  plStringBuilder sResult;
+  bool bPreviousLower = false;
+
+  for (plUInt32 c : sName)
+  {
+    if (bPreviousLower && c >= 'A' && c <= 'Z')
+      sResult.Append(" ");
+
+    sResult.Append(c);
+    bPreviousLower = c >= 'a' && c <= 'z';
+  }
+
+  return sResult;
 }
 
 void plParticleEffectNodeManager::GetNodeCreationTemplates(plDynamicArray<plVisualGraphNodeDesc>& out_templates) const
@@ -343,18 +395,59 @@ void plParticleEffectNodeManager::GetNodeCreationTemplates(plDynamicArray<plVisu
   GetCreateableTypes(types);
 
   m_CreationNames.Clear();
-  m_CreationNames.Reserve(types.GetCount());
+  m_CreationProperties.Clear();
   out_templates.Clear();
 
   for (const plRTTI* pType : types)
   {
+    const plCategoryAttribute* pCategory = pType->GetAttributeByType<plCategoryAttribute>();
+
+    // a node that reads one of several inputs gets one entry per input, named after it ("Speed",
+    // "Normalized Age", "Time"), with its Input preset
+    const plRTTI* pInputEnum = nullptr;
+    if (pType == plGetStaticRTTI<plParticleInputValueNode>())
+      pInputEnum = plGetStaticRTTI<plParticleInputValue>();
+    else if (pType == plGetStaticRTTI<plParticleInputVectorNode>())
+      pInputEnum = plGetStaticRTTI<plParticleInputVector>();
+    else if (pType == plGetStaticRTTI<plParticleEventInputNode>())
+      pInputEnum = plGetStaticRTTI<plParticleEventInput>();
+    else if (pType == plGetStaticRTTI<plParticleSystemValueNode>())
+      pInputEnum = plGetStaticRTTI<plParticleSystemValue>();
+    else if (pType == plGetStaticRTTI<plParticleSystemVectorNode>())
+      pInputEnum = plGetStaticRTTI<plParticleSystemVector>();
+
+    if (pInputEnum != nullptr)
+    {
+      plHybridArray<plReflectionUtils::EnumKeyValuePair, 8> entries;
+      plReflectionUtils::GetEnumKeysAndValues(pInputEnum, entries, plReflectionUtils::EnumConversionMode::ValueNameOnly);
+
+      for (const auto& entry : entries)
+      {
+        plVisualGraphNodeProperty& property = m_CreationProperties.ExpandAndGetRef();
+        property.m_sPropertyName = plMakeHashedString("Input");
+        property.m_Value = (plInt64)entry.m_iValue;
+
+        m_CreationNames.PushBack(SplitWords(entry.m_sKey));
+
+        auto& desc = out_templates.ExpandAndGetRef();
+        desc.m_pType = pType;
+        desc.m_sTypeName = m_CreationNames.PeekBack();
+        desc.m_PropertyValues = plArrayPtr<const plVisualGraphNodeProperty>(&property, 1);
+
+        if (pCategory != nullptr)
+          desc.m_sCategory.Assign(pCategory->GetCategory());
+      }
+
+      continue;
+    }
+
     m_CreationNames.PushBack(FriendlyTypeName(pType));
 
     auto& desc = out_templates.ExpandAndGetRef();
     desc.m_pType = pType;
     desc.m_sTypeName = m_CreationNames.PeekBack();
 
-    if (const plCategoryAttribute* pCategory = pType->GetAttributeByType<plCategoryAttribute>())
+    if (pCategory != nullptr)
       desc.m_sCategory.Assign(pCategory->GetCategory());
   }
 }
@@ -396,12 +489,12 @@ plStatus plParticleEffectNodeManager::InternalCanConnect(const plVisualGraphPin&
 
     plParticleValueKind::Enum targetKind = plParticleValueKind::None;
 
-    plUuid block;
+    plStringBuilder sKey;
     plStringBuilder sProperty;
 
-    if (plParticlePropertyPin::Parse(tgtPin.GetName(), block, sProperty))
+    if (plParticlePropertyPin::Parse(tgtPin.GetName(), sKey, sProperty))
     {
-      const plDocumentObject* pBlock = GetObject(block);
+      const plDocumentObject* pBlock = plParticlePropertyPin::FindBlock(tgtPin.GetParent(), tgtPin.GetName(), sProperty);
       if (pBlock == nullptr)
         return plStatus("The block this pin belongs to no longer exists.");
 
@@ -428,6 +521,13 @@ plStatus plParticleEffectNodeManager::InternalCanConnect(const plVisualGraphPin&
     if (sourceKind != targetKind && !bScalar)
       return plStatus("This value does not fit that property.");
 
+    // a per-particle value may only end up where something runs per particle
+    plParticleGraphCompiler compiler(this, FindEffectNode());
+    if (compiler.GetTier(srcPin.GetParent()) == plParticleTier::Particle)
+    {
+      PL_SUCCEED_OR_RETURN(CheckParticleTarget(tgtPin));
+    }
+
     // N outgoing, 1 incoming: one value can drive many properties, but a property takes exactly
     // one value. Connect1toN is the mirror image of that and was the wrong way round.
     out_result = CanConnectResult::ConnectNto1;
@@ -442,6 +542,81 @@ plStatus plParticleEffectNodeManager::InternalCanConnect(const plVisualGraphPin&
   }
 
   out_result = CanConnectResult::ConnectNtoN;
+
+  return plStatus(PL_SUCCESS);
+}
+
+const plDocumentObject* plParticleEffectNodeManager::FindEffectNode() const
+{
+  for (const plDocumentObject* pChild : GetRootObject()->GetChildren())
+  {
+    if (pChild->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleEffectNode>())
+      return pChild;
+  }
+
+  return nullptr;
+}
+
+plStatus plParticleEffectNodeManager::CheckParticleTarget(const plVisualGraphPin& targetPin) const
+{
+  plStringBuilder sProperty;
+  if (const plDocumentObject* pBlock = plParticlePropertyPin::FindBlock(targetPin.GetParent(), targetPin.GetName(), sProperty))
+  {
+    const plRTTI* pBlockType = pBlock->GetTypeAccessor().GetType();
+    const plParticleContext::Enum context = plParticleContextInfo::FromFactoryType(pBlockType);
+
+    if (context == plParticleContext::Spawn)
+      return plStatus("Per-particle values can't drive Spawn: the emitter runs once per step, not per particle. Use Set Attribute in Update.");
+
+    if (context == plParticleContext::Output)
+      return plStatus("Per-particle values can't drive Output blocks. Write Color or Size with Set Attribute in Update; the render types read them per particle.");
+
+    const bool bSink = pBlockType->IsDerivedFrom<plParticleInitializerFactory_SetAttribute>() || pBlockType->IsDerivedFrom<plParticleBehaviorFactory_Attribute>() ||
+                       pBlockType->IsDerivedFrom<plParticleBehaviorFactory_KillIf>();
+    if (bSink)
+      return plStatus(PL_SUCCESS);
+
+    // the short list of block properties that read their value per particle
+    const plAbstractProperty* pProp = pBlockType->FindPropertyByName(sProperty);
+    if (pProp != nullptr && pProp->GetAttributeByType<plParticlePerParticleAttribute>() != nullptr)
+      return plStatus(PL_SUCCESS);
+
+    const char* szContext = (context == plParticleContext::Initialize) ? "Initialize" : "Update";
+    return plStatus(plFmt("{} takes constant and per-frame values. Set the value per particle with Set Attribute in {} instead.", plTranslate(sProperty), szContext));
+  }
+
+  // into another operator: everything that operator feeds must take per-particle values as well
+  plSet<const plDocumentObject*> visited;
+  plHybridArray<const plDocumentObject*, 8> pending;
+  pending.PushBack(targetPin.GetParent());
+
+  while (!pending.IsEmpty())
+  {
+    const plDocumentObject* pNode = pending.PeekBack();
+    pending.PopBack();
+
+    if (visited.Contains(pNode))
+      continue;
+    visited.Insert(pNode);
+
+    for (const auto& pOutput : GetOutputPins(pNode))
+    {
+      for (const plVisualGraphConnection* pConnection : GetConnections(*pOutput))
+      {
+        const plVisualGraphPin& downstream = pConnection->GetTargetPin();
+
+        plStringBuilder sDownstreamProperty;
+        if (plParticlePropertyPin::FindBlock(downstream.GetParent(), downstream.GetName(), sDownstreamProperty) != nullptr)
+        {
+          PL_SUCCEED_OR_RETURN(CheckParticleTarget(downstream));
+        }
+        else
+        {
+          pending.PushBack(downstream.GetParent());
+        }
+      }
+    }
+  }
 
   return plStatus(PL_SUCCESS);
 }

@@ -9,6 +9,9 @@
 
 #include <RendererCore/../../../Data/Base/Shaders/Particles/ParticleSystemConstants.h>
 
+#include <ParticlePlugin/../../Assets/Shaders/Particles/ParticleLookConstants.h>
+#include <ParticlePlugin/Renderer/ParticleLook.h>
+
 class plGALBufferPool;
 class plRenderContext;
 
@@ -34,8 +37,14 @@ protected:
 
     void SetTrailData(float fSnapshotFraction, plInt32 iNumUsedTrailPoints);
 
+    /// Fills the look constants and binds the emissive map; every particle shader reads them.
+    void SetLookData(const plParticleLookData& look);
+
+    plRenderContext* m_pRenderContext = nullptr;
     plConstantBufferStorage<plParticleSystemConstants>* m_pConstants;
     plConstantBufferStorageHandle m_hConstantBuffer;
+    plConstantBufferStorage<plParticleLookConstants>* m_pLookConstants;
+    plConstantBufferStorageHandle m_hLookConstantBuffer;
   };
 
   void CreateParticleDataBuffer(plGALBufferPool& inout_Buffer, plUInt32 uiDataTypeSize, plUInt32 uiNumParticlesPerBatch);

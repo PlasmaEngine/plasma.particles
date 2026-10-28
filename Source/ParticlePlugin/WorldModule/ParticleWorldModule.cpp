@@ -16,6 +16,7 @@
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <RendererCore/Pipeline/ExtractedRenderData.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
+#include <RendererFoundation/Resources/ReadbackHelper.h>
 
 // clang-format off
 PL_IMPLEMENT_WORLD_MODULE(plParticleWorldModule);
@@ -31,6 +32,36 @@ plParticleWorldModule::plParticleWorldModule(plWorld* pWorld)
 plParticleWorldModule::~plParticleWorldModule()
 {
   ClearParticleStreamFactories();
+  FreeRetiredReadbacks(true);
+}
+
+void plParticleWorldModule::RetireReadback(plGALReadbackBufferHelper* pReadback)
+{
+  if (pReadback == nullptr)
+    return;
+
+  PL_LOCK(m_RetiredReadbacksMutex);
+
+  RetiredReadback& retired = m_RetiredReadbacks.ExpandAndGetRef();
+  retired.m_uiFrame = plRenderWorld::GetFrameCounter();
+  retired.m_pReadback = pReadback;
+}
+
+void plParticleWorldModule::FreeRetiredReadbacks(bool bAll)
+{
+  PL_LOCK(m_RetiredReadbacksMutex);
+
+  // the render thread is at most a frame behind; three frames leave it done with any of them
+  const plUInt64 uiFrame = plRenderWorld::GetFrameCounter();
+
+  for (plUInt32 i = m_RetiredReadbacks.GetCount(); i-- > 0;)
+  {
+    if (bAll || uiFrame >= m_RetiredReadbacks[i].m_uiFrame + 3)
+    {
+      PL_DEFAULT_DELETE(m_RetiredReadbacks[i].m_pReadback);
+      m_RetiredReadbacks.RemoveAtAndSwap(i);
+    }
+  }
 }
 
 void plParticleWorldModule::Initialize()

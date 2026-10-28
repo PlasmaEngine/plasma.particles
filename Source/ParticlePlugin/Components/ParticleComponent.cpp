@@ -26,6 +26,9 @@ void plParticleComponentManager::Initialize()
   {
     auto desc = PL_CREATE_MODULE_UPDATE_FUNCTION_DESC(plParticleComponentManager::Update, this);
     desc.m_bOnlyUpdateWhenSimulating = true;
+    // before plParticleWorldModule::UpdateEffects (1000) starts the effect tasks: this writes
+    // effect parameters, which the tasks read without a lock
+    desc.m_fPriority = 2000.0f;
     RegisterUpdateFunction(desc);
   }
 }

@@ -20,6 +20,12 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_Remap, 1, plRTTIDefaul
     PL_MEMBER_PROPERTY("ClampOutput", m_bClampOutput)->AddAttributes(new plDefaultValueAttribute(true)),
   }
   PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    // converted into the Remap node by the editor; still reflected so existing effects load
+    new plHiddenAttribute(),
+  }
+  PL_END_ATTRIBUTES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
@@ -95,7 +101,7 @@ void plParticleBehavior_Remap::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
 }
 
 void plParticleBehavior_Remap::Process(plUInt64 uiNumElements)

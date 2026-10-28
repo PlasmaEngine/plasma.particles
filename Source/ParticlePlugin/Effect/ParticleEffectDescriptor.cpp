@@ -33,6 +33,29 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 
 plParticleEffectDescriptor::plParticleEffectDescriptor() = default;
 
+plParticleEffectDescriptor::plParticleEffectDescriptor(plParticleEffectDescriptor&& other)
+{
+  m_InvisibleUpdateRate = other.m_InvisibleUpdateRate;
+  m_bSimulateInLocalSpace = other.m_bSimulateInLocalSpace;
+  m_bAlwaysShared = other.m_bAlwaysShared;
+  m_fApplyInstanceVelocity = other.m_fApplyInstanceVelocity;
+  m_PreSimulateDuration = other.m_PreSimulateDuration;
+  m_vNumWindSamples = other.m_vNumWindSamples;
+  m_fFadeOutStartDistance = other.m_fFadeOutStartDistance;
+  m_fFadeOutEndDistance = other.m_fFadeOutEndDistance;
+  m_Importance = other.m_Importance;
+  m_fFixedTickHz = other.m_fFixedTickHz;
+  m_uiMaxTicksPerFrame = other.m_uiMaxTicksPerFrame;
+  m_FloatParameters = std::move(other.m_FloatParameters);
+  m_ColorParameters = std::move(other.m_ColorParameters);
+
+  // the systems and reactions change owner; the source must not free them as well
+  m_ParticleSystems = other.m_ParticleSystems;
+  m_EventReactions = other.m_EventReactions;
+  other.m_ParticleSystems.Clear();
+  other.m_EventReactions.Clear();
+}
+
 plParticleEffectDescriptor::~plParticleEffectDescriptor()
 {
   ClearSystems();
@@ -76,6 +99,7 @@ enum class ParticleEffectVersion
   Version_11, // added distance fade
   Version_12, // added importance
   Version_13, // added fixed tick
+  Version_14, // plasma.particles 1.6: On Event spawns per event and inherits, Velocity Cone has an Axis (in the modules' own data)
 
   // insert new version numbers above
   Version_Count,

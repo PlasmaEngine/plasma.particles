@@ -56,13 +56,32 @@ public static class PlasmaPackageSdk
         return Path.Combine(Root, "Binaries", $"{context.Platform}_{context.Configuration}");
     }
 
+    /// \brief Whether the SDK's platform builds with an MSVC-style toolchain (import libraries, /FI) rather than a
+    /// GCC-style one (shared objects, -include). Windows and the platforms built the same way leave import libraries
+    /// next to their DLLs, so the SDK's binaries answer it and new platforms need no list here.
+    public static bool UsesMsvcToolchain(BuildContext context)
+    {
+        return File.Exists(Path.Combine(SdkBinaryDirectory(context), "plFoundation.lib"));
+    }
+
     /// \brief Where this package's own binaries go.
     ///
     /// This layout is not arbitrary: it is what Package.sha256 records and what the publisher packs
     /// into the platform components, so a local build produces exactly the tree that gets published.
     public static string PackageBinaryDirectory(BuildContext context)
     {
-        return Path.Combine(context.ProjectRoot, "Bin", $"{context.Platform}_x64_{context.Configuration}");
+        return Path.Combine(context.ProjectRoot, "Bin", $"{context.Platform}_{ArchitectureName(context)}_{context.Configuration}");
+    }
+
+    /// \brief The architecture token of the Bin folder. Windows packages are x64 only; Android names the ABI it built.
+    public static string ArchitectureName(BuildContext context)
+    {
+        if (context.Platform != TargetPlatform.Android)
+        {
+            return "x64";
+        }
+
+        return context.Architecture == TargetArchitecture.X64 ? "x64" : "arm64";
     }
 
     /// \brief Include paths, defines and engine import libraries. Every package module needs this.
@@ -82,7 +101,7 @@ public static class PlasmaPackageSdk
 
         rules.PublicDefinitions.Add("BUILDSYSTEM_COMPILE_ENGINE_AS_DLL");
         rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MAJOR=0");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MINOR=9");
+        rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_MINOR=11");
         rules.PublicDefinitions.Add("BUILDSYSTEM_SDKVERSION_PATCH=2");
         rules.PublicDefinitions.Add("UNICODE");
         rules.PublicDefinitions.Add("_UNICODE");
@@ -105,7 +124,13 @@ public static class PlasmaPackageSdk
             rules.PublicDefinitions.Add("BUILDSYSTEM_BUILDTYPE=\"Shipping\"");
         }
 
-        AddFeatureDefines(rules);
+        AddFeatureDefines(rules, context);
+
+        if (context.Platform == TargetPlatform.Android)
+        {
+            rules.PrivateDefinitions.Add("ANDROID");
+            rules.AdditionalCompilerFlags.Add("-fPIC");
+        }
 
         AddImportLibrary(rules, context, "plFoundation");
         AddImportLibrary(rules, context, "plCore");
@@ -170,7 +195,8 @@ public static class PlasmaPackageSdk
         rules.SourceDirectory = sourceDirectory;
         rules.PCHUsage = PCHUsage.UseExplicitOrShared;
         rules.SharedPCHHeaderFile = pchHeaderFile;
-        rules.AdditionalCompilerFlags.Add($"/FI\"{Path.Combine(context.ProjectRoot, sourceDirectory, pchHeaderFile)}\"");
+        var pchHeaderPath = Path.Combine(context.ProjectRoot, sourceDirectory, pchHeaderFile);
+        rules.AdditionalCompilerFlags.Add(UsesMsvcToolchain(context) ? $"/FI\"{pchHeaderPath}\"" : $"-include \"{pchHeaderPath}\"");
 
         rules.PublicIncludePaths.Add("..");
         rules.PrivateDefinitions.Add(buildDefinition);
@@ -194,17 +220,22 @@ public static class PlasmaPackageSdk
     ///
     /// TODO: the engine build should emit this next to its binaries and this method should read it.
     /// A hand-maintained copy drifts silently, and the failure mode is a crash in unrelated code.
-    private static void AddFeatureDefines(ModuleRules rules)
+    private static void AddFeatureDefines(ModuleRules rules, BuildContext context)
     {
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ZSTD_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ZLIB_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_TRACY_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_ENET_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_LUA_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_DUKTAPE_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_OZZ_SUPPORT");
-        rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_NRD_SUPPORT");
         rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_IMGUI_SUPPORT");
+
+        // Tracy, Duktape and NRD are Windows-only third-party modules; the Android engine is built without them.
+        if (context.Platform == TargetPlatform.Windows)
+        {
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_TRACY_SUPPORT");
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_DUKTAPE_SUPPORT");
+            rules.PublicDefinitions.Add("BUILDSYSTEM_ENABLE_NRD_SUPPORT");
+        }
     }
 
     /// \brief Binds to another plugin shipped by this same package.
@@ -222,21 +253,42 @@ public static class PlasmaPackageSdk
             rules.PublicIncludePaths.Add(sourceParent.FullName);
         }
 
-        if (context.Platform == TargetPlatform.Windows)
+        if (UsesMsvcToolchain(context))
         {
             rules.PrivateLibraries.Add(Path.Combine(PackageBinaryDirectory(context), outputName + ".lib"));
+        }
+        else
+        {
+            AddSharedObject(rules, Path.Combine(PackageBinaryDirectory(context), outputName + ".so"));
         }
     }
 
     public static void AddImportLibrary(ModuleRules rules, BuildContext context, string outputName)
     {
         var library = Path.Combine(SdkBinaryDirectory(context),
-            outputName + (context.Platform == TargetPlatform.Windows ? ".lib" : ".so"));
+            outputName + (UsesMsvcToolchain(context) ? ".lib" : ".so"));
 
-        if (File.Exists(library))
+        if (!File.Exists(library))
+        {
+            return;
+        }
+
+        if (UsesMsvcToolchain(context))
         {
             rules.PublicLibraries.Add(library);
         }
+        else
+        {
+            AddSharedObject(rules, library);
+        }
+    }
+
+    /// \brief Links a shared object by file name. The engine's .so files carry no SONAME, so linking one by full path
+    /// would record that build-machine path as the dependency; -l: records only the name the device loader resolves.
+    private static void AddSharedObject(ModuleRules rules, string library)
+    {
+        rules.AdditionalLinkerFlags.Add($"-L\"{Path.GetDirectoryName(library)}\"");
+        rules.AdditionalLinkerFlags.Add($"-l:{Path.GetFileName(library)}");
     }
 
     private static void AddSdkThirdPartyIncludePaths(ModuleRules rules)

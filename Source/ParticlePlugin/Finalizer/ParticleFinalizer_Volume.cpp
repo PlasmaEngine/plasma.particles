@@ -65,8 +65,9 @@ void plParticleFinalizer_Volume::Process(plUInt64 uiNumElements)
     plSimdVec4f vMax;
     vMax.SetZero();
 
+    // whole groups of four only; the remainder is handled below, so no dead particle is read
     constexpr plUInt32 uiElementsPerLoop = 4;
-    for (plUInt64 i = 0; i < uiNumElements; i += uiElementsPerLoop)
+    for (plUInt64 i = 0; i + uiElementsPerLoop <= uiNumElements; i += uiElementsPerLoop)
     {
       const float x = pSize[i + 0];
       const float y = pSize[i + 1];

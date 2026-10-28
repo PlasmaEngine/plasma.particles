@@ -4,6 +4,7 @@
 #include <Foundation/Math/Float16.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
+#include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/Type/Trail/ParticleTypeTrail.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <RendererCore/Material/MaterialResource.h>
@@ -28,6 +29,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeTrailFactory, 1, plRTTIDefaultAllo
     PL_MEMBER_PROPERTY("TintColorParam", m_sTintColorParameter),
     PL_MEMBER_PROPERTY("DistortionTexture", m_sDistortionTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
     PL_MEMBER_PROPERTY("DistortionStrength", m_fDistortionStrength)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.0f, 500.0f)),
+    PL_PARTICLE_LOOK_PROPERTIES,
   }
   PL_END_PROPERTIES;
 }
@@ -59,6 +61,7 @@ void plParticleTypeTrailFactory::CopyTypeProperties(plParticleType* pObject, boo
   pType->m_fNormalCurvature = m_fNormalCurvature;
   pType->m_fLightDirectionality = m_fLightDirectionality;
   pType->m_hCustomMaterial.Invalidate();
+  pType->m_Look.Configure(m_Look);
 
   if (m_bUseCustomMaterial)
   {
@@ -100,6 +103,7 @@ enum class TypeTrailVersion
   Version_5, // added distortion mode
   Version_6, // added particle lighting
   Version_7, // added custom material support
+  Version_8, // added emissive map and depth blending
 
   // insert new version numbers above
   Version_Count,
@@ -136,6 +140,9 @@ void plParticleTypeTrailFactory::Save(plStreamWriter& inout_stream) const
   // Version 7
   inout_stream << m_bUseCustomMaterial;
   inout_stream << m_sCustomMaterial;
+
+  // Version 8
+  m_Look.Save(inout_stream);
 }
 
 void plParticleTypeTrailFactory::Load(plStreamReader& inout_stream)
@@ -190,6 +197,12 @@ void plParticleTypeTrailFactory::Load(plStreamReader& inout_stream)
     inout_stream >> m_bUseCustomMaterial;
     inout_stream >> m_sCustomMaterial;
   }
+
+  m_Look = plParticleLookSettings();
+  if (uiVersion >= 8)
+  {
+    m_Look.Load(inout_stream);
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -206,7 +219,7 @@ plParticleTypeTrail::~plParticleTypeTrail()
 
 void plParticleTypeTrail::CreateRequiredStreams()
 {
-  CreateStream("LifeTime", plProcessingStream::DataType::Half2, &m_pStreamLifeTime, false);
+  CreateStream("LifeTime", plProcessingStream::DataType::Float2, &m_pStreamLifeTime, false);
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
   CreateStream("Size", plProcessingStream::DataType::Half, &m_pStreamSize, false);
   CreateStream("Color", plProcessingStream::DataType::Half4, &m_pStreamColor, false);
@@ -218,6 +231,12 @@ void plParticleTypeTrail::CreateRequiredStreams()
   {
     CreateStream("Variation", plProcessingStream::DataType::Int, &m_pStreamVariation, false);
   }
+}
+
+void plParticleTypeTrail::QueryOptionalStreams()
+{
+  m_pStreamSizeScale = GetOwnerSystem()->QueryStream("SizeScale", plProcessingStream::DataType::Half3);
+  m_pStreamEmissive = GetOwnerSystem()->QueryStream("Emissive", plProcessingStream::DataType::Half);
 }
 
 void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
@@ -242,8 +261,10 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
     const plFloat16* pSize = m_pStreamSize->GetData<plFloat16>();
     const plColorLinear16f* pColor = m_pStreamColor->GetData<plColorLinear16f>();
     const TrailData* pTrailData = m_pStreamTrailData->GetData<TrailData>();
-    const plFloat16Vec2* pLifeTime = m_pStreamLifeTime->GetData<plFloat16Vec2>();
+    const plVec2* pLifeTime = m_pStreamLifeTime->GetData<plVec2>();
     const plUInt32* pVariation = m_pStreamVariation ? m_pStreamVariation->GetData<plUInt32>() : nullptr;
+    const plFloat16Vec3* pSizeScale = m_pStreamSizeScale ? m_pStreamSizeScale->GetData<plFloat16Vec3>() : nullptr;
+    const plFloat16* pEmissive = m_pStreamEmissive ? m_pStreamEmissive->GetData<plFloat16>() : nullptr;
 
     // this will automatically be deallocated at the end of the frame
     // the point data is tightly packed: m_uiMaxPoints entries per particle (the GPU stride)
@@ -256,10 +277,14 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
 
     for (plUInt32 p = 0; p < numActiveParticles; ++p)
     {
-      m_BaseParticleData[p].Size = pSize[p];
+      m_BaseParticleData[p].Size = pSizeScale != nullptr ? (float)pSize[p] * (float)pSizeScale[p].x : (float)pSize[p];
       m_BaseParticleData[p].Color = pColor[p].ToLinearFloat() * tintColor;
       m_BaseParticleData[p].Life = pLifeTime[p].x * pLifeTime[p].y;
-      m_BaseParticleData[p].Variation = (pVariation != nullptr) ? pVariation[p] : 0;
+
+      plUInt32 uiVariation = (pVariation != nullptr) ? (pVariation[p] & 0xFFu) : 0u;
+      if (pEmissive != nullptr)
+        uiVariation |= PARTICLE_VARIATION_EMISSIVE_BIT | ((plUInt32)pEmissive[p].GetRawData() << 16);
+      m_BaseParticleData[p].Variation = uiVariation;
 
       m_TrailParticleData[p].NumPoints = pTrailData[p].m_uiNumPoints;
     }
@@ -313,6 +338,8 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
   pRenderData->m_fNormalCurvature = m_fNormalCurvature;
   pRenderData->m_fLightDirectionality = m_fLightDirectionality;
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
+  pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), m_pStreamEmissive != nullptr);
+  pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
 
   pRenderData->m_uiNumVariationsX = 1;
   pRenderData->m_uiNumVariationsY = 1;
@@ -340,7 +367,15 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
       break;
   }
 
-  ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  if (m_RenderMode == plParticleTypeRenderMode::Distortion)
+  {
+    ref_msg.AddRenderData(pRenderData, plParticleRenderDataCategories::Distortion, plRenderData::Caching::Never);
+    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
+  }
+  else
+  {
+    ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  }
 }
 
 void plParticleTypeTrail::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
