@@ -41,6 +41,7 @@ void plParticleTypeMeshFactory::CopyTypeProperties(plParticleType* pObject, bool
 
   pType->m_hMesh.Invalidate();
   pType->m_hMaterial.Invalidate();
+  pType->m_bRenderDataCached = false; // a live reconfigure reuses the type, so the cached mesh/material info is stale
   pType->m_sTintColorParameter = plTempHashedString(m_sTintColorParameter.GetData());
 
   if (!m_sMesh.IsEmpty())
@@ -175,7 +176,7 @@ void plParticleTypeMesh::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, 
       return;
   }
 
-  if (!m_hMaterial.IsValid())
+  if (!m_hMesh.IsValid() || !m_hMaterial.IsValid())
     return;
 
   if (m_RenderCategory.m_uiValue == 0xFFFF)
