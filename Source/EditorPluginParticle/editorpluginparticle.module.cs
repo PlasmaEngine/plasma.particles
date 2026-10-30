@@ -8,6 +8,9 @@ public class EditorPluginParticleModule : ModuleRules
         PlasmaPackageSdk.ConfigurePackageModule(this, context, "Source/EditorPluginParticle", "EditorPluginParticlePCH.h",
             "BUILDSYSTEM_BUILDING_EDITORPLUGINPARTICLE_LIB");
 
+        // Editor views reuse file-local layout helpers. Keep those translation units separate.
+        UseUnityBuild = false;
+
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
         PlasmaPackageSdk.ConfigureAssetsBuiltIn(this, context);
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/ParticlePlugin", "plParticlePlugin");
