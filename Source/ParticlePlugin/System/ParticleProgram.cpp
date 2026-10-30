@@ -245,7 +245,7 @@ void plParticleProgramData::Load(plStreamReader& inout_stream)
 
 namespace
 {
-  plUInt32 GetComponentCount(plProcessingStream::DataType type)
+  plUInt32 GetProgramComponentCount(plProcessingStream::DataType type)
   {
     switch (type)
     {
@@ -353,7 +353,7 @@ void plParticleProgramRunner::Configure(const plParticleProgramData* pData)
 
   for (const plExpression::StreamDesc& desc : inputs)
   {
-    if (GetComponentCount(desc.m_DataType) != 1)
+    if (GetProgramComponentCount(desc.m_DataType) != 1)
     {
       plLog::Error("Particle program input '{}' is not scalar; the block uses its own values.", desc.m_sName);
       Configure(nullptr);
@@ -421,7 +421,7 @@ void plParticleProgramRunner::Configure(const plParticleProgramData* pData)
       m_OutputTargets[j].m_uiOutput = m_Outputs.GetCount();
       m_OutputTargets[j].m_uiComponent = (plUInt32)plMath::Max(iComponent, 0);
 
-      const plUInt32 uiComponents = iComponent < 0 ? GetComponentCount(outputs[j].m_DataType) : (plUInt32)iComponent + 1;
+      const plUInt32 uiComponents = iComponent < 0 ? GetProgramComponentCount(outputs[j].m_DataType) : (plUInt32)iComponent + 1;
       output.m_uiComponents = plMath::Max(output.m_uiComponents, uiComponents);
     }
 
