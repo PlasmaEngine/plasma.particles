@@ -83,6 +83,7 @@ void plParticleRibbonRenderer::RenderBatch(const plRenderViewContext& renderView
     const plTransform objectTransform = pRenderData->m_bApplyObjectTransform ? pRenderData->m_GlobalTransform : plTransform::MakeIdentity();
 
     systemConstants.SetGenericData(objectTransform, pRenderData->m_TotalEffectLifeTime, 1, 1, 1, 1, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality);
+    systemConstants.SetLookData(pRenderData->m_Look);
     systemConstants.SetTrailData(0.0f, uiNumPoints); // NumUsedTrailPoints doubles as the ribbon point count
 
     plGALBufferHandle hPointDataBuffer = m_PointDataBuffer.GetNewBuffer();

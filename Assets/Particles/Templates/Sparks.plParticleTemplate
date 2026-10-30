@@ -79,6 +79,7 @@ o
 	u3 %v{2}
 	p
 	{
+		s %Mode{"plParticleSizeMode::PerAxis"}
 		plVarianceTypeFloat %Aspect
 		{
 			f %Variance{0}
@@ -86,9 +87,11 @@ o
 		}
 		plVarianceTypeFloat %Size
 		{
-			f %Variance{0}
-			f %Value{1}
+			f %Variance{0.3}
+			f %Value{0.12}
 		}
+		Vec3 %AxisScale{f{1,0.25,1}}
+		b %SameRandomForAllAxes{1}
 	}
 }
 o
@@ -136,9 +139,11 @@ o
 {
 	Uuid %id{u4{9300001,9300110}}
 	s %t{"plParticleTypeQuadFactory"}
-	u3 %v{2}
+	u3 %v{3}
 	p
 	{
+		s %Orientation{"plQuadParticleOrientation::FixedAxis_ParticleDir"}
+		f %ParticleStretch{4}
 		s %RenderMode{"plParticleTypeRenderMode::Additive"}
 		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
 	}

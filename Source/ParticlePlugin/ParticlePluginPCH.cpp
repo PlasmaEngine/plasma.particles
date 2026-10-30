@@ -14,6 +14,8 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleTypeRenderMode, 1)
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::Blended),
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::BlendedForeground),
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::BlendedBackground),
+  PL_ENUM_CONSTANT(plParticleTypeRenderMode::BlendAdd),
+  PL_ENUM_CONSTANT(plParticleTypeRenderMode::Distortion),
 PL_END_STATIC_REFLECTED_ENUM;
 
 //////////////////////////////////////////////////////////////////////////
@@ -23,6 +25,13 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleLightingMode, 1)
   PL_ENUM_CONSTANT(plParticleLightingMode::VertexLit),
   PL_ENUM_CONSTANT(plParticleLightingMode::SixWay),
   PL_ENUM_CONSTANT(plParticleLightingMode::PerPixel),
+PL_END_STATIC_REFLECTED_ENUM;
+
+//////////////////////////////////////////////////////////////////////////
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleSizeMode, 1)
+  PL_ENUM_CONSTANT(plParticleSizeMode::Uniform),
+  PL_ENUM_CONSTANT(plParticleSizeMode::PerAxis),
 PL_END_STATIC_REFLECTED_ENUM;
 
 //////////////////////////////////////////////////////////////////////////
@@ -105,19 +114,20 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
     return;
 
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleAttributeSink);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_AttractToPosition);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Attribute);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_KillIf);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Bounds);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_BoundsSphere);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_ColorGradient);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_ConditionalKill);
-  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_ConformToSphere);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Drag);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Expression);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_FadeOut);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Flies);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Gravity);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_If);
-  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_NoiseForce);
-  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Opacity);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_PullAlong);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Raycast);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Remap);
@@ -126,6 +136,7 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SetBlackboardEntry);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_SizeCurve);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Switch);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Turbulence);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_VectorField);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleBehavior_Velocity);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Behavior_ParticleConditionalCommon);
@@ -155,19 +166,28 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_RandomColor);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_RandomRotationSpeed);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_RandomSize);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_SetAttribute);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_SkinnedMeshPosition);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_SpherePosition);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_TorusPosition);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_VelocityCone);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Module_ParticleModule);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Renderer_ParticleDistortionPass);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Renderer_ParticleLook);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Renderer_ParticleRenderer);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Resources_ParticleEffectResource);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Resources_VectorFieldResource);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Startup);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Streams_DefaultParticleStreams);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Streams_ParticleStream);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_System_ParticleFrameProgram);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_System_ParticleProgram);
   PL_STATICLINK_REFERENCE(ParticlePlugin_System_ParticleSystemDescriptor);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Type_Effect_ParticleTypeEffect);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Type_GPU_GPUParticleRenderer);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Type_GPU_ParticleGPULowering);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Type_GPU_ParticleGPUProgram);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_Type_GPU_ParticleTypeGPU);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Type_Light_ParticleTypeLight);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Type_Mesh_ParticleTypeMesh);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Type_ParticleType);

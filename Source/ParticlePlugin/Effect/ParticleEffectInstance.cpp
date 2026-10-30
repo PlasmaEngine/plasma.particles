@@ -46,6 +46,7 @@ void plParticleEffectInstance::Construct(plParticleEffectHandle hEffectHandle, c
   m_bIsSharedEffect = bIsShared;
   m_OwnerTags.Clear(); // instances are pooled; the new owner sets its tags after creation
   m_fDynamicSpawnScale = 1.0f;
+  SetLodUpdateInterval(2, -1.0f);
   m_hSkinnedMeshComponent.Invalidate();
   m_SkinningSnapshot.m_bValid = false;
   m_SkinningSnapshot.m_BoneMatrices.Clear();
@@ -90,6 +91,9 @@ void plParticleEffectInstance::Destruct()
   m_WindSampleGrids[1] = nullptr;
 
   m_EventQueue.Clear();
+  m_LastEvents.Clear();
+  m_uiTotalEventsRaised = 0;
+  m_uiTotalEventsDropped = 0;
 }
 
 void plParticleEffectInstance::Interrupt()
@@ -294,17 +298,28 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
 
   // parameters
   {
+    // a live reconfigure (hot reload) passes no parameters, so keep the values the owner set
+    // before; they are written again over the new defaults below
+    plHybridArray<FloatParameter, 2> previousFloats;
+    plHybridArray<ColorParameter, 2> previousColors;
+
+    if (!bFirstTime)
+    {
+      previousFloats = m_FloatParameters;
+      previousColors = m_ColorParameters;
+    }
+
     m_FloatParameters.Clear();
     m_ColorParameters.Clear();
 
     for (auto it = desc.m_FloatParameters.GetIterator(); it.IsValid(); ++it)
     {
-      SetParameter(plTempHashedString(it.Key().GetData()), it.Value());
+      SetParameterValue(plTempHashedString(it.Key().GetData()), it.Value(), false);
     }
 
     for (auto it = desc.m_ColorParameters.GetIterator(); it.IsValid(); ++it)
     {
-      SetParameter(plTempHashedString(it.Key().GetData()), it.Value());
+      SetParameterValue(plTempHashedString(it.Key().GetData()), it.Value(), false);
     }
 
     // shared effects do not support per-instance parameters
@@ -325,6 +340,22 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
       for (plUInt32 p = 0; p < colorParams.GetCount(); ++p)
       {
         SetParameter(colorParams[p].m_sName, colorParams[p].m_Value);
+      }
+
+      for (const FloatParameter& param : previousFloats)
+      {
+        if (param.m_bSetByOwner)
+        {
+          SetParameterValue(plTempHashedString(param.m_uiNameHash), param.m_fValue, true);
+        }
+      }
+
+      for (const ColorParameter& param : previousColors)
+      {
+        if (param.m_bSetByOwner)
+        {
+          SetParameterValue(plTempHashedString(param.m_uiNameHash), param.m_Value, true);
+        }
       }
     }
   }
@@ -563,13 +594,18 @@ bool plParticleEffectInstance::StepSimulation(const plTime& tDiff)
 }
 
 
-void plParticleEffectInstance::AddParticleEvent(const plParticleEvent& pe)
+bool plParticleEffectInstance::AddParticleEvent(const plParticleEvent& pe)
 {
-  // drop events when the capacity is full
-  if (m_EventQueue.GetCount() == m_EventQueue.GetCapacity())
-    return;
+  ++m_uiTotalEventsRaised;
+
+  if (m_EventQueue.GetCount() >= s_uiMaxEventsPerFrame)
+  {
+    ++m_uiTotalEventsDropped;
+    return false;
+  }
 
   m_EventQueue.PushBack(pe);
+  return true;
 }
 
 void plParticleEffectInstance::RequestWindSamples()
@@ -846,6 +882,8 @@ void plParticleEffectInstance::ProcessEventQueues()
   m_Transform = m_TransformForNextFrame;
   m_vVelocity = m_vVelocityForNextFrame;
 
+  m_LastEvents.Clear();
+
   if (m_EventQueue.IsEmpty())
     return;
 
@@ -877,7 +915,8 @@ void plParticleEffectInstance::ProcessEventQueues()
     }
   }
 
-  m_EventQueue.Clear();
+  // kept for the editor's event markers; the swap leaves the queue empty for this frame's events
+  m_LastEvents.Swap(m_EventQueue);
 }
 
 plParticleEffectUpdateTask::plParticleEffectUpdateTask(plParticleEffectInstance* pEffect)
@@ -907,15 +946,30 @@ void plParticleEffectUpdateTask::Execute()
 
 void plParticleEffectInstance::SetParameter(const plTempHashedString& sName, float value)
 {
-  // shared effects do not support parameters
+  // shared effects do not support per-instance parameters
   if (m_bIsSharedEffect)
     return;
 
+  SetParameterValue(sName, value, true);
+}
+
+void plParticleEffectInstance::SetParameter(const plTempHashedString& sName, const plColor& value)
+{
+  // shared effects do not support per-instance parameters
+  if (m_bIsSharedEffect)
+    return;
+
+  SetParameterValue(sName, value, true);
+}
+
+void plParticleEffectInstance::SetParameterValue(const plTempHashedString& sName, float value, bool bSetByOwner)
+{
   for (plUInt32 i = 0; i < m_FloatParameters.GetCount(); ++i)
   {
     if (m_FloatParameters[i].m_uiNameHash == sName.GetHash())
     {
       m_FloatParameters[i].m_fValue = value;
+      m_FloatParameters[i].m_bSetByOwner |= bSetByOwner;
       return;
     }
   }
@@ -923,19 +977,17 @@ void plParticleEffectInstance::SetParameter(const plTempHashedString& sName, flo
   auto& ref = m_FloatParameters.ExpandAndGetRef();
   ref.m_uiNameHash = sName.GetHash();
   ref.m_fValue = value;
+  ref.m_bSetByOwner = bSetByOwner;
 }
 
-void plParticleEffectInstance::SetParameter(const plTempHashedString& sName, const plColor& value)
+void plParticleEffectInstance::SetParameterValue(const plTempHashedString& sName, const plColor& value, bool bSetByOwner)
 {
-  // shared effects do not support parameters
-  if (m_bIsSharedEffect)
-    return;
-
   for (plUInt32 i = 0; i < m_ColorParameters.GetCount(); ++i)
   {
     if (m_ColorParameters[i].m_uiNameHash == sName.GetHash())
     {
       m_ColorParameters[i].m_Value = value;
+      m_ColorParameters[i].m_bSetByOwner |= bSetByOwner;
       return;
     }
   }
@@ -943,6 +995,7 @@ void plParticleEffectInstance::SetParameter(const plTempHashedString& sName, con
   auto& ref = m_ColorParameters.ExpandAndGetRef();
   ref.m_uiNameHash = sName.GetHash();
   ref.m_Value = value;
+  ref.m_bSetByOwner = bSetByOwner;
 }
 
 plInt32 plParticleEffectInstance::FindFloatParameter(const plTempHashedString& sName) const

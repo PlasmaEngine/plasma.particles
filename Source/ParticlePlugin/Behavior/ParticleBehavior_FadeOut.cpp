@@ -55,7 +55,7 @@ void plParticleBehaviorFactory_FadeOut::Load(plStreamReader& inout_stream)
 
 void plParticleBehavior_FadeOut::CreateRequiredStreams()
 {
-  CreateStream("LifeTime", plProcessingStream::DataType::Half2, &m_pStreamLifeTime, false);
+  CreateStream("LifeTime", plProcessingStream::DataType::Float2, &m_pStreamLifeTime, false);
   CreateStream("Color", plProcessingStream::DataType::Half4, &m_pStreamColor, false);
 }
 
@@ -72,21 +72,12 @@ void plParticleBehavior_FadeOut::Process(plUInt64 uiNumElements)
 
   PL_PROFILE_SCOPE("PFX: Fade Out");
 
-  plProcessingStreamIterator<plFloat16Vec2> itLifeTime(m_pStreamLifeTime, uiNumElements, 0);
+  plProcessingStreamIterator<plVec2> itLifeTime(m_pStreamLifeTime, uiNumElements, 0);
   plProcessingStreamIterator<plColorLinear16f> itColor(m_pStreamColor, uiNumElements, 0);
 
   // skip the first n particles
-  {
-    for (plUInt32 i = 0; i < m_uiFirstToUpdate; ++i)
-    {
-      itLifeTime.Advance();
-      itColor.Advance();
-    }
-
-    ++m_uiFirstToUpdate;
-    if (m_uiFirstToUpdate >= m_uiCurrentUpdateInterval)
-      m_uiFirstToUpdate = 0;
-  }
+  itLifeTime.Advance(m_uiFirstToUpdate);
+  itColor.Advance(m_uiFirstToUpdate);
 
   if (m_fStartAlpha <= 1.0f)
   {
@@ -95,11 +86,8 @@ void plParticleBehavior_FadeOut::Process(plUInt64 uiNumElements)
       const float fLifeTimeFraction = itLifeTime.Current().x * itLifeTime.Current().y;
       itColor.Current().a = m_fStartAlpha * plMath::Pow(fLifeTimeFraction, m_fExponent);
 
-      for (plUInt32 i = 0; i < m_uiCurrentUpdateInterval; ++i)
-      {
-        itLifeTime.Advance();
-        itColor.Advance();
-      }
+      itLifeTime.Advance(m_uiCurrentUpdateInterval);
+      itColor.Advance(m_uiCurrentUpdateInterval);
     }
   }
   else
@@ -110,19 +98,17 @@ void plParticleBehavior_FadeOut::Process(plUInt64 uiNumElements)
       const float fLifeTimeFraction = itLifeTime.Current().x * itLifeTime.Current().y;
       itColor.Current().a = plMath::Min(1.0f, m_fStartAlpha * plMath::Pow(fLifeTimeFraction, m_fExponent));
 
-      for (plUInt32 i = 0; i < m_uiCurrentUpdateInterval; ++i)
-      {
-        itLifeTime.Advance();
-        itColor.Advance();
-      }
+      itLifeTime.Advance(m_uiCurrentUpdateInterval);
+      itColor.Advance(m_uiCurrentUpdateInterval);
     }
   }
 
-  /// \todo Use level of detail to reduce the update interval further
-  /// up close, with a high interval, animations appear choppy, especially when fading stuff out at the end
+  // the next frame updates the next slice, at the interval the effect's camera distance asks for
+  m_uiCurrentUpdateInterval = GetOwnerEffect()->GetLodUpdateInterval();
 
-  // reset the update interval to the default
-  m_uiCurrentUpdateInterval = 2;
+  ++m_uiFirstToUpdate;
+  if (m_uiFirstToUpdate >= m_uiCurrentUpdateInterval)
+    m_uiFirstToUpdate = 0;
 }
 
 

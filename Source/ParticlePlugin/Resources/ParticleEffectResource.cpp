@@ -1,5 +1,6 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
+#include <Foundation/IO/MemoryStream.h>
 #include <Foundation/Utilities/AssetFileHeader.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
 
@@ -63,7 +64,17 @@ void plParticleEffectResource::UpdateMemoryUsage(MemoryUsage& out_NewMemoryUsage
 
 PL_RESOURCE_IMPLEMENT_CREATEABLE(plParticleEffectResource, plParticleEffectResourceDescriptor)
 {
-  m_Desc = descriptor;
+  // The descriptor owns its systems and modules through raw pointers, so a member-wise copy would
+  // share them with the caller's descriptor and free them twice. Copy through the binary format.
+  plDefaultMemoryStreamStorage storage;
+  {
+    plMemoryStreamWriter writer(&storage);
+    descriptor.Save(writer);
+  }
+  {
+    plMemoryStreamReader reader(&storage);
+    m_Desc.Load(reader);
+  }
 
   plResourceLoadDesc res;
   res.m_State = plResourceState::Loaded;

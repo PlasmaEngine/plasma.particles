@@ -1,0 +1,159 @@
+Objects
+{
+o
+{
+	Uuid %id{u4{9800001,9800101}}
+	s %t{"plParticleSystemNode"}
+	u3 %v{2}
+	s %n{"root"}
+	p
+	{
+		VarArray %Emitters
+		{
+			Uuid{u4{9800001,9800102}}
+		}
+		VarArray %Initializers
+		{
+			Uuid{u4{9800001,9800103}}
+			Uuid{u4{9800001,9800104}}
+			Uuid{u4{9800001,9800105}}
+			Uuid{u4{9800001,9800106}}
+			Uuid{u4{9800001,9800107}}
+		}
+		VarArray %Behaviors
+		{
+			Uuid{u4{9800001,9800108}}
+			Uuid{u4{9800001,9800109}}
+			Uuid{u4{9800001,9800110}}
+		}
+		VarArray %Types
+		{
+			Uuid{u4{9800001,9800111}}
+		}
+		s %Name{"Spinning Embers"}
+		plVarianceTypeTime %LifeTime
+		{
+			f %Variance{0.4}
+			Time %Value{d{2.5}}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800102}}
+	s %t{"plParticleEmitterFactory_Continuous"}
+	u3 %v{1}
+	p
+	{
+		u3 %SpawnCountPerSec{12}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800103}}
+	s %t{"plParticleInitializerFactory_SpherePosition"}
+	u3 %v{2}
+	p
+	{
+		f %Radius{0.3}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800104}}
+	s %t{"plParticleInitializerFactory_VelocityCone"}
+	u3 %v{2}
+	p
+	{
+		Angle %Angle{f{0.6}}
+		plVarianceTypeFloat %Speed
+		{
+			f %Variance{0.5}
+			f %Value{0.6}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800105}}
+	s %t{"plParticleInitializerFactory_RandomSize"}
+	u3 %v{2}
+	p
+	{
+		s %Mode{"plParticleSizeMode::Uniform"}
+		plVarianceTypeFloat %Aspect
+		{
+			f %Variance{0}
+			f %Value{1}
+		}
+		plVarianceTypeFloat %Size
+		{
+			f %Variance{0.4}
+			f %Value{0.05}
+		}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800106}}
+	s %t{"plParticleInitializerFactory_RandomRotationSpeed"}
+	u3 %v{2}
+	p
+	{
+		b %RandomStartAngle{1}
+		Angle %DegreesPerSecond{f{3.1416}}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800107}}
+	s %t{"plParticleInitializerFactory_RandomColor"}
+	u3 %v{1}
+	p
+	{
+		Color %Color1{f{1,0.75,0.3,1}}
+		Color %Color2{f{1,0.4,0.1,1}}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800108}}
+	s %t{"plParticleBehaviorFactory_Gravity"}
+	u3 %v{1}
+	p
+	{
+		f %GravityFactor{-0.1}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800109}}
+	s %t{"plParticleBehaviorFactory_Drag"}
+	u3 %v{1}
+	p
+	{
+		f %Drag{0.5}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800110}}
+	s %t{"plParticleBehaviorFactory_FadeOut"}
+	u3 %v{1}
+	p
+	{
+		f %Exponent{1.5}
+	}
+}
+o
+{
+	Uuid %id{u4{9800001,9800111}}
+	s %t{"plParticleTypeQuadFactory"}
+	u3 %v{3}
+	p
+	{
+		s %RenderMode{"plParticleTypeRenderMode::Additive"}
+		s %Texture{"{ e00262e8-58f5-42f5-880d-569257047201 }"}
+	}
+}
+}

@@ -6,6 +6,7 @@
 #include <Foundation/Types/VarianceTypes.h>
 #include <ParticlePlugin/Declarations.h>
 #include <ParticlePlugin/ParticlePluginDLL.h>
+#include <ParticlePlugin/System/ParticleFrameProgram.h>
 
 class plParticleEmitterFactory;
 class plParticleBehaviorFactory;
@@ -48,6 +49,9 @@ public:
   plVarianceTypeTime m_LifeTime;
   plString m_sOnDeathEvent;
   plString m_sLifeScaleParameter;
+
+  /// The block properties driven by per-frame graph inputs, and the program computing them.
+  plParticleFrameProgram m_FrameProgram;
 
   //////////////////////////////////////////////////////////////////////////
 

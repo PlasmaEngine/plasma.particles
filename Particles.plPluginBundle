@@ -8,8 +8,8 @@ PluginInfo
 	// Artwork existed on disk but the bundle had no fields for it, so nothing displayed it.
 	string %Icon{"ParticleIcon.png"}
 	string %Banner{"ParticleBanner.png"}
-	string %MinEngineVersion{"0.7.0"}
-	string %MaxEngineVersion{"0.7.0"}
+	string %MinEngineVersion{"0.11.2"}
+	string %MaxEngineVersion{"0.11.2"}
 	string %Description{"Adds support for particle effects."}
 	string %EditorPlugins{"plEditorPluginParticle"}
 	string %EditorEnginePlugins{"plEnginePluginParticle"}

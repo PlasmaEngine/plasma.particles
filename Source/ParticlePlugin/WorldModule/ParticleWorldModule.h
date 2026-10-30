@@ -14,6 +14,7 @@ class plTaskGroupID;
 class plParticleStream;
 class plParticleStreamFactory;
 class plParticleForceFieldComponent;
+class plGALReadbackBufferHelper;
 
 /// A per-frame snapshot of one active plParticleForceFieldComponent, in world space.
 /// Rebuilt on the main thread before the update tasks start, so behaviors can read it lock-free.
@@ -85,7 +86,17 @@ public:
   /// (it is rebuilt at the start of every particle update).
   plArrayPtr<const plParticleForceFieldData> GetForceFieldData() const { return m_ForceFieldData; }
 
+  /// \brief The main camera of this world, snapshotted at the start of every particle update so the
+  /// update tasks can read it. Zero when the world has no main view.
+  const plVec3& GetMainCameraPosition() const { return m_vMainCameraPosition; }
+
+  /// \brief Takes over a GPU system's readback when the system goes away. The render thread may still
+  /// record into it for a frame it has not finished, so it is freed a few frames later.
+  void RetireReadback(plGALReadbackBufferHelper* pReadback);
+
 private:
+  void FreeRetiredReadbacks(bool bAll);
+
   virtual void WorldClear() override;
 
   void UpdateEffects(const plWorldModule::UpdateContext& context);
@@ -116,4 +127,14 @@ private:
   plHashTable<const plRTTI*, plWorldModule*> m_WorldModuleCache;
   plDynamicArray<const plParticleForceFieldComponent*> m_ForceFields;
   plDynamicArray<plParticleForceFieldData> m_ForceFieldData;
+  plVec3 m_vMainCameraPosition = plVec3::MakeZero();
+
+  struct RetiredReadback
+  {
+    plUInt64 m_uiFrame = 0;
+    plGALReadbackBufferHelper* m_pReadback = nullptr;
+  };
+
+  plMutex m_RetiredReadbacksMutex;
+  plDynamicArray<RetiredReadback> m_RetiredReadbacks;
 };

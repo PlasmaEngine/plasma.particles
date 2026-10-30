@@ -1,5 +1,6 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
+#include <ParticlePlugin/Events/ParticleEvent.h>
 #include <ParticlePlugin/Events/ParticleEventReaction.h>
 
 // clang-format off
@@ -86,6 +87,21 @@ plParticleEventReaction::~plParticleEventReaction() = default;
 void plParticleEventReaction::Reset(plParticleEffectInstance* pOwner)
 {
   m_pOwnerEffect = pOwner;
+}
+
+void plParticleSplitEventNames(plStringView sNames, plParticleEventNames& out_names)
+{
+  out_names.Clear();
+
+  plHybridArray<plStringView, 4> parts;
+  sNames.Split(false, parts, ";");
+
+  for (plStringView sPart : parts)
+  {
+    sPart.Trim(" ");
+    if (!sPart.IsEmpty())
+      out_names.PushBack(plTempHashedString(sPart));
+  }
 }
 
 

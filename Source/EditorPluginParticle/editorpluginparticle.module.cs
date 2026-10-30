@@ -8,12 +8,16 @@ public class EditorPluginParticleModule : ModuleRules
         PlasmaPackageSdk.ConfigurePackageModule(this, context, "Source/EditorPluginParticle", "EditorPluginParticlePCH.h",
             "BUILDSYSTEM_BUILDING_EDITORPLUGINPARTICLE_LIB");
 
+        // Editor views reuse file-local layout helpers. Keep those translation units separate.
+        UseUnityBuild = false;
+
         PlasmaPackageSdk.ConfigureEditorSdkConsumer(this, context);
         PlasmaPackageSdk.ConfigureAssetsBuiltIn(this, context);
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/ParticlePlugin", "plParticlePlugin");
         PlasmaPackageSdk.AddPackagePluginImport(this, context, "Source/EnginePluginParticle", "plEnginePluginParticle");
 
-        PlasmaPackageQt.ConfigureQtModule(this, context, "EditorPluginParticleModule",
-            "Source/EditorPluginParticle", "Core", "Gui", "Widgets");
+        // The particle graph's nodes are built from engine UI elements.
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plEditorUi");
+        PlasmaPackageSdk.AddImportLibrary(this, context, "plGameUiPlugin");
     }
 }

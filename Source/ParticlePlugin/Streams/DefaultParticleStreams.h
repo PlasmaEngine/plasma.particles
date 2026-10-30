@@ -59,6 +59,48 @@ protected:
 };
 
 //////////////////////////////////////////////////////////////////////////
+// SIZE SCALE STREAM
+//////////////////////////////////////////////////////////////////////////
+
+/// Per-axis multipliers of Size, (1, 1, 1) until something writes them.
+class PL_PARTICLEPLUGIN_DLL plParticleStreamFactory_SizeScale final : public plParticleStreamFactory
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStreamFactory_SizeScale, plParticleStreamFactory);
+
+public:
+  plParticleStreamFactory_SizeScale();
+};
+
+class PL_PARTICLEPLUGIN_DLL plParticleStream_SizeScale final : public plParticleStream
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStream_SizeScale, plParticleStream);
+
+protected:
+  virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// EMISSIVE STREAM
+//////////////////////////////////////////////////////////////////////////
+
+/// Per-particle multiplier of the type's emissive map, 1 until something writes it.
+class PL_PARTICLEPLUGIN_DLL plParticleStreamFactory_Emissive final : public plParticleStreamFactory
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStreamFactory_Emissive, plParticleStreamFactory);
+
+public:
+  plParticleStreamFactory_Emissive();
+};
+
+class PL_PARTICLEPLUGIN_DLL plParticleStream_Emissive final : public plParticleStream
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStream_Emissive, plParticleStream);
+
+protected:
+  virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
+};
+
+//////////////////////////////////////////////////////////////////////////
 // COLOR STREAM
 //////////////////////////////////////////////////////////////////////////
 
@@ -214,6 +256,31 @@ public:
 class PL_PARTICLEPLUGIN_DLL plParticleStream_Variation final : public plParticleStream
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleStream_Variation, plParticleStream);
+
+protected:
+  virtual void Initialize(plParticleSystemInstance* pOwner) override;
+  virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
+
+  plParticleSystemInstance* m_pOwner;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// RANDOM SEED STREAM
+//////////////////////////////////////////////////////////////////////////
+
+/// One random number per particle, chosen at spawn: what the graph's Random node hashes, so a
+/// particle reads the same random value for its whole life.
+class PL_PARTICLEPLUGIN_DLL plParticleStreamFactory_RandomSeed final : public plParticleStreamFactory
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStreamFactory_RandomSeed, plParticleStreamFactory);
+
+public:
+  plParticleStreamFactory_RandomSeed();
+};
+
+class PL_PARTICLEPLUGIN_DLL plParticleStream_RandomSeed final : public plParticleStream
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStream_RandomSeed, plParticleStream);
 
 protected:
   virtual void Initialize(plParticleSystemInstance* pOwner) override;

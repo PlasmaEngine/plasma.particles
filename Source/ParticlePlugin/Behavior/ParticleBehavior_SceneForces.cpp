@@ -14,7 +14,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_SceneForces, 1, plRTTI
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_MEMBER_PROPERTY("Influence", m_fInfluence)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 10.0f)),
+    PL_MEMBER_PROPERTY("Influence", m_fInfluence)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 10.0f), new plParticlePerParticleAttribute()),
     PL_MEMBER_PROPERTY("InfluenceParam", m_sInfluenceParameter),
   }
   PL_END_PROPERTIES;
@@ -36,6 +36,7 @@ void plParticleBehaviorFactory_SceneForces::CopyBehaviorProperties(plParticleBeh
 
   pBehavior->m_fInfluence = m_fInfluence;
   pBehavior->m_sInfluenceParameter = plTempHashedString(m_sInfluenceParameter.GetData());
+  pBehavior->m_pProgram = &m_Program;
 }
 
 void plParticleBehaviorFactory_SceneForces::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -45,11 +46,12 @@ void plParticleBehaviorFactory_SceneForces::QueryFinalizerDependencies(plSet<con
 
 void plParticleBehaviorFactory_SceneForces::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 1;
+  const plUInt8 uiVersion = 2;
   inout_stream << uiVersion;
 
   inout_stream << m_fInfluence;
   inout_stream << m_sInfluenceParameter;
+  m_Program.Save(inout_stream);
 }
 
 void plParticleBehaviorFactory_SceneForces::Load(plStreamReader& inout_stream)
@@ -57,10 +59,13 @@ void plParticleBehaviorFactory_SceneForces::Load(plStreamReader& inout_stream)
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
 
-  PL_ASSERT_DEV(uiVersion <= 1, "Invalid version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion <= 2, "Invalid version {0}", uiVersion);
 
   inout_stream >> m_fInfluence;
   inout_stream >> m_sInfluenceParameter;
+
+  if (uiVersion >= 2)
+    m_Program.Load(inout_stream);
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -69,6 +74,10 @@ void plParticleBehavior_SceneForces::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
   CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
+
+  m_Runner.Configure(m_pProgram);
+  m_Runner.CreateRequiredStreams([this](const char* szName, plProcessingStream::DataType type, plProcessingStream** ppStream)
+    { CreateStream(szName, type, ppStream, false); });
 }
 
 void plParticleBehavior_SceneForces::Process(plUInt64 uiNumElements)
@@ -85,9 +94,17 @@ void plParticleBehavior_SceneForces::Process(plUInt64 uiNumElements)
   if (fields.IsEmpty())
     return;
 
-  const float fInfluence = m_fInfluence * plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sInfluenceParameter, 1.0f), 0.0f);
-  if (fInfluence <= 0.0f)
+  const float fInfluenceScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sInfluenceParameter, 1.0f), 0.0f);
+
+  // a per-particle wire gives every particle its own influence, scaled by the parameter like the literal
+  plUInt32 uiInfluenceComponents = 0;
+  const float* pInfluence = m_Runner.RunProperty(GetOwnerSystem(), uiNumElements, m_TimeDiff, "Influence", uiInfluenceComponents);
+
+  const float fInfluence = m_fInfluence * fInfluenceScale;
+  if (pInfluence == nullptr && fInfluence <= 0.0f)
     return;
+
+  plUInt64 uiParticle = 0;
 
   // scene fields are placed in world space; for local-space simulations the particle
   // positions are relative to the effect, so the fields are transformed into effect space
@@ -159,8 +176,10 @@ void plParticleBehavior_SceneForces::Process(plUInt64 uiNumElements)
       vAccel += vDir * (field.m_fStrength * fFalloff);
     }
 
-    itVelocity.Current() += vAccel * (fInfluence * tDiff);
+    const float fParticleInfluence = pInfluence != nullptr ? plMath::Max(pInfluence[uiParticle * uiInfluenceComponents], 0.0f) * fInfluenceScale : fInfluence;
+    itVelocity.Current() += vAccel * (fParticleInfluence * tDiff);
 
+    ++uiParticle;
     itPosition.Advance();
     itVelocity.Advance();
   }

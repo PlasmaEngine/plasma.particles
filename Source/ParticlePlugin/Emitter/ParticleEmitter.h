@@ -27,6 +27,10 @@ public:
   /// Authoring only: a disabled block is kept in the document but left out of the built
   /// descriptor, so the runtime never sees it and nothing needs to serialize the flag.
   bool m_bEnabled = true;
+
+  /// Authoring only: names this block in the graph's wire pins (see plParticlePropertyPin). Empty
+  /// means the block's guid; a copy fills it in so pasted wires still find their block.
+  plString m_sPinId;
 };
 
 enum class plParticleEmitterState

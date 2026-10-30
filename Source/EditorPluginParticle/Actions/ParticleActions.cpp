@@ -3,7 +3,7 @@
 #include <EditorPluginParticle/Actions/ParticleActions.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAsset.h>
 #include <GuiFoundation/Action/ActionManager.h>
-#include <GuiFoundation/UIServices/UIServices.moc.h>
+#include <GuiFoundation/UIServices/UIServices.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleAction, 1, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -19,6 +19,11 @@ plActionDescriptorHandle plParticleActions::s_hSimulationSpeedMenu;
 plActionDescriptorHandle plParticleActions::s_hSimulationSpeed[10];
 plActionDescriptorHandle plParticleActions::s_hRenderVisualizers;
 plActionDescriptorHandle plParticleActions::s_hTemplatesMenu;
+plActionDescriptorHandle plParticleActions::s_hShowStats;
+plActionDescriptorHandle plParticleActions::s_hShowEvents;
+plActionDescriptorHandle plParticleActions::s_hPreviewStatic;
+plActionDescriptorHandle plParticleActions::s_hPreviewOrbit;
+plActionDescriptorHandle plParticleActions::s_hPreviewLine;
 
 
 void plParticleActions::RegisterActions()
@@ -55,6 +60,11 @@ void plParticleActions::RegisterActions()
   s_hRenderVisualizers = PL_REGISTER_ACTION_1(
     "PFX.Render.Visualizers", plActionScope::Document, "Particles", "V", plParticleAction, plParticleAction::ActionType::RenderVisualizers);
   s_hTemplatesMenu = PL_REGISTER_DYNAMIC_MENU("PFX.Templates", plParticleTemplatesMenuAction, ":/GuiFoundation/Icons/DocumentAdd.svg");
+  s_hShowStats = PL_REGISTER_ACTION_1("PFX.Stats", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::ShowStats);
+  s_hShowEvents = PL_REGISTER_ACTION_1("PFX.Events", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::ShowEvents);
+  s_hPreviewStatic = PL_REGISTER_ACTION_1("PFX.Preview.Static", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewStatic);
+  s_hPreviewOrbit = PL_REGISTER_ACTION_1("PFX.Preview.Orbit", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewOrbit);
+  s_hPreviewLine = PL_REGISTER_ACTION_1("PFX.Preview.Line", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewLine);
 }
 
 void plParticleActions::UnregisterActions()
@@ -66,6 +76,11 @@ void plParticleActions::UnregisterActions()
   plActionManager::UnregisterAction(s_hSimulationSpeedMenu);
   plActionManager::UnregisterAction(s_hRenderVisualizers);
   plActionManager::UnregisterAction(s_hTemplatesMenu);
+  plActionManager::UnregisterAction(s_hShowStats);
+  plActionManager::UnregisterAction(s_hShowEvents);
+  plActionManager::UnregisterAction(s_hPreviewStatic);
+  plActionManager::UnregisterAction(s_hPreviewOrbit);
+  plActionManager::UnregisterAction(s_hPreviewLine);
 
   for (int i = 0; i < PL_ARRAY_SIZE(s_hSimulationSpeed); ++i)
     plActionManager::UnregisterAction(s_hSimulationSpeed[i]);
@@ -93,6 +108,13 @@ void plParticleActions::MapActions(plStringView sMapping)
 
   pMap->MapAction(s_hRenderVisualizers, szSubPath, 4.0f);
   pMap->MapAction(s_hTemplatesMenu, szSubPath, 5.0f);
+
+  // the preview: how it moves, and its stats overlay
+  pMap->MapAction(s_hPreviewStatic, szSubPath, 6.0f);
+  pMap->MapAction(s_hPreviewOrbit, szSubPath, 6.1f);
+  pMap->MapAction(s_hPreviewLine, szSubPath, 6.2f);
+  pMap->MapAction(s_hShowStats, szSubPath, 7.0f);
+  pMap->MapAction(s_hShowEvents, szSubPath, 7.1f);
 }
 
 plParticleAction::plParticleAction(const plActionContext& context, const char* szName, plParticleAction::ActionType type, float fSimSpeed)
@@ -160,6 +182,26 @@ void plParticleAction::Execute(const plVariant& value)
     case ActionType::RenderVisualizers:
       m_pEffectDocument->SetRenderVisualizers(!m_pEffectDocument->GetRenderVisualizers());
       return;
+
+    case ActionType::ShowStats:
+      m_pEffectDocument->SetShowStats(!m_pEffectDocument->GetShowStats());
+      return;
+
+    case ActionType::ShowEvents:
+      m_pEffectDocument->SetShowEvents(!m_pEffectDocument->GetShowEvents());
+      return;
+
+    case ActionType::PreviewStatic:
+      m_pEffectDocument->SetPreviewMotion(plParticlePreviewMotion::Static);
+      return;
+
+    case ActionType::PreviewOrbit:
+      m_pEffectDocument->SetPreviewMotion(plParticlePreviewMotion::Orbit);
+      return;
+
+    case ActionType::PreviewLine:
+      m_pEffectDocument->SetPreviewMotion(plParticlePreviewMotion::Line);
+      return;
   }
 }
 
@@ -170,6 +212,7 @@ void plParticleAction::EffectEventHandler(const plParticleEffectAssetEvent& e)
     case plParticleEffectAssetEvent::AutoRestartChanged:
     case plParticleEffectAssetEvent::SimulationSpeedChanged:
     case plParticleEffectAssetEvent::RenderVisualizersChanged:
+    case plParticleEffectAssetEvent::PreviewSettingsChanged:
       UpdateState();
       break;
 
@@ -217,7 +260,7 @@ void plParticleTemplatesMenuAction::Execute(const plVariant& value)
   auto* pDocument = const_cast<plParticleEffectAssetDocument*>(static_cast<const plParticleEffectAssetDocument*>(m_Context.m_pDocument));
 
   const plStatus status = pDocument->AddSystemFromTemplate(value.Get<plString>());
-  plQtUiServices::MessageBoxStatus(status, "Adding the system from the template failed.");
+  plEditorUiServices::MessageBoxStatus(status, "Adding the system from the template failed.");
 }
 
 void plParticleAction::UpdateState()
@@ -244,5 +287,24 @@ void plParticleAction::UpdateState()
   {
     SetCheckable(true);
     SetChecked(m_pEffectDocument->GetRenderVisualizers());
+  }
+
+  if (m_Type == ActionType::ShowStats)
+  {
+    SetCheckable(true);
+    SetChecked(m_pEffectDocument->GetShowStats());
+  }
+
+  if (m_Type == ActionType::ShowEvents)
+  {
+    SetCheckable(true);
+    SetChecked(m_pEffectDocument->GetShowEvents());
+  }
+
+  if (m_Type == ActionType::PreviewStatic || m_Type == ActionType::PreviewOrbit || m_Type == ActionType::PreviewLine)
+  {
+    const plParticlePreviewMotion::Enum motion = m_Type == ActionType::PreviewOrbit ? plParticlePreviewMotion::Orbit : (m_Type == ActionType::PreviewLine ? plParticlePreviewMotion::Line : plParticlePreviewMotion::Static);
+    SetCheckable(true);
+    SetChecked(m_pEffectDocument->GetPreviewMotion() == motion);
   }
 }

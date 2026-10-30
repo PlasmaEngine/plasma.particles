@@ -30,9 +30,10 @@ public:
   ~plParticleFinalizer_Age();
 
   virtual void CreateRequiredStreams() override;
+  virtual void QueryOptionalStreams() override;
 
   plVarianceTypeTime m_LifeTime;
-  plTempHashedString m_sOnDeathEvent;
+  plParticleEventNames m_OnDeathEvents;
   plTempHashedString m_sLifeScaleParameter;
 
 protected:
@@ -46,4 +47,6 @@ protected:
   plProcessingStream* m_pStreamLifeTime = nullptr;
   plProcessingStream* m_pStreamPosition = nullptr;
   plProcessingStream* m_pStreamVelocity = nullptr;
+  const plProcessingStream* m_pStreamColor = nullptr;
+  const plProcessingStream* m_pStreamSize = nullptr;
 };

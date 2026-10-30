@@ -9,9 +9,11 @@
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
 #include <ParticlePlugin/Emitter/ParticleEmitter.h>
+#include <ParticlePlugin/Emitter/ParticleEmitter_OnEvent.h>
 #include <ParticlePlugin/Finalizer/ParticleFinalizer.h>
 #include <ParticlePlugin/Initializer/ParticleInitializer.h>
 #include <ParticlePlugin/Streams/ParticleStream.h>
+#include <ParticlePlugin/System/ParticleFrameProgram.h>
 #include <ParticlePlugin/System/ParticleSystemDescriptor.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 #include <ParticlePlugin/Type/GPU/ParticleGPULowering.h>
@@ -124,6 +126,8 @@ void plParticleSystemInstance::ConfigureFromTemplate(const plParticleSystemDescr
     info.m_bInUse = false;
   }
 
+  const bool bWasLoweredToGPU = m_bLoweredToGPU;
+
   // decide whether the per-frame simulation is lowered onto the GPU
   {
     bool bLower = false;
@@ -139,7 +143,7 @@ void plParticleSystemInstance::ConfigureFromTemplate(const plParticleSystemDescr
 
       if (!bAlreadyGPU)
       {
-        const plStringView sBlocker = plParticleGPULowering::FindLoweringBlocker(pTemplate);
+        const plString sBlocker = plParticleGPULowering::FindLoweringBlocker(pTemplate);
 
         if (sBlocker.IsEmpty())
         {
@@ -155,9 +159,10 @@ void plParticleSystemInstance::ConfigureFromTemplate(const plParticleSystemDescr
     m_bLoweredToGPU = bLower;
   }
 
-  // when lowered, the instance module lists never mirror the factory lists, so the
-  // equality checks below correctly fail and the processors are fully recreated
-  const bool allProcessorsEqual = IsEmitterConfigEqual(pTemplate) && IsInitializerConfigEqual(pTemplate) && IsBehaviorConfigEqual(pTemplate) && IsTypeConfigEqual(pTemplate) && IsFinalizerConfigEqual(pTemplate);
+  // when lowered, the instance module lists never mirror the factory lists, so the equality checks
+  // below fail and the processors are fully recreated. Switching from CPU to GPU is the exception:
+  // the CPU modules still match the factories, so the switch itself forces the recreation.
+  const bool allProcessorsEqual = bWasLoweredToGPU == m_bLoweredToGPU && IsEmitterConfigEqual(pTemplate) && IsInitializerConfigEqual(pTemplate) && IsBehaviorConfigEqual(pTemplate) && IsTypeConfigEqual(pTemplate) && IsFinalizerConfigEqual(pTemplate);
 
   if (!allProcessorsEqual)
   {
@@ -174,6 +179,21 @@ void plParticleSystemInstance::ConfigureFromTemplate(const plParticleSystemDescr
 
   // setup stream initializers for all streams that have none yet
   CreateStreamZeroInitializers();
+
+  // the per-frame program writes into the modules, so it is set up after they exist
+  if (pTemplate->m_FrameProgram.IsEmpty())
+  {
+    m_pFrameProgram.Clear();
+  }
+  else
+  {
+    if (m_pFrameProgram == nullptr)
+    {
+      m_pFrameProgram = PL_DEFAULT_NEW(plParticleFrameProgramRunner);
+    }
+
+    m_pFrameProgram->Configure(pTemplate, this, m_bLoweredToGPU);
+  }
 }
 
 
@@ -229,6 +249,20 @@ void plParticleSystemInstance::CreateStreamProcessors(const plParticleSystemDesc
       plParticleEmitter* pEmitter = pFactory->CreateEmitter(this);
       m_StreamGroup.AddProcessor(pEmitter);
       m_Emitters.PushBack(pEmitter);
+    }
+
+    // the Event inputs of the particles On Event spawns
+    m_pEventInputs = nullptr;
+
+    for (const plParticleEmitter* pEmitter : m_Emitters)
+    {
+      if (pEmitter->IsInstanceOf<plParticleEmitter_OnEvent>())
+      {
+        m_pEventInputs = plGetStaticRTTI<plParticleEventInputs>()->GetAllocator()->Allocate<plParticleEventInputs>();
+        m_pEventInputs->Reset(this);
+        m_StreamGroup.AddProcessor(m_pEventInputs);
+        break;
+      }
     }
   }
 
@@ -305,6 +339,11 @@ void plParticleSystemInstance::SetupOptionalStreams()
   for (auto& pEmitter : m_Emitters)
   {
     pEmitter->QueryOptionalStreams();
+  }
+
+  if (m_pEventInputs != nullptr)
+  {
+    m_pEventInputs->QueryOptionalStreams();
   }
 
   for (auto& pInitializer : m_Initializers)
@@ -402,6 +441,8 @@ plParticleSystemInstance::plParticleSystemInstance()
   m_BoundingVolume = plBoundingBoxSphere::MakeInvalid();
 }
 
+plParticleSystemInstance::~plParticleSystemInstance() = default;
+
 void plParticleSystemInstance::Construct(plUInt32 uiMaxParticles, plWorld* pWorld, plParticleEffectInstance* pOwnerEffect, float fSpawnCountMultiplier)
 {
   m_BoundingVolume = plBoundingBoxSphere::MakeInvalid();
@@ -418,8 +459,12 @@ void plParticleSystemInstance::Construct(plUInt32 uiMaxParticles, plWorld* pWorl
 
 void plParticleSystemInstance::Destruct()
 {
+  // its factory copies point at the modules cleared below
+  m_pFrameProgram.Clear();
+
   m_StreamGroup.Clear();
   m_Emitters.Clear();
+  m_pEventInputs = nullptr;
   m_Initializers.Clear();
   m_Behaviors.Clear();
   m_Finalizers.Clear();
@@ -431,6 +476,20 @@ void plParticleSystemInstance::Destruct()
 plParticleSystemState::Enum plParticleSystemInstance::Update(const plTime& diff)
 {
   PL_PROFILE_SCOPE("PFX: System Update");
+
+  const plTime tStart = plTime::Now();
+  PL_SCOPE_EXIT(m_LastUpdateDuration = plTime::Now() - tStart);
+
+  m_uiLastEventsRaised = m_uiEventsRaised;
+  m_uiLastEventsDropped = m_uiEventsDropped;
+  m_uiEventsRaised = 0;
+  m_uiEventsDropped = 0;
+
+  // per-frame graph inputs: every module of this step sees the values computed from them
+  if (m_pFrameProgram != nullptr)
+  {
+    m_pFrameProgram->Evaluate(diff);
+  }
 
   plUInt32 uiSpawnedParticles = 0;
 
@@ -481,6 +540,15 @@ plParticleSystemState::Enum plParticleSystemInstance::Update(const plTime& diff)
           m_StreamGroup.InitializeElements(uiSpawn);
           uiSpawnedParticles += uiSpawn;
         }
+
+        // per event, the batches are spawned after the processing below
+        if (const plParticleEmitter_OnEvent* pOnEvent = plDynamicCast<const plParticleEmitter_OnEvent*>(pEmitter))
+        {
+          for (const plParticleEmitter_OnEvent::Batch& batch : pOnEvent->GetBatches())
+          {
+            uiSpawnedParticles += batch.m_uiCount;
+          }
+        }
       }
     }
   }
@@ -513,6 +581,9 @@ plParticleSystemState::Enum plParticleSystemInstance::Update(const plTime& diff)
     PL_PROFILE_SCOPE("PFX: System Process");
     m_StreamGroup.Process();
   }
+
+  // like the step's other spawns, these come after the processing, so they live at least one frame
+  SpawnEventBatches();
 
   if (m_bEmitterEnabled)
     return plParticleSystemState::Active;
@@ -617,10 +688,15 @@ void plParticleSystemInstance::CreateStreamZeroInitializers()
 
       if (pStream == nullptr)
       {
-        plLog::Warning("Particle stream '{0}' is zero-initialized.", info.m_sName);
+        // custom attributes from the graph start at zero by design
+        if (!info.m_sName.StartsWith("Custom."))
+          plLog::Warning("Particle stream '{0}' is zero-initialized.", info.m_sName);
 
         plProcessingStreamSpawnerZeroInitialized* pZeroInit = PL_DEFAULT_NEW(plProcessingStreamSpawnerZeroInitialized);
         pZeroInit->SetStreamName(info.m_sName);
+
+        // with the stream default initializers, before any initializer writes the new particles
+        pZeroInit->m_fPriority = -1000.0f;
 
         info.m_pDefaultInitializer = pZeroInit;
       }
@@ -651,6 +727,59 @@ void plParticleSystemInstance::ProcessEventQueue(plParticleEventQueue queue)
   for (auto pEmitter : m_Emitters)
   {
     pEmitter->ProcessEventQueue(queue);
+  }
+}
+
+void plParticleSystemInstance::RaiseEvent(const plParticleEvent& e)
+{
+  ++m_uiEventsRaised;
+  ++m_uiTotalEventsRaised;
+
+  if (!m_pOwnerEffect->AddParticleEvent(e))
+  {
+    ++m_uiEventsDropped;
+    ++m_uiTotalEventsDropped;
+  }
+}
+
+void plParticleSystemInstance::CountDroppedEvents(plUInt32 uiCount)
+{
+  m_uiEventsRaised += uiCount;
+  m_uiEventsDropped += uiCount;
+  m_uiTotalEventsRaised += uiCount;
+  m_uiTotalEventsDropped += uiCount;
+  m_pOwnerEffect->CountDroppedEvents(uiCount);
+}
+
+void plParticleSystemInstance::SpawnEventBatches()
+{
+  for (plParticleEmitter* pEmitter : m_Emitters)
+  {
+    plParticleEmitter_OnEvent* pOnEvent = plDynamicCast<plParticleEmitter_OnEvent*>(pEmitter);
+
+    if (pOnEvent == nullptr || pOnEvent->GetBatches().IsEmpty())
+      continue;
+
+    PL_PROFILE_SCOPE("PFX: System Emit (Events)");
+
+    // the initializers place particles around the system's position, so for each batch that is the event's
+    const plTransform transform = m_Transform;
+    m_pSpawnEmitter = pOnEvent;
+
+    for (const plParticleEmitter_OnEvent::Batch& batch : pOnEvent->GetBatches())
+    {
+      m_pSpawnEvent = &batch.m_Event;
+      m_Transform.m_vPosition = batch.m_Event.m_vPosition;
+
+      m_StreamGroup.InitializeElements(batch.m_uiCount);
+      m_StreamGroup.SpawnPendingElements();
+    }
+
+    m_Transform = transform;
+    m_pSpawnEvent = nullptr;
+    m_pSpawnEmitter = nullptr;
+
+    pOnEvent->ClearBatches();
   }
 }
 

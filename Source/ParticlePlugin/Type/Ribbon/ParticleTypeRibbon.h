@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ParticlePlugin/Renderer/ParticleLook.h>
 #include <ParticlePlugin/Type/ParticleType.h>
 #include <ParticlePlugin/Type/Ribbon/RibbonRenderer.h>
 #include <RendererFoundation/RendererFoundationDLL.h>
@@ -33,6 +34,8 @@ public:
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
+  PL_PARTICLE_LOOK_ACCESSORS
+
   plEnum<plParticleTypeRenderMode> m_RenderMode;
   plEnum<plParticleRibbonUvMode> m_UvMode;
   float m_fTileLength = 1.0f;
@@ -43,6 +46,7 @@ public:
   float m_fLightDirectionality = 0.5f;
   bool m_bUseCustomMaterial = false;
   plString m_sCustomMaterial;
+  plParticleLookSettings m_Look;
 };
 
 /// Connects all particles of the system in spawn order into one continuous camera-facing band.
@@ -67,6 +71,7 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   plMaterialResourceHandle m_hCustomMaterial;
+  plParticleLook m_Look;
 
   virtual void CreateRequiredStreams() override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
@@ -76,12 +81,14 @@ protected:
 
   virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
   virtual void Process(plUInt64 uiNumElements) override {}
+  virtual void QueryOptionalStreams() override;
 
   plProcessingStream* m_pStreamLifeTime = nullptr;
   plProcessingStream* m_pStreamPosition = nullptr;
   plProcessingStream* m_pStreamSize = nullptr;
   plProcessingStream* m_pStreamColor = nullptr;
   plProcessingStream* m_pStreamRibbonOrder = nullptr;
+  plProcessingStream* m_pStreamSizeScale = nullptr; // optional; X scales the width
 
   // strictly increasing spawn counter; deliberately not reset on live re-configuration,
   // so already-alive particles keep sorting before newly spawned ones

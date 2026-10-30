@@ -58,6 +58,9 @@ protected:
   plProcessingStream* m_pStreamRotationSpeed = nullptr;
   plProcessingStream* m_pStreamRotationOffset = nullptr;
   plProcessingStream* m_pStreamAxis = nullptr;
+  plProcessingStream* m_pStreamSizeScale = nullptr; // optional per-axis multipliers of Size
+
+  virtual void QueryOptionalStreams() override;
 
   mutable bool m_bRenderDataCached = false;
   mutable plRenderData::Category m_RenderCategory;

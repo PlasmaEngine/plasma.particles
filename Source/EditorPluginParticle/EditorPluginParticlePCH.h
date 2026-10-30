@@ -14,6 +14,6 @@
 #include <Foundation/Strings/TranslationLookup.h>
 
 #include <EditorFramework/Assets/AssetCurator.h>
-#include <EditorFramework/EditorApp/EditorApp.moc.h>
+#include <EditorFramework/EditorApp/EditorApp.h>
 #include <GuiFoundation/Action/ActionMapManager.h>
 #include <ToolsFoundation/Reflection/ToolsReflectionUtils.h>

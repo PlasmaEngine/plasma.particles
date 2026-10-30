@@ -38,6 +38,12 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_Expression, 1, plRTTID
     PL_ENUM_MEMBER_PROPERTY("Output", plParticleExpressionBinding, m_Output),
   }
   PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    // converted into the Expression node by the editor; still reflected so existing effects load
+    new plHiddenAttribute(),
+  }
+  PL_END_ATTRIBUTES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
@@ -166,7 +172,7 @@ void plParticleBehavior_Expression::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
 }
 
 float plParticleBehavior_Expression::ExtractValue(plParticleExpressionBinding::Enum binding, plUInt32 uiIndex) const
@@ -197,9 +203,9 @@ float plParticleBehavior_Expression::ExtractValue(plParticleExpressionBinding::E
     {
       if (m_pStreamLifeTime)
       {
-        // LifeTime stream is Half2: x = remaining life (seconds), y = 1 / total life
-        const plFloat16Vec2& lt = m_pStreamLifeTime->GetData<plFloat16Vec2>()[uiIndex];
-        return 1.0f - static_cast<float>(lt.x) * static_cast<float>(lt.y); // fraction consumed
+        // LifeTime stream is Float2: x = remaining life (seconds), y = 1 / total life
+        const plVec2& lt = m_pStreamLifeTime->GetData<plVec2>()[uiIndex];
+        return 1.0f - lt.x * lt.y; // fraction consumed
       }
       return 0.0f;
     }

@@ -1,49 +1,15 @@
 #pragma once
 
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
-
-/// Which particle attribute to evaluate for the condition
-struct PL_PARTICLEPLUGIN_DLL plParticleKillAttribute
-{
-  using StorageType = plUInt8;
-
-  enum Enum
-  {
-    PositionX,
-    PositionY,
-    PositionZ,
-    Speed,
-    Size,
-    ColorAlpha,
-
-    Default = PositionZ
-  };
-};
-
-PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleKillAttribute);
-
-/// Comparison operator for the conditional kill
-struct PL_PARTICLEPLUGIN_DLL plParticleComparisonOp
-{
-  using StorageType = plUInt8;
-
-  enum Enum
-  {
-    Less,
-    LessEqual,
-    Greater,
-    GreaterEqual,
-
-    Default = Less
-  };
-};
-
-PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleComparisonOp);
+#include <ParticlePlugin/Behavior/ParticleConditionalCommon.h>
 
 /// Kills particles when a chosen attribute passes a threshold.
 ///
 /// For example, kill all particles below a certain height (PositionZ < -5)
 /// or all particles that have slowed below a minimum speed (Speed < 0.1).
+///
+/// Retired: the editor converts it into Kill If with a Compare node when an effect opens. It stays
+/// so effects built by plasma.particles 1.3 still load and run as they are.
 class PL_PARTICLEPLUGIN_DLL plParticleBehaviorFactory_ConditionalKill final : public plParticleBehaviorFactory
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleBehaviorFactory_ConditionalKill, plParticleBehaviorFactory);
@@ -57,8 +23,8 @@ public:
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
-  plEnum<plParticleKillAttribute> m_Attribute;
-  plEnum<plParticleComparisonOp> m_Comparison;
+  plEnum<plParticleAttribute> m_Attribute;
+  plEnum<plParticleConditionOp> m_Comparison;
   float m_fThreshold = 0.0f;
 };
 
@@ -67,8 +33,8 @@ class PL_PARTICLEPLUGIN_DLL plParticleBehavior_ConditionalKill final : public pl
   PL_ADD_DYNAMIC_REFLECTION(plParticleBehavior_ConditionalKill, plParticleBehavior);
 
 public:
-  plEnum<plParticleKillAttribute> m_Attribute;
-  plEnum<plParticleComparisonOp> m_Comparison;
+  plEnum<plParticleAttribute> m_Attribute;
+  plEnum<plParticleConditionOp> m_Comparison;
   float m_fThreshold = 0.0f;
 
 protected:
@@ -80,4 +46,5 @@ protected:
   plProcessingStream* m_pStreamVelocity = nullptr;
   plProcessingStream* m_pStreamSize = nullptr;
   plProcessingStream* m_pStreamColor = nullptr;
+  plProcessingStream* m_pStreamLifeTime = nullptr;
 };

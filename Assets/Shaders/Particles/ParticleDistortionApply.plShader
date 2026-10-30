@@ -1,0 +1,45 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+
+[RENDERSTATE]
+
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+
+[VERTEXSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleInterpolator.h>
+#include <Shaders/Common/Common.h>
+
+// a single-sampled copy of the colour target and the pixel offsets the distortion particles added up
+Texture2DArray DistortionSceneColor;
+Texture2DArray DistortionOffsets;
+
+float4 main(PS_IN input) : SV_Target
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint slice = input.RenderTargetArrayIndex;
+#else
+  uint slice = 0;
+#endif
+
+  float2 offset = DistortionOffsets.Load(int4((int2)input.Position.xy, slice, 0)).xy;
+
+  // untouched pixels keep their multisampled colour
+  if (all(abs(offset) < 0.01))
+  {
+    discard;
+  }
+
+  float2 uv = (input.Position.xy + offset) * ViewportSize.zw;
+  return DistortionSceneColor.SampleLevel(LinearClampSampler, float3(uv, slice), 0);
+}

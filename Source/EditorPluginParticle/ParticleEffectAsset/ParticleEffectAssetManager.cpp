@@ -1,7 +1,7 @@
 #include <EditorPluginParticle/EditorPluginParticlePCH.h>
 
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAssetManager.h>
-#include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAssetWindow.moc.h>
+#include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAssetWindow.h>
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectAssetDocumentManager, 1, plRTTIDefaultAllocator<plParticleEffectAssetDocumentManager>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
@@ -35,7 +35,7 @@ void plParticleEffectAssetDocumentManager::OnDocumentManagerEvent(const plDocume
     {
       if (e.m_pDocument->GetDynamicRTTI() == plGetStaticRTTI<plParticleEffectAssetDocument>())
       {
-        new plQtParticleEffectAssetDocumentWindow(static_cast<plParticleEffectAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
+        new plParticleEffectAssetDocumentWindow(static_cast<plParticleEffectAssetDocument*>(e.m_pDocument)); // NOLINT: Not a memory leak
       }
     }
     break;

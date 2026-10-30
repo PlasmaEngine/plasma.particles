@@ -158,6 +158,7 @@ enum class ParticleSystemVersion
   Version_6, // changed lifetime variance
   Version_7, // added life scale param
   Version_8, // added simulation target
+  Version_9, // added the per-frame program
 
   // insert new version numbers above
   Version_Count,
@@ -231,6 +232,9 @@ void plParticleSystemDescriptor::Save(plStreamWriter& inout_stream) const
 
     pType->Save(inout_stream);
   }
+
+  // Version_9
+  m_FrameProgram.Save(inout_stream);
 }
 
 
@@ -353,6 +357,14 @@ void plParticleSystemDescriptor::Load(plStreamReader& inout_stream)
 
       pType->Load(inout_stream);
     }
+  }
+
+  m_FrameProgram.m_Driven.Clear();
+  m_FrameProgram.m_ByteCode.Clear();
+
+  if (uiVersion >= (int)ParticleSystemVersion::Version_9)
+  {
+    m_FrameProgram.Load(inout_stream);
   }
 
   SetupDefaultProcessors();

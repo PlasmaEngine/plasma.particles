@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
+#include <ParticlePlugin/System/ParticleProgram.h>
 
 class PL_PARTICLEPLUGIN_DLL plParticleBehaviorFactory_Drag final : public plParticleBehaviorFactory
 {
@@ -9,6 +10,7 @@ class PL_PARTICLEPLUGIN_DLL plParticleBehaviorFactory_Drag final : public plPart
 public:
   virtual const plRTTI* GetBehaviorType() const override;
   virtual void CopyBehaviorProperties(plParticleBehavior* pObject, bool bFirstTime) const override;
+  virtual plParticleProgramData* GetParticleProgram() override { return &m_Program; }
 
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
@@ -16,6 +18,9 @@ public:
   float m_fDrag = 1.0f;         // exponential decay coefficient per second (1 = ~63% speed loss per second)
   bool m_bSizeRelative = false; // larger particles brake harder (drag scales with particle size)
   plString m_sDragParameter;
+
+  /// Per-particle wires into Drag.
+  plParticleProgramData m_Program;
 };
 
 /// Slows particles down over time, like air resistance.
@@ -28,7 +33,9 @@ class PL_PARTICLEPLUGIN_DLL plParticleBehavior_Drag final : public plParticleBeh
 
 public:
   float m_fDrag = 1.0f;
+  float m_fDragScale = 1.0f; ///< the drag parameter, which also scales a per-particle drag
   bool m_bSizeRelative = false;
+  const plParticleProgramData* m_pProgram = nullptr;
 
   virtual void CreateRequiredStreams() override;
 
@@ -38,4 +45,5 @@ protected:
 
   plProcessingStream* m_pStreamVelocity = nullptr;
   plProcessingStream* m_pStreamSize = nullptr;
+  plParticleProgramRunner m_Runner;
 };

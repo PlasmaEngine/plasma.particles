@@ -20,6 +20,12 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_If, 1, plRTTIDefaultAl
     PL_MEMBER_PROPERTY("FalseValue", m_fFalseValue)->AddAttributes(new plDefaultValueAttribute(0.0f)),
   }
   PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    // converted into Compare, Branch and Set Attribute by the editor; still reflected so existing effects load
+    new plHiddenAttribute(),
+  }
+  PL_END_ATTRIBUTES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
@@ -92,7 +98,7 @@ void plParticleBehavior_If::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Half2);
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
 }
 
 void plParticleBehavior_If::Process(plUInt64 uiNumElements)

@@ -58,7 +58,7 @@ public:
 
   plEnum<plParticleRaycastHitReaction> m_Reaction;
   plUInt8 m_uiCollisionLayer = 0;
-  plTempHashedString m_sOnCollideEvent;
+  plParticleEventNames m_OnCollideEvents;
   float m_fBounceFactor = 0.5f;
   float m_fSlideFactor = 0.5f;
   float m_fSizeFactor = 0.1f;
@@ -76,4 +76,5 @@ protected:
   plProcessingStream* m_pStreamLastPosition = nullptr;
   plProcessingStream* m_pStreamVelocity = nullptr;
   const plProcessingStream* m_pStreamSize = nullptr;
+  const plProcessingStream* m_pStreamColor = nullptr;
 };
