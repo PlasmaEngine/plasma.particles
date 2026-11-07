@@ -3,6 +3,7 @@
 #include <ParticlePlugin/Components/ParticleFinisherComponent.h>
 #include <ParticlePlugin/Effect/ParticleEffectController.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
+#include <RendererCore/Pipeline/View.h>
 
 plParticleEffectController::plParticleEffectController()
 {
@@ -126,6 +127,15 @@ void plParticleEffectController::ExtractRenderData(plMsgExtractRenderData& ref_m
 {
   if (const plParticleEffectInstance* pEffect = GetInstance())
   {
+    // shadow views only take the systems that cast shadows, and do not count as the effect being seen
+    if (ref_msg.m_pView->GetCameraUsageHint() == plCameraUsageHint::Shadow)
+    {
+      if (pEffect->CastsShadows())
+        m_pModule->ExtractEffectRenderData(pEffect, ref_msg, systemTransform);
+
+      return;
+    }
+
     pEffect->SetIsVisible();
 
     m_pModule->ExtractEffectRenderData(pEffect, ref_msg, systemTransform);

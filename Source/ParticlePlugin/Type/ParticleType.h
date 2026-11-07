@@ -36,6 +36,10 @@ public:
   /// Authoring only: a disabled block is kept in the document but left out of the built
   /// descriptor, so the runtime never sees it and nothing needs to serialize the flag.
   bool m_bEnabled = true;
+
+  /// Authoring only: names this block in the graph's wire pins (see plParticlePropertyPin). Empty
+  /// means the block's guid; a copy fills it in so pasted wires still find their block.
+  plString m_sPinId;
 };
 
 class PL_PARTICLEPLUGIN_DLL plParticleType : public plParticleModule
@@ -49,6 +53,9 @@ public:
 
   /// Whether this type manages GPU-side particles that the CPU stream group doesn't track.
   virtual bool HasActiveGPUElements() const { return false; }
+
+  /// Masked and opaque types can draw into shadow maps; every other type extracts nothing in shadow views.
+  virtual bool CastsShadows() const { return false; }
 
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const = 0;
 

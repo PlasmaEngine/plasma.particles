@@ -37,6 +37,7 @@ public:
   plEnum<plParticleLightingMode> m_LightingMode;
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
+  plParticleLookData m_Look;
 
   // GPU-simulated systems fill these in the particle compute pass; when the draw-args handle is
   // set the renderer binds them directly and draws indirectly

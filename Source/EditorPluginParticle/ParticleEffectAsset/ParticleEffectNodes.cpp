@@ -1,12 +1,15 @@
 #include <EditorPluginParticle/EditorPluginParticlePCH.h>
 
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectNodes.h>
+#include <Foundation/Serialization/AbstractObjectGraph.h>
+#include <Foundation/Serialization/GraphPatch.h>
 
 static const plParticleContextInfo s_ContextInfo[plParticleContext::Count] = {
   {plParticleContext::Spawn, "Emitters", "Spawn", []() { return plGetStaticRTTI<plParticleEmitterFactory>(); }},
   {plParticleContext::Initialize, "Initializers", "Initialize", []() { return plGetStaticRTTI<plParticleInitializerFactory>(); }},
   {plParticleContext::Update, "Behaviors", "Update", []() { return plGetStaticRTTI<plParticleBehaviorFactory>(); }},
   {plParticleContext::Output, "Types", "Output", []() { return plGetStaticRTTI<plParticleTypeFactory>(); }},
+  {plParticleContext::Events, "EventRaisers", "Events", []() { return plGetStaticRTTI<plParticleEventRaiserBlock>(); }},
 };
 
 const plParticleContextInfo& plParticleContextInfo::Get(plParticleContext::Enum context)
@@ -34,25 +37,87 @@ plParticleContext::Enum plParticleContextInfo::FromFactoryType(const plRTTI* pTy
   return plParticleContext::Count;
 }
 
-plString plParticlePropertyPin::Make(const plUuid& block, plStringView sProperty)
+plString plParticlePropertyPin::GetKey(const plDocumentObject* pBlock)
 {
-  plStringBuilder sGuid, sPin;
-  plConversionUtils::ToString(block, sGuid);
-  sPin.Set(sGuid, "|", sProperty);
+  const plVariant pinId = pBlock->GetTypeAccessor().GetValue("PinId");
+  if (pinId.IsA<plString>() && !pinId.Get<plString>().IsEmpty())
+    return pinId.Get<plString>();
+
+  plStringBuilder sGuid;
+  plConversionUtils::ToString(pBlock->GetGuid(), sGuid);
+  return sGuid;
+}
+
+plString plParticlePropertyPin::Make(const plDocumentObject* pBlock, plStringView sProperty)
+{
+  plStringBuilder sPin;
+  sPin.Set(GetKey(pBlock), "|", sProperty);
   return sPin;
 }
 
-bool plParticlePropertyPin::Parse(plStringView sPinName, plUuid& out_block, plStringBuilder& out_sProperty)
+bool plParticlePropertyPin::Parse(plStringView sPinName, plStringBuilder& out_sKey, plStringBuilder& out_sProperty)
 {
   const char* szSeparator = sPinName.FindSubString("|");
   if (szSeparator == nullptr)
     return false;
 
-  const plStringBuilder sGuid(plStringView(sPinName.GetStartPointer(), szSeparator));
-  out_block = plConversionUtils::ConvertStringToUuid(sGuid);
+  out_sKey = plStringView(sPinName.GetStartPointer(), szSeparator);
   out_sProperty = plStringView(szSeparator + 1, sPinName.GetEndPointer());
 
-  return out_block.IsValid() && !out_sProperty.IsEmpty();
+  return !out_sKey.IsEmpty() && !out_sProperty.IsEmpty();
+}
+
+const plDocumentObject* plParticlePropertyPin::FindBlock(const plDocumentObject* pSystemNode, plStringView sPinName, plStringBuilder& out_sProperty)
+{
+  plStringBuilder sKey;
+  if (pSystemNode == nullptr || !Parse(sPinName, sKey, out_sProperty))
+    return nullptr;
+
+  for (plUInt32 uiContext = 0; uiContext < plParticleContext::Count; ++uiContext)
+  {
+    const char* szProperty = plParticleContextInfo::Get((plParticleContext::Enum)uiContext).m_szProperty;
+    const auto& accessor = pSystemNode->GetTypeAccessor();
+    const plInt32 iCount = accessor.GetCount(szProperty);
+
+    for (plInt32 i = 0; i < iCount; ++i)
+    {
+      const plVariant value = accessor.GetValue(szProperty, i);
+      if (!value.IsA<plUuid>())
+        continue;
+
+      const plDocumentObject* pBlock = pSystemNode->GetDocumentObjectManager()->GetObject(value.Get<plUuid>());
+      if (pBlock != nullptr && GetKey(pBlock) == sKey)
+        return pBlock;
+    }
+  }
+
+  return nullptr;
+}
+
+void plParticlePropertyPin::StampKeys(plAbstractObjectGraph& ref_graph)
+{
+  for (auto it = ref_graph.GetAllNodes().GetIterator(); it.IsValid(); ++it)
+  {
+    plAbstractObjectNode* pNode = it.Value();
+
+    const plRTTI* pType = plRTTI::FindTypeByName(pNode->GetType());
+    if (pType == nullptr || plParticleContextInfo::FromFactoryType(pType) == plParticleContext::Count)
+      continue;
+
+    plStringBuilder sGuid;
+    plConversionUtils::ToString(pNode->GetGuid(), sGuid);
+
+    // default values may be left out of the graph, so the property is not always there
+    if (plAbstractObjectNode::Property* pPinId = pNode->FindProperty("PinId"))
+    {
+      if (!pPinId->m_Value.IsA<plString>() || pPinId->m_Value.Get<plString>().IsEmpty())
+        pPinId->m_Value = plString(sGuid);
+    }
+    else
+    {
+      pNode->AddProperty("PinId", plVariant(plString(sGuid)));
+    }
+  }
 }
 
 plParticleValueKind::Enum plParticleValueKind::FromProperty(const plAbstractProperty* pProp)
@@ -145,21 +210,86 @@ plParticleValueKind::Enum plParticleValueKind::FromNode(const plRTTI* pNodeType,
     out_sValueProperty = "Value";
     return Bool;
   }
+  if (pNodeType->IsDerivedFrom<plParticleVectorNode>())
+  {
+    out_sValueProperty = "Value";
+    return Vector;
+  }
 
   // Computed nodes have no stored value; the evaluator produces it from their inputs.
   if (pNodeType->IsDerivedFrom<plParticleMathNode>() || pNodeType->IsDerivedFrom<plParticleBranchNode>() ||
-      pNodeType->IsDerivedFrom<plParticleParameterNode>())
+      pNodeType->IsDerivedFrom<plParticleParameterNode>() || pNodeType->IsDerivedFrom<plParticleSystemValueNode>() ||
+      pNodeType->IsDerivedFrom<plParticleFunctionNode>() || pNodeType->IsDerivedFrom<plParticleRemapNode>() ||
+      pNodeType->IsDerivedFrom<plParticleLerpNode>() || pNodeType->IsDerivedFrom<plParticleClampNode>() ||
+      pNodeType->IsDerivedFrom<plParticleVectorReduceNode>() || pNodeType->IsDerivedFrom<plParticleDotNode>() ||
+      pNodeType->IsDerivedFrom<plParticleSampleCurveNode>() || pNodeType->IsDerivedFrom<plParticleNoiseNode>() ||
+      pNodeType->IsDerivedFrom<plParticleColorChannelNode>() || pNodeType->IsDerivedFrom<plParticleExpressionNode>() ||
+      pNodeType->IsDerivedFrom<plParticleSplitVectorNode>() || pNodeType->IsDerivedFrom<plParticleSplitColorNode>() ||
+      pNodeType->IsDerivedFrom<plParticleDistanceNode>() || pNodeType->IsDerivedFrom<plParticlePowerNode>() ||
+      pNodeType->IsDerivedFrom<plParticleStepNode>() || pNodeType->IsDerivedFrom<plParticleSmoothStepNode>() ||
+      pNodeType->IsDerivedFrom<plParticleInverseLerpNode>() || pNodeType->IsDerivedFrom<plParticleATan2Node>() ||
+      pNodeType->IsDerivedFrom<plParticleMathConstantNode>() || pNodeType->IsDerivedFrom<plParticleCurveOverLifeNode>())
   {
     out_sValueProperty = {};
     return Number;
   }
+  if (pNodeType->IsDerivedFrom<plParticleSystemVectorNode>() || pNodeType->IsDerivedFrom<plParticleVectorMathNode>() ||
+      pNodeType->IsDerivedFrom<plParticleVectorFunctionNode>() || pNodeType->IsDerivedFrom<plParticleScaleVectorNode>() ||
+      pNodeType->IsDerivedFrom<plParticleMakeVectorNode>() || pNodeType->IsDerivedFrom<plParticleSwizzleNode>() ||
+      pNodeType->IsDerivedFrom<plParticleCrossNode>() || pNodeType->IsDerivedFrom<plParticleReflectNode>() ||
+      pNodeType->IsDerivedFrom<plParticleProjectNode>() || pNodeType->IsDerivedFrom<plParticleRotateAboutAxisNode>() ||
+      pNodeType->IsDerivedFrom<plParticleVectorNoiseNode>() || pNodeType->IsDerivedFrom<plParticleTransformNode>())
+  {
+    out_sValueProperty = {};
+    return Vector;
+  }
   if (pNodeType->IsDerivedFrom<plParticleCompareNode>() || pNodeType->IsDerivedFrom<plParticleToBoolNode>() ||
-      pNodeType->IsDerivedFrom<plParticleBoolParameterNode>())
+      pNodeType->IsDerivedFrom<plParticleBoolParameterNode>() || pNodeType->IsDerivedFrom<plParticleLogicNode>() ||
+      pNodeType->IsDerivedFrom<plParticleNotNode>())
   {
     out_sValueProperty = {};
     return Bool;
   }
-  if (pNodeType->IsDerivedFrom<plParticleColorParameterNode>())
+  if (pNodeType->IsDerivedFrom<plParticleColorParameterNode>() || pNodeType->IsDerivedFrom<plParticleInputColorNode>() ||
+      pNodeType->IsDerivedFrom<plParticleCustomColorNode>() || pNodeType->IsDerivedFrom<plParticleSampleGradientNode>() ||
+      pNodeType->IsDerivedFrom<plParticleMakeColorNode>() || pNodeType->IsDerivedFrom<plParticleGradientOverLifeNode>())
+  {
+    out_sValueProperty = {};
+    return Color;
+  }
+
+  // per-particle inputs
+  if (pNodeType->IsDerivedFrom<plParticleInputValueNode>() || pNodeType->IsDerivedFrom<plParticleRandomNode>() ||
+      pNodeType->IsDerivedFrom<plParticleCustomFloatNode>() || pNodeType->IsDerivedFrom<plParticleRandomRangeNode>() ||
+      pNodeType->IsDerivedFrom<plParticleRandomIntegerNode>())
+  {
+    out_sValueProperty = {};
+    return Number;
+  }
+  if (pNodeType->IsDerivedFrom<plParticleRandomVectorNode>())
+  {
+    out_sValueProperty = {};
+    return Vector;
+  }
+  if (pNodeType->IsDerivedFrom<plParticleInputVectorNode>() || pNodeType->IsDerivedFrom<plParticleCustomVectorNode>() ||
+      pNodeType->IsDerivedFrom<plParticleEventInputNode>())
+  {
+    out_sValueProperty = {};
+    return Vector;
+  }
+
+  // per-frame game state
+  if (pNodeType->IsDerivedFrom<plParticleBlackboardEntryNode>())
+  {
+    out_sValueProperty = {};
+    return Number;
+  }
+  if (pNodeType->IsDerivedFrom<plParticleBlackboardVectorNode>())
+  {
+    out_sValueProperty = {};
+    return Vector;
+  }
+  if (pNodeType->IsDerivedFrom<plParticleBlackboardColorNode>())
   {
     out_sValueProperty = {};
     return Color;
@@ -170,23 +300,118 @@ plParticleValueKind::Enum plParticleValueKind::FromNode(const plRTTI* pNodeType,
 
 plParticleValueKind::Enum plParticleValueKind::FromNodeInput(const plRTTI* pNodeType, plStringView sPinName)
 {
-  for (const auto& input : plParticleOperatorInputs::Get(pNodeType))
-  {
-    if (sPinName == input.m_szPin)
-    {
-      // only Branch takes a bool, and only on its condition
-      return (sPinName == "Condition") ? Bool : Number;
-    }
-  }
+  const plParticleOperatorInputs::Input* pInput = plParticleOperatorInputs::Find(pNodeType, sPinName);
+  return pInput != nullptr ? pInput->m_Kind : None;
+}
 
-  return None;
+bool plParticleValueKind::IsAdaptiveNode(const plRTTI* pNodeType)
+{
+  return pNodeType != nullptr &&
+         (pNodeType->IsDerivedFrom<plParticleMathNode>() || pNodeType->IsDerivedFrom<plParticleLerpNode>() || pNodeType->IsDerivedFrom<plParticleClampNode>() ||
+           pNodeType->IsDerivedFrom<plParticleBranchNode>() || pNodeType->IsDerivedFrom<plParticleFunctionNode>() || pNodeType->IsDerivedFrom<plParticleRemapNode>() ||
+           pNodeType->IsDerivedFrom<plParticlePowerNode>() || pNodeType->IsDerivedFrom<plParticleStepNode>() || pNodeType->IsDerivedFrom<plParticleSmoothStepNode>() ||
+           pNodeType->IsDerivedFrom<plParticleRandomRangeNode>());
+}
+
+bool plParticleValueKind::CanConvert(Enum source, Enum target)
+{
+  if (source == target)
+    return source != None;
+
+  const bool bSourceScalar = source == Number || source == Bool;
+  const bool bSourceCompound = source == Vector || source == Color;
+
+  if (target == Adaptive)
+    return bSourceScalar || bSourceCompound;
+
+  if (bSourceScalar && (target == Number || target == Bool))
+    return true;
+
+  return bSourceCompound && (target == Vector || target == Color);
+}
+
+plParticleValueKind::Enum plParticleValueKind::Widen(Enum a, Enum b)
+{
+  auto rank = [](Enum kind) -> plInt32
+  { return kind == Color ? 2 : (kind == Vector ? 1 : 0); };
+
+  return rank(b) > rank(a) ? b : (a == Bool || a == None || a == Adaptive ? Number : a);
+}
+
+const char* plParticleValueKind::GetName(Enum kind)
+{
+  switch (kind)
+  {
+    case Number:
+      return "number";
+    case Bool:
+      return "bool";
+    case Color:
+      return "colour";
+    case Vector:
+      return "vector";
+    case Texture:
+      return "texture";
+    case Gradient:
+      return "gradient";
+    case Curve:
+      return "curve";
+    case Text:
+      return "text";
+    case Adaptive:
+      return "number, vector or colour";
+    default:
+      return "value";
+  }
 }
 
 plArrayPtr<const plParticleOperatorInputs::Input> plParticleOperatorInputs::Get(const plRTTI* pNodeType)
 {
-  static const Input s_Math[] = {{"A", "A"}, {"B", "B"}};
-  static const Input s_Branch[] = {{"Condition", nullptr}, {"True", "True"}, {"False", "False"}};
-  static const Input s_Single[] = {{"Value", "Value"}};
+  constexpr plParticleValueKind::Enum Number = plParticleValueKind::Number;
+  constexpr plParticleValueKind::Enum Bool = plParticleValueKind::Bool;
+  constexpr plParticleValueKind::Enum Vector = plParticleValueKind::Vector;
+  constexpr plParticleValueKind::Enum Color = plParticleValueKind::Color;
+  constexpr plParticleValueKind::Enum Curve = plParticleValueKind::Curve;
+  constexpr plParticleValueKind::Enum Gradient = plParticleValueKind::Gradient;
+  constexpr plParticleValueKind::Enum Any = plParticleValueKind::Adaptive;
+
+  static const Input s_Math[] = {{"A", "A", Any}, {"B", "B", Any}};
+  static const Input s_Compare[] = {{"A", "A", Number}, {"B", "B", Number}};
+  static const Input s_Expression[] = {{"A", "A", Number}, {"B", "B", Number}, {"C", "C", Number}, {"D", "D", Number}, {"Curve", "Curve", Curve}};
+  static const Input s_ColorSingle[] = {{"Value", "Value", Color}};
+  static const Input s_Branch[] = {{"Condition", nullptr, Bool}, {"True", "True", Any}, {"False", "False", Any}};
+  static const Input s_Single[] = {{"Value", "Value", Number}};
+  static const Input s_AnySingle[] = {{"Value", "Value", Any}};
+  static const Input s_Remap[] = {{"Value", "Value", Any}, {"In Min", "InMin", Any}, {"In Max", "InMax", Any}, {"Out Min", "OutMin", Any}, {"Out Max", "OutMax", Any}};
+  static const Input s_Lerp[] = {{"A", "A", Any}, {"B", "B", Any}, {"T", "T", Any}};
+  static const Input s_Clamp[] = {{"Value", "Value", Any}, {"Min", "Min", Any}, {"Max", "Max", Any}};
+  static const Input s_VectorPair[] = {{"A", "A", Vector}, {"B", "B", Vector}};
+  static const Input s_VectorSingle[] = {{"Value", "Value", Vector}};
+  static const Input s_Scale[] = {{"Vector", "Vector", Vector}, {"Scale", "Scale", Number}};
+  static const Input s_Make[] = {{"X", "X", Number}, {"Y", "Y", Number}, {"Z", "Z", Number}};
+  static const Input s_SampleCurve[] = {{"T", "T", Number}, {"Curve", "Curve", Curve}};
+  static const Input s_SampleGradient[] = {{"T", "T", Number}, {"Gradient", "Gradient", Gradient}};
+  static const Input s_Noise[] = {{"Position", "Position", Vector}, {"Frequency", "Frequency", Number}, {"Octaves", "Octaves", Number, true}};
+  static const Input s_SplitVector[] = {{"Vector", "Vector", Vector}};
+  static const Input s_SplitColor[] = {{"Colour", "Colour", Color}};
+  static const Input s_MakeColor[] = {{"R", "R", Number}, {"G", "G", Number}, {"B", "B", Number}, {"A", "A", Number}};
+  static const Input s_Reflect[] = {{"Direction", "Direction", Vector}, {"Normal", "Normal", Vector}};
+  static const Input s_Project[] = {{"Vector", "Vector", Vector}, {"Onto", "Onto", Vector}};
+  static const Input s_Rotate[] = {{"Vector", "Vector", Vector}, {"Axis", "Axis", Vector}, {"Degrees", "Degrees", Number}};
+  static const Input s_Power[] = {{"Base", "Base", Any}, {"Exponent", "Exponent", Any}};
+  static const Input s_Step[] = {{"Edge", "Edge", Any}, {"X", "X", Any}};
+  static const Input s_SmoothStep[] = {{"Edge 0", "Edge0", Any}, {"Edge 1", "Edge1", Any}, {"X", "X", Any}};
+  static const Input s_InverseLerp[] = {{"A", "A", Number}, {"B", "B", Number}, {"Value", "Value", Number}};
+  static const Input s_ATan2[] = {{"Y", "Y", Number}, {"X", "X", Number}};
+  static const Input s_Logic[] = {{"A", "A", Bool}, {"B", "B", Bool}};
+  static const Input s_Not[] = {{"Value", "Value", Bool}};
+  static const Input s_RandomRange[] = {{"Min", "Min", Any}, {"Max", "Max", Any}};
+  static const Input s_RandomInteger[] = {{"Min", "Min", Number}, {"Max", "Max", Number}};
+  static const Input s_RandomVector[] = {{"Radius", "Radius", Number}};
+  static const Input s_VectorNoise[] = {{"Position", "Position", Vector}, {"Frequency", "Frequency", Number}};
+  static const Input s_Transform[] = {{"Vector", "Vector", Vector}};
+  static const Input s_CurveOverLife[] = {{"T", nullptr, Number}, {"Output Min", "OutputMin", Number}, {"Output Max", "OutputMax", Number}, {"Curve Asset", "CurveAsset", Curve}};
+  static const Input s_GradientOverLife[] = {{"T", nullptr, Number}, {"Gradient Asset", "GradientAsset", Gradient}};
 
   if (pNodeType == nullptr)
     return {};
@@ -194,13 +419,199 @@ plArrayPtr<const plParticleOperatorInputs::Input> plParticleOperatorInputs::Get(
   if (pNodeType->IsDerivedFrom<plParticleToBoolNode>())
     return plMakeArrayPtr(s_Single);
 
-  if (pNodeType->IsDerivedFrom<plParticleMathNode>() || pNodeType->IsDerivedFrom<plParticleCompareNode>())
+  if (pNodeType->IsDerivedFrom<plParticleFunctionNode>())
+    return plMakeArrayPtr(s_AnySingle);
+
+  if (pNodeType->IsDerivedFrom<plParticleRemapNode>())
+    return plMakeArrayPtr(s_Remap);
+
+  if (pNodeType->IsDerivedFrom<plParticleMathNode>())
     return plMakeArrayPtr(s_Math);
+
+  if (pNodeType->IsDerivedFrom<plParticleCompareNode>())
+    return plMakeArrayPtr(s_Compare);
 
   if (pNodeType->IsDerivedFrom<plParticleBranchNode>())
     return plMakeArrayPtr(s_Branch);
 
+  if (pNodeType->IsDerivedFrom<plParticleLerpNode>())
+    return plMakeArrayPtr(s_Lerp);
+
+  if (pNodeType->IsDerivedFrom<plParticleClampNode>())
+    return plMakeArrayPtr(s_Clamp);
+
+  if (pNodeType->IsDerivedFrom<plParticleVectorMathNode>() || pNodeType->IsDerivedFrom<plParticleDotNode>() || pNodeType->IsDerivedFrom<plParticleDistanceNode>() ||
+      pNodeType->IsDerivedFrom<plParticleCrossNode>())
+    return plMakeArrayPtr(s_VectorPair);
+
+  if (pNodeType->IsDerivedFrom<plParticleVectorFunctionNode>() || pNodeType->IsDerivedFrom<plParticleVectorReduceNode>())
+    return plMakeArrayPtr(s_VectorSingle);
+
+  if (pNodeType->IsDerivedFrom<plParticleScaleVectorNode>())
+    return plMakeArrayPtr(s_Scale);
+
+  if (pNodeType->IsDerivedFrom<plParticleMakeVectorNode>())
+    return plMakeArrayPtr(s_Make);
+
+  if (pNodeType->IsDerivedFrom<plParticleSampleCurveNode>())
+    return plMakeArrayPtr(s_SampleCurve);
+
+  if (pNodeType->IsDerivedFrom<plParticleSampleGradientNode>())
+    return plMakeArrayPtr(s_SampleGradient);
+
+  if (pNodeType->IsDerivedFrom<plParticleNoiseNode>())
+    return plMakeArrayPtr(s_Noise);
+
+  if (pNodeType->IsDerivedFrom<plParticleExpressionNode>())
+    return plMakeArrayPtr(s_Expression);
+
+  if (pNodeType->IsDerivedFrom<plParticleColorChannelNode>())
+    return plMakeArrayPtr(s_ColorSingle);
+
+  if (pNodeType->IsDerivedFrom<plParticleSplitVectorNode>() || pNodeType->IsDerivedFrom<plParticleSwizzleNode>())
+    return plMakeArrayPtr(s_SplitVector);
+
+  if (pNodeType->IsDerivedFrom<plParticleSplitColorNode>())
+    return plMakeArrayPtr(s_SplitColor);
+
+  if (pNodeType->IsDerivedFrom<plParticleMakeColorNode>())
+    return plMakeArrayPtr(s_MakeColor);
+
+  if (pNodeType->IsDerivedFrom<plParticleReflectNode>())
+    return plMakeArrayPtr(s_Reflect);
+
+  if (pNodeType->IsDerivedFrom<plParticleProjectNode>())
+    return plMakeArrayPtr(s_Project);
+
+  if (pNodeType->IsDerivedFrom<plParticleRotateAboutAxisNode>())
+    return plMakeArrayPtr(s_Rotate);
+
+  if (pNodeType->IsDerivedFrom<plParticlePowerNode>())
+    return plMakeArrayPtr(s_Power);
+
+  if (pNodeType->IsDerivedFrom<plParticleStepNode>())
+    return plMakeArrayPtr(s_Step);
+
+  if (pNodeType->IsDerivedFrom<plParticleSmoothStepNode>())
+    return plMakeArrayPtr(s_SmoothStep);
+
+  if (pNodeType->IsDerivedFrom<plParticleInverseLerpNode>())
+    return plMakeArrayPtr(s_InverseLerp);
+
+  if (pNodeType->IsDerivedFrom<plParticleATan2Node>())
+    return plMakeArrayPtr(s_ATan2);
+
+  if (pNodeType->IsDerivedFrom<plParticleLogicNode>())
+    return plMakeArrayPtr(s_Logic);
+
+  if (pNodeType->IsDerivedFrom<plParticleNotNode>())
+    return plMakeArrayPtr(s_Not);
+
+  if (pNodeType->IsDerivedFrom<plParticleRandomRangeNode>())
+    return plMakeArrayPtr(s_RandomRange);
+
+  if (pNodeType->IsDerivedFrom<plParticleRandomIntegerNode>())
+    return plMakeArrayPtr(s_RandomInteger);
+
+  if (pNodeType->IsDerivedFrom<plParticleRandomVectorNode>())
+    return plMakeArrayPtr(s_RandomVector);
+
+  if (pNodeType->IsDerivedFrom<plParticleVectorNoiseNode>())
+    return plMakeArrayPtr(s_VectorNoise);
+
+  if (pNodeType->IsDerivedFrom<plParticleTransformNode>())
+    return plMakeArrayPtr(s_Transform);
+
+  if (pNodeType->IsDerivedFrom<plParticleCurveOverLifeNode>())
+    return plMakeArrayPtr(s_CurveOverLife);
+
+  if (pNodeType->IsDerivedFrom<plParticleGradientOverLifeNode>())
+    return plMakeArrayPtr(s_GradientOverLife);
+
   return {};
+}
+
+const plParticleOperatorInputs::Input* plParticleOperatorInputs::Find(const plRTTI* pNodeType, plStringView sPinName)
+{
+  for (const Input& input : Get(pNodeType))
+  {
+    if (sPinName == input.m_szPin)
+      return &input;
+  }
+
+  return nullptr;
+}
+
+plArrayPtr<const plParticleOperatorOutputs::Output> plParticleOperatorOutputs::Get(const plRTTI* pNodeType)
+{
+  constexpr plParticleValueKind::Enum Number = plParticleValueKind::Number;
+
+  static const Output s_Value[] = {{"Value", plParticleValueKind::None}};
+  static const Output s_SplitVector[] = {{"X", Number}, {"Y", Number}, {"Z", Number}};
+  static const Output s_SplitColor[] = {{"R", Number}, {"G", Number}, {"B", Number}, {"A", Number}};
+
+  if (pNodeType != nullptr && pNodeType->IsDerivedFrom<plParticleSplitVectorNode>())
+    return plMakeArrayPtr(s_SplitVector);
+
+  if (pNodeType != nullptr && pNodeType->IsDerivedFrom<plParticleSplitColorNode>())
+    return plMakeArrayPtr(s_SplitColor);
+
+  return plMakeArrayPtr(s_Value);
+}
+
+plUInt32 plParticleOperatorOutputs::FindIndex(const plRTTI* pNodeType, plStringView sPinName)
+{
+  const auto outputs = Get(pNodeType);
+  for (plUInt32 i = 0; i < outputs.GetCount(); ++i)
+  {
+    if (sPinName == outputs[i].m_szPin)
+      return i;
+  }
+
+  return 0;
+}
+
+bool plParticleFunctionOp::IsTrigonometric(plInt64 iOperation)
+{
+  return iOperation == Sine || iOperation == Cosine || iOperation == Tan || iOperation == ASin || iOperation == ACos || iOperation == ATan;
+}
+
+double plParticleMathConstant::GetValue(plInt64 iConstant)
+{
+  switch (iConstant)
+  {
+    case Tau:
+      return 2.0 * plMath::Pi<double>();
+    case E:
+      return 2.718281828459045;
+    default:
+      return plMath::Pi<double>();
+  }
+}
+
+bool plParticleSwizzleNode::ParsePattern(plStringView sPattern, plUInt32* out_pComponents)
+{
+  plUInt32 uiCount = 0;
+
+  for (plUInt32 c : sPattern)
+  {
+    if (c == ' ')
+      continue;
+
+    if (uiCount == 3)
+      return false;
+
+    if (c == 'x' || c == 'X' || c == 'r' || c == 'R')
+      out_pComponents[uiCount++] = 0;
+    else if (c == 'y' || c == 'Y' || c == 'g' || c == 'G')
+      out_pComponents[uiCount++] = 1;
+    else if (c == 'z' || c == 'Z' || c == 'b' || c == 'B')
+      out_pComponents[uiCount++] = 2;
+    else
+      return false;
+  }
+
+  return uiCount == 3;
 }
 
 bool plParticlePropertyPin::IsWireable(const plAbstractProperty* pProp)
@@ -224,6 +635,8 @@ plParticleSystemNode::~plParticleSystemNode()
     PL_DEFAULT_DELETE(pFactory);
   for (auto pFactory : m_TypeFactories)
     PL_DEFAULT_DELETE(pFactory);
+  for (auto pRaiser : m_EventRaisers)
+    PL_DEFAULT_DELETE(pRaiser);
 }
 
 // clang-format off
@@ -268,23 +681,60 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSystemNode, 2, plRTTIDefaultAllocator<
 {
   PL_BEGIN_PROPERTIES
   {
-    // The four contexts, in run order; array order is block order. Hidden from the property grid
+    // The contexts, in run order; array order is block order. Hidden from the property grid
     // because the system node draws them itself — the grid edits whichever block is selected.
     PL_ARRAY_MEMBER_PROPERTY("Emitters", m_EmitterFactories)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plHiddenAttribute()),
     PL_ARRAY_MEMBER_PROPERTY("Initializers", m_InitializerFactories)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plHiddenAttribute()),
     PL_ARRAY_MEMBER_PROPERTY("Behaviors", m_BehaviorFactories)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plHiddenAttribute()),
     PL_ARRAY_MEMBER_PROPERTY("Types", m_TypeFactories)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plHiddenAttribute()),
+    PL_ARRAY_MEMBER_PROPERTY("EventRaisers", m_EventRaisers)->AddFlags(plPropertyFlags::PointerOwner)->AddAttributes(new plHiddenAttribute()),
     PL_MEMBER_PROPERTY("Name", m_sName),
     PL_MEMBER_PROPERTY("Visible", m_bVisible)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_ENUM_MEMBER_PROPERTY("SimulationTarget", plParticleSimulationTarget, m_SimulationTarget),
     PL_MEMBER_PROPERTY("LifeTime", m_LifeTime)->AddAttributes(new plDefaultValueAttribute(plTime::MakeFromSeconds(2)), new plClampValueAttribute(plTime::MakeFromSeconds(0.0), plVariant())),
     PL_MEMBER_PROPERTY("LifeScaleParam", m_sLifeScaleParameter),
-    PL_MEMBER_PROPERTY("OnDeathEvent", m_sOnDeathEvent)->AddAttributes(new plDynamicStringEnumAttribute("ParticleEventNamesEnum")),
+    // before 1.6; a document that sets it gets a Raise on Death block instead when it opens
+    PL_MEMBER_PROPERTY("OnDeathEvent", m_sOnDeathEvent)->AddAttributes(new plHiddenAttribute()),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
     new plCategoryAttribute("System", plColorScheme::DarkUI(plColorScheme::Blue)),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEventRaiserBlock, 1, plRTTINoAllocator)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    // typed: a name here creates the event, which On Event blocks then pick from their list
+    PL_MEMBER_PROPERTY("EventName", m_sEventName),
+    PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+    PL_MEMBER_PROPERTY("PinId", m_sPinId)->AddAttributes(new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+plParticleEventRaiserBlock::~plParticleEventRaiserBlock() = default;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRaiseOnDeathBlock, 1, plRTTIDefaultAllocator<plParticleRaiseOnDeathBlock>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plTitleAttribute("Raise on Death"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRaiseOnCollisionBlock, 1, plRTTIDefaultAllocator<plParticleRaiseOnCollisionBlock>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plTitleAttribute("Raise on Collision"),
   }
   PL_END_ATTRIBUTES;
 }
@@ -386,6 +836,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleMathOp, 1)
   PL_ENUM_CONSTANT(plParticleMathOp::Add), PL_ENUM_CONSTANT(plParticleMathOp::Subtract),
   PL_ENUM_CONSTANT(plParticleMathOp::Multiply), PL_ENUM_CONSTANT(plParticleMathOp::Divide),
   PL_ENUM_CONSTANT(plParticleMathOp::Min), PL_ENUM_CONSTANT(plParticleMathOp::Max),
+  PL_ENUM_CONSTANT(plParticleMathOp::Modulo),
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleCompareOp, 1)
@@ -405,7 +856,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleMathNode, 1, plRTTIDefaultAllocator<pl
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
-    new plCategoryAttribute("Math", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
     new plTitleAttribute("{Operation}"),
   }
   PL_END_ATTRIBUTES;
@@ -457,8 +908,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleParameterNode, 1, plRTTIDefaultAllocat
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
-    new plCategoryAttribute("Blackboard", plColorScheme::DarkUI(plColorScheme::Gray)),
-    new plTitleAttribute("Blackboard Float"),
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Effect Parameter"),
   }
   PL_END_ATTRIBUTES;
 }
@@ -490,7 +941,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleToBoolNode, 1, plRTTIDefaultAllocator<
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
-    new plCategoryAttribute("Convert", plColorScheme::DarkUI(plColorScheme::Red)),
+    new plCategoryAttribute("Logic", plColorScheme::DarkUI(plColorScheme::Red)),
     new plTitleAttribute("To Bool"),
   }
   PL_END_ATTRIBUTES;
@@ -506,8 +957,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleColorParameterNode, 1, plRTTIDefaultAl
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
-    new plCategoryAttribute("Blackboard", plColorScheme::DarkUI(plColorScheme::Yellow)),
-    new plTitleAttribute("Blackboard Color"),
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Yellow)),
+    new plTitleAttribute("Effect Color Parameter"),
   }
   PL_END_ATTRIBUTES;
 }
@@ -522,8 +973,1040 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBoolParameterNode, 1, plRTTIDefaultAll
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
   {
-    new plCategoryAttribute("Blackboard", plColorScheme::DarkUI(plColorScheme::Red)),
-    new plTitleAttribute("Blackboard Bool"),
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Red)),
+    new plTitleAttribute("Effect Bool Parameter"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleSystemValue, 1)
+  PL_ENUM_CONSTANT(plParticleSystemValue::Time), PL_ENUM_CONSTANT(plParticleSystemValue::DeltaTime),
+  PL_ENUM_CONSTANT(plParticleSystemValue::CameraDistance), PL_ENUM_CONSTANT(plParticleSystemValue::ParticleCount),
+  PL_ENUM_CONSTANT(plParticleSystemValue::SpawnScale),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleSystemVector, 1)
+  PL_ENUM_CONSTANT(plParticleSystemVector::EffectPosition), PL_ENUM_CONSTANT(plParticleSystemVector::EffectForward),
+  PL_ENUM_CONSTANT(plParticleSystemVector::EffectUp), PL_ENUM_CONSTANT(plParticleSystemVector::EffectVelocity),
+  PL_ENUM_CONSTANT(plParticleSystemVector::CameraPosition), PL_ENUM_CONSTANT(plParticleSystemVector::EffectRight),
+  PL_ENUM_CONSTANT(plParticleSystemVector::EffectScale), PL_ENUM_CONSTANT(plParticleSystemVector::CameraForward),
+  PL_ENUM_CONSTANT(plParticleSystemVector::CameraRight), PL_ENUM_CONSTANT(plParticleSystemVector::CameraUp),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleFunctionOp, 1)
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Sine), PL_ENUM_CONSTANT(plParticleFunctionOp::Cosine),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Abs), PL_ENUM_CONSTANT(plParticleFunctionOp::Floor),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Ceil), PL_ENUM_CONSTANT(plParticleFunctionOp::Frac),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Sqrt), PL_ENUM_CONSTANT(plParticleFunctionOp::Saturate),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Negate), PL_ENUM_CONSTANT(plParticleFunctionOp::OneMinus),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Tan), PL_ENUM_CONSTANT(plParticleFunctionOp::ASin),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::ACos), PL_ENUM_CONSTANT(plParticleFunctionOp::ATan),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Exp), PL_ENUM_CONSTANT(plParticleFunctionOp::Log),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Log2), PL_ENUM_CONSTANT(plParticleFunctionOp::Round),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Trunc), PL_ENUM_CONSTANT(plParticleFunctionOp::Sign),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::Reciprocal), PL_ENUM_CONSTANT(plParticleFunctionOp::Square),
+  PL_ENUM_CONSTANT(plParticleFunctionOp::DegreesToRadians), PL_ENUM_CONSTANT(plParticleFunctionOp::RadiansToDegrees),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleVectorMathOp, 1)
+  PL_ENUM_CONSTANT(plParticleVectorMathOp::Add), PL_ENUM_CONSTANT(plParticleVectorMathOp::Subtract),
+  PL_ENUM_CONSTANT(plParticleVectorMathOp::Multiply), PL_ENUM_CONSTANT(plParticleVectorMathOp::Cross),
+  PL_ENUM_CONSTANT(plParticleVectorMathOp::Min), PL_ENUM_CONSTANT(plParticleVectorMathOp::Max),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleVectorFunctionOp, 1)
+  PL_ENUM_CONSTANT(plParticleVectorFunctionOp::Normalize), PL_ENUM_CONSTANT(plParticleVectorFunctionOp::Negate),
+  PL_ENUM_CONSTANT(plParticleVectorFunctionOp::Abs),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleVectorReduceOp, 1)
+  PL_ENUM_CONSTANT(plParticleVectorReduceOp::Length), PL_ENUM_CONSTANT(plParticleVectorReduceOp::X),
+  PL_ENUM_CONSTANT(plParticleVectorReduceOp::Y), PL_ENUM_CONSTANT(plParticleVectorReduceOp::Z),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSystemValueNode, 1, plRTTIDefaultAllocator<plParticleSystemValueNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleSystemValue, m_Input),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Blue)),
+    new plTitleAttribute("{Input}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSystemVectorNode, 1, plRTTIDefaultAllocator<plParticleSystemVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleSystemVector, m_Input),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("{Input}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleVectorNode, 1, plRTTIDefaultAllocator<plParticleVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Name", m_sName),
+    PL_MEMBER_PROPERTY("Value", m_vValue)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Value", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+// version 2: angles in degrees; version 1 nodes load with Radians set (plParticleFunctionNodePatch_1_2)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleFunctionNode, 2, plRTTIDefaultAllocator<plParticleFunctionNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleFunctionOp, m_Operation),
+    PL_MEMBER_PROPERTY("Value", m_fValue),
+    PL_MEMBER_PROPERTY("Radians", m_bRadians),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Functions", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("{Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRemapNode, 1, plRTTIDefaultAllocator<plParticleRemapNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Value", m_fValue),
+    PL_MEMBER_PROPERTY("InMin", m_fInMin),
+    PL_MEMBER_PROPERTY("InMax", m_fInMax)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("OutMin", m_fOutMin),
+    PL_MEMBER_PROPERTY("OutMax", m_fOutMax)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("Clamp", m_bClamp)->AddAttributes(new plDefaultValueAttribute(true)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Remap"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleLerpNode, 1, plRTTIDefaultAllocator<plParticleLerpNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("A", m_fA),
+    PL_MEMBER_PROPERTY("B", m_fB)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("T", m_fT)->AddAttributes(new plDefaultValueAttribute(0.5)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Lerp"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleClampNode, 1, plRTTIDefaultAllocator<plParticleClampNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Value", m_fValue),
+    PL_MEMBER_PROPERTY("Min", m_fMin),
+    PL_MEMBER_PROPERTY("Max", m_fMax)->AddAttributes(new plDefaultValueAttribute(1.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Clamp"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleVectorMathNode, 1, plRTTIDefaultAllocator<plParticleVectorMathNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleVectorMathOp, m_Operation),
+    PL_MEMBER_PROPERTY("A", m_vA),
+    PL_MEMBER_PROPERTY("B", m_vB),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Vector {Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleVectorFunctionNode, 1, plRTTIDefaultAllocator<plParticleVectorFunctionNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleVectorFunctionOp, m_Operation),
+    PL_MEMBER_PROPERTY("Value", m_vValue)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Vector {Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleVectorReduceNode, 1, plRTTIDefaultAllocator<plParticleVectorReduceNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleVectorReduceOp, m_Operation),
+    PL_MEMBER_PROPERTY("Value", m_vValue),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Blue)),
+    new plTitleAttribute("Vector {Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleColorChannelOp, 1)
+  PL_ENUM_CONSTANT(plParticleColorChannelOp::R), PL_ENUM_CONSTANT(plParticleColorChannelOp::G),
+  PL_ENUM_CONSTANT(plParticleColorChannelOp::B), PL_ENUM_CONSTANT(plParticleColorChannelOp::A),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleColorChannelNode, 1, plRTTIDefaultAllocator<plParticleColorChannelNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleColorChannelOp, m_Operation),
+    PL_MEMBER_PROPERTY("Value", m_Value)->AddAttributes(new plDefaultValueAttribute(plColor::White), new plExposeColorAlphaAttribute()),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Blue)),
+    new plTitleAttribute("Color {Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleExpressionNode, 1, plRTTIDefaultAllocator<plParticleExpressionNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Expression", m_sExpression)->AddAttributes(new plDefaultValueAttribute(plStringView("a"))),
+    PL_MEMBER_PROPERTY("A", m_fA),
+    PL_MEMBER_PROPERTY("B", m_fB),
+    PL_MEMBER_PROPERTY("C", m_fC),
+    PL_MEMBER_PROPERTY("D", m_fD),
+    PL_MEMBER_PROPERTY("Curve", m_sCurve)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Curve")),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Code", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Expression"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleDotNode, 1, plRTTIDefaultAllocator<plParticleDotNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("A", m_vA),
+    PL_MEMBER_PROPERTY("B", m_vB),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Blue)),
+    new plTitleAttribute("Dot"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleScaleVectorNode, 1, plRTTIDefaultAllocator<plParticleScaleVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Vector", m_vVector)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+    PL_MEMBER_PROPERTY("Scale", m_fScale)->AddAttributes(new plDefaultValueAttribute(1.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Scale Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleMakeVectorNode, 1, plRTTIDefaultAllocator<plParticleMakeVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("X", m_fX),
+    PL_MEMBER_PROPERTY("Y", m_fY),
+    PL_MEMBER_PROPERTY("Z", m_fZ),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Make Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSampleGradientNode, 1, plRTTIDefaultAllocator<plParticleSampleGradientNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Gradient", m_sGradient)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Gradient")),
+    PL_MEMBER_PROPERTY("T", m_fT),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Curves", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Sample Gradient"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSampleCurveNode, 1, plRTTIDefaultAllocator<plParticleSampleCurveNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Curve", m_sCurve)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Curve")),
+    PL_MEMBER_PROPERTY("T", m_fT),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Curves", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Sample Curve"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleNoiseNode, 1, plRTTIDefaultAllocator<plParticleNoiseNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Position", m_vPosition),
+    PL_MEMBER_PROPERTY("Frequency", m_fFrequency)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("Octaves", m_uiOctaves)->AddAttributes(new plDefaultValueAttribute(1), new plClampValueAttribute(1, 8)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Noise", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Noise"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleInputValue, 1)
+  PL_ENUM_CONSTANT(plParticleInputValue::Speed), PL_ENUM_CONSTANT(plParticleInputValue::Age),
+  PL_ENUM_CONSTANT(plParticleInputValue::NormalizedAge), PL_ENUM_CONSTANT(plParticleInputValue::Lifetime),
+  PL_ENUM_CONSTANT(plParticleInputValue::Size), PL_ENUM_CONSTANT(plParticleInputValue::RotationSpeed),
+  PL_ENUM_CONSTANT(plParticleInputValue::RemainingLife),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleInputVector, 1)
+  PL_ENUM_CONSTANT(plParticleInputVector::Position), PL_ENUM_CONSTANT(plParticleInputVector::Velocity),
+  PL_ENUM_CONSTANT(plParticleInputVector::Axis),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInputValueNode, 1, plRTTIDefaultAllocator<plParticleInputValueNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleInputValue, m_Input),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("{Input}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInputVectorNode, 1, plRTTIDefaultAllocator<plParticleInputVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleInputVector, m_Input),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("{Input}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInputColorNode, 1, plRTTIDefaultAllocator<plParticleInputColorNode>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Particle Color"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRandomNode, 1, plRTTIDefaultAllocator<plParticleRandomNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Seed", m_iSeed),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Random", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Random"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_ABSTRACT_DYNAMIC_REFLECTED_TYPE(plParticleCustomAttributeNode, 1)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Name", m_sName),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_ABSTRACT_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleCustomFloatNode, 1, plRTTIDefaultAllocator<plParticleCustomFloatNode>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Custom Float"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleCustomVectorNode, 1, plRTTIDefaultAllocator<plParticleCustomVectorNode>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Custom Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleCustomColorNode, 1, plRTTIDefaultAllocator<plParticleCustomColorNode>)
+{
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Particle", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Custom Color"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleEventInput, 1)
+  PL_ENUM_CONSTANT(plParticleEventInput::EventPosition), PL_ENUM_CONSTANT(plParticleEventInput::EventVelocity),
+  PL_ENUM_CONSTANT(plParticleEventInput::EventNormal),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEventInputNode, 1, plRTTIDefaultAllocator<plParticleEventInputNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleEventInput, m_Input),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Event", plColorScheme::DarkUI(plColorScheme::Orange)),
+    new plTitleAttribute("{Input}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBlackboardNode, 1, plRTTINoAllocator)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Entry", m_sEntry),
+    PL_MEMBER_PROPERTY("Blackboard", m_sBlackboard)->AddAttributes(new plDefaultValueAttribute("Global")),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBlackboardEntryNode, 1, plRTTIDefaultAllocator<plParticleBlackboardEntryNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Default", m_fDefault),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Blackboard Entry"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBlackboardVectorNode, 1, plRTTIDefaultAllocator<plParticleBlackboardVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Default", m_vDefault),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Blackboard Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBlackboardColorNode, 1, plRTTIDefaultAllocator<plParticleBlackboardColorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Default", m_Default)->AddAttributes(new plDefaultValueAttribute(plColor::White)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Blackboard Color"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSplitVectorNode, 1, plRTTIDefaultAllocator<plParticleSplitVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Vector", m_vVector),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Split Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSplitColorNode, 1, plRTTIDefaultAllocator<plParticleSplitColorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Colour", m_Colour)->AddAttributes(new plDefaultValueAttribute(plColor::White), new plExposeColorAlphaAttribute()),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Yellow)),
+    new plTitleAttribute("Split Colour"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleMakeColorNode, 1, plRTTIDefaultAllocator<plParticleMakeColorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("R", m_fR)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("G", m_fG)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("B", m_fB)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("A", m_fA)->AddAttributes(new plDefaultValueAttribute(1.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Yellow)),
+    new plTitleAttribute("Make Colour"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSwizzleNode, 1, plRTTIDefaultAllocator<plParticleSwizzleNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Pattern", m_sPattern)->AddAttributes(new plDefaultValueAttribute(plStringView("xyz"))),
+    PL_MEMBER_PROPERTY("Vector", m_vVector),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Swizzle"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleDistanceNode, 1, plRTTIDefaultAllocator<plParticleDistanceNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("A", m_vA),
+    PL_MEMBER_PROPERTY("B", m_vB),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Blue)),
+    new plTitleAttribute("Distance"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleCrossNode, 1, plRTTIDefaultAllocator<plParticleCrossNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("A", m_vA)->AddAttributes(new plDefaultValueAttribute(plVec3(1, 0, 0))),
+    PL_MEMBER_PROPERTY("B", m_vB)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 1, 0))),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Cross"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleReflectNode, 1, plRTTIDefaultAllocator<plParticleReflectNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Direction", m_vDirection)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, -1))),
+    PL_MEMBER_PROPERTY("Normal", m_vNormal)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Reflect"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleProjectNode, 1, plRTTIDefaultAllocator<plParticleProjectNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Vector", m_vVector)->AddAttributes(new plDefaultValueAttribute(plVec3(1, 0, 0))),
+    PL_MEMBER_PROPERTY("Onto", m_vOnto)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Project On"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRotateAboutAxisNode, 1, plRTTIDefaultAllocator<plParticleRotateAboutAxisNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Vector", m_vVector)->AddAttributes(new plDefaultValueAttribute(plVec3(1, 0, 0))),
+    PL_MEMBER_PROPERTY("Axis", m_vAxis)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
+    PL_MEMBER_PROPERTY("Degrees", m_fDegrees)->AddAttributes(new plDefaultValueAttribute(90.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Vector & Colour", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Rotate About Axis"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticlePowerNode, 1, plRTTIDefaultAllocator<plParticlePowerNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Base", m_fBase)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("Exponent", m_fExponent)->AddAttributes(new plDefaultValueAttribute(2.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Power"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStepNode, 1, plRTTIDefaultAllocator<plParticleStepNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Edge", m_fEdge)->AddAttributes(new plDefaultValueAttribute(0.5)),
+    PL_MEMBER_PROPERTY("X", m_fX),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Step"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleSmoothStepNode, 1, plRTTIDefaultAllocator<plParticleSmoothStepNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Edge0", m_fEdge0),
+    PL_MEMBER_PROPERTY("Edge1", m_fEdge1)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("X", m_fX),
+    PL_MEMBER_PROPERTY("Smoother", m_bSmoother),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Smooth Step"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInverseLerpNode, 1, plRTTIDefaultAllocator<plParticleInverseLerpNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("A", m_fA),
+    PL_MEMBER_PROPERTY("B", m_fB)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("Value", m_fValue)->AddAttributes(new plDefaultValueAttribute(0.5)),
+    PL_MEMBER_PROPERTY("Clamp", m_bClamp)->AddAttributes(new plDefaultValueAttribute(true)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Maths", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Inverse Lerp"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleATan2Node, 1, plRTTIDefaultAllocator<plParticleATan2Node>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Y", m_fY),
+    PL_MEMBER_PROPERTY("X", m_fX)->AddAttributes(new plDefaultValueAttribute(1.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Functions", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("ATan2"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleMathConstant, 1)
+  PL_ENUM_CONSTANT(plParticleMathConstant::Pi), PL_ENUM_CONSTANT(plParticleMathConstant::Tau),
+  PL_ENUM_CONSTANT(plParticleMathConstant::E),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleMathConstantNode, 1, plRTTIDefaultAllocator<plParticleMathConstantNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Constant", plParticleMathConstant, m_Constant),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Functions", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("{Constant}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleLogicOp, 1)
+  PL_ENUM_CONSTANT(plParticleLogicOp::And), PL_ENUM_CONSTANT(plParticleLogicOp::Or),
+  PL_ENUM_CONSTANT(plParticleLogicOp::Xor),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleLogicNode, 1, plRTTIDefaultAllocator<plParticleLogicNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Operation", plParticleLogicOp, m_Operation),
+    PL_MEMBER_PROPERTY("A", m_bA)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_MEMBER_PROPERTY("B", m_bB)->AddAttributes(new plDefaultValueAttribute(true)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Logic", plColorScheme::DarkUI(plColorScheme::Red)),
+    new plTitleAttribute("{Operation}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleNotNode, 1, plRTTIDefaultAllocator<plParticleNotNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Value", m_bValue),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Logic", plColorScheme::DarkUI(plColorScheme::Red)),
+    new plTitleAttribute("Not"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRandomRangeNode, 1, plRTTIDefaultAllocator<plParticleRandomRangeNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Seed", m_iSeed),
+    PL_MEMBER_PROPERTY("Min", m_fMin),
+    PL_MEMBER_PROPERTY("Max", m_fMax)->AddAttributes(new plDefaultValueAttribute(1.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Random", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Random Range"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRandomIntegerNode, 1, plRTTIDefaultAllocator<plParticleRandomIntegerNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Seed", m_iSeed),
+    PL_MEMBER_PROPERTY("Min", m_iMin),
+    PL_MEMBER_PROPERTY("Max", m_iMax)->AddAttributes(new plDefaultValueAttribute(9)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Random", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Random Integer"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleRandomVectorShape, 1)
+  PL_ENUM_CONSTANT(plParticleRandomVectorShape::InSphere), PL_ENUM_CONSTANT(plParticleRandomVectorShape::OnSphere),
+  PL_ENUM_CONSTANT(plParticleRandomVectorShape::InBox), PL_ENUM_CONSTANT(plParticleRandomVectorShape::InCone),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleRandomVectorNode, 1, plRTTIDefaultAllocator<plParticleRandomVectorNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Shape", plParticleRandomVectorShape, m_Shape),
+    PL_MEMBER_PROPERTY("Seed", m_iSeed),
+    PL_MEMBER_PROPERTY("Radius", m_fRadius)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("ConeAngle", m_fConeAngle)->AddAttributes(new plDefaultValueAttribute(30.0), new plClampValueAttribute(0.0, 180.0)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Random", plColorScheme::DarkUI(plColorScheme::Lime)),
+    new plTitleAttribute("Random Vector"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleVectorNoiseNode, 1, plRTTIDefaultAllocator<plParticleVectorNoiseNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Position", m_vPosition),
+    PL_MEMBER_PROPERTY("Frequency", m_fFrequency)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_MEMBER_PROPERTY("Octaves", m_uiOctaves)->AddAttributes(new plDefaultValueAttribute(1), new plClampValueAttribute(1, 8)),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Noise", plColorScheme::DarkUI(plColorScheme::Gray)),
+    new plTitleAttribute("Vector Noise"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleTransformSpace, 1)
+  PL_ENUM_CONSTANT(plParticleTransformSpace::LocalToWorld), PL_ENUM_CONSTANT(plParticleTransformSpace::WorldToLocal),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleTransformKind, 1)
+  PL_ENUM_CONSTANT(plParticleTransformKind::Position), PL_ENUM_CONSTANT(plParticleTransformKind::Direction),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTransformNode, 1, plRTTIDefaultAllocator<plParticleTransformNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Kind", plParticleTransformKind, m_Kind),
+    PL_ENUM_MEMBER_PROPERTY("Space", plParticleTransformSpace, m_Space),
+    PL_MEMBER_PROPERTY("Vector", m_vVector),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Effect & Camera", plColorScheme::DarkUI(plColorScheme::Teal)),
+    new plTitleAttribute("Transform {Kind}"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleCurveInput, 1)
+  PL_ENUM_CONSTANT(plParticleCurveInput::NormalizedAge), PL_ENUM_CONSTANT(plParticleCurveInput::Age),
+  PL_ENUM_CONSTANT(plParticleCurveInput::Speed),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleCurvePreset, 1)
+  PL_ENUM_CONSTANT(plParticleCurvePreset::None), PL_ENUM_CONSTANT(plParticleCurvePreset::SizeOverLife),
+  PL_ENUM_CONSTANT(plParticleCurvePreset::OpacityOverLife), PL_ENUM_CONSTANT(plParticleCurvePreset::EmissiveOverLife),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleCurveOverLifeNode, 1, plRTTIDefaultAllocator<plParticleCurveOverLifeNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleCurveInput, m_Input),
+    PL_MEMBER_PROPERTY("InputMax", m_fInputMax)->AddAttributes(new plDefaultValueAttribute(1.0), new plClampValueAttribute(0.001, plVariant())),
+    PL_MEMBER_PROPERTY("Curve", m_Curve)->AddAttributes(new plCurveExtentsAttribute(0.0, true, 1.0, true), new plClampValueAttribute(0.0, 1.0)),
+    PL_MEMBER_PROPERTY("CurveAsset", m_sCurve)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Curve")),
+    PL_MEMBER_PROPERTY("OutputMin", m_fOutputMin),
+    PL_MEMBER_PROPERTY("OutputMax", m_fOutputMax)->AddAttributes(new plDefaultValueAttribute(1.0)),
+    PL_ENUM_MEMBER_PROPERTY("Preset", plParticleCurvePreset, m_Preset)->AddAttributes(new plHiddenAttribute()),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Curves", plColorScheme::DarkUI(plColorScheme::Green)),
+    new plTitleAttribute("Curve Over Life"),
+  }
+  PL_END_ATTRIBUTES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleGradientStop, 1, plRTTIDefaultAllocator<plParticleGradientStop>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Position", m_fPosition)->AddAttributes(new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("Color", m_Color)->AddAttributes(new plDefaultValueAttribute(plColor::White), new plExposeColorAlphaAttribute()),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleGradientOverLifeNode, 1, plRTTIDefaultAllocator<plParticleGradientOverLifeNode>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_ENUM_MEMBER_PROPERTY("Input", plParticleCurveInput, m_Input),
+    PL_MEMBER_PROPERTY("InputMax", m_fInputMax)->AddAttributes(new plDefaultValueAttribute(1.0), new plClampValueAttribute(0.001, plVariant())),
+    PL_ARRAY_MEMBER_PROPERTY("Gradient", m_Stops),
+    PL_MEMBER_PROPERTY("GradientAsset", m_sGradient)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Data_Gradient")),
+  }
+  PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    new plCategoryAttribute("Curves", plColorScheme::DarkUI(plColorScheme::Yellow)),
+    new plTitleAttribute("Gradient Over Life"),
   }
   PL_END_ATTRIBUTES;
 }
@@ -547,3 +2030,23 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleMixNode, 1, plRTTIDefaultAllocator<plP
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
+
+namespace
+{
+  /// Function nodes of version 1 take and give their angles in radians; they keep doing so.
+  class plParticleFunctionNodePatch_1_2 : public plGraphPatch
+  {
+  public:
+    plParticleFunctionNodePatch_1_2()
+      : plGraphPatch("plParticleFunctionNode", 2)
+    {
+    }
+
+    virtual void Patch(plGraphPatchContext& ref_context, plAbstractObjectGraph* pGraph, plAbstractObjectNode* pNode) const override
+    {
+      pNode->AddProperty("Radians", true);
+    }
+  };
+
+  plParticleFunctionNodePatch_1_2 g_plParticleFunctionNodePatch_1_2;
+} // namespace

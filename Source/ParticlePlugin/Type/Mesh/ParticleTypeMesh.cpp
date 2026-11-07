@@ -115,6 +115,11 @@ void plParticleTypeMesh::CreateRequiredStreams()
   CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, true);
 }
 
+void plParticleTypeMesh::QueryOptionalStreams()
+{
+  m_pStreamSizeScale = GetOwnerSystem()->QueryStream("SizeScale", plProcessingStream::DataType::Half3);
+}
+
 void plParticleTypeMesh::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
 {
   plVec3* pAxis = m_pStreamAxis->GetWritableData<plVec3>();
@@ -201,6 +206,7 @@ void plParticleTypeMesh::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, 
   const plFloat16* pRotationSpeed = m_pStreamRotationSpeed->GetData<plFloat16>();
   const plFloat16* pRotationOffset = m_pStreamRotationOffset->GetData<plFloat16>();
   const plVec3* pAxis = m_pStreamAxis->GetData<plVec3>();
+  const plFloat16Vec3* pSizeScale = m_pStreamSizeScale ? m_pStreamSizeScale->GetData<plFloat16Vec3>() : nullptr;
 
   const bool bIsOpaque = m_RenderCategory == plDefaultRenderDataCategories::LitOpaque ||
                          m_RenderCategory == plDefaultRenderDataCategories::LitMasked ||
@@ -216,10 +222,17 @@ void plParticleTypeMesh::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, 
     {
       const plUInt32 idx = p;
 
+      // Set Attribute's Facing target may write an axis of any length
+      plVec3 vAxis = pAxis[p];
+      vAxis.NormalizeIfNotZero(plVec3(1, 0, 0)).IgnoreResult();
+
       plTransform trans;
-      trans.m_qRotation = plQuat::MakeFromAxisAndAngle(pAxis[p], plAngle::MakeFromRadian((float)(tCur.GetSeconds() * pRotationSpeed[idx]) + pRotationOffset[idx]));
+      trans.m_qRotation = plQuat::MakeFromAxisAndAngle(vAxis, plAngle::MakeFromRadian((float)(tCur.GetSeconds() * pRotationSpeed[idx]) + pRotationOffset[idx]));
       trans.m_vPosition = pPosition[idx].GetAsVec3();
       trans.m_vScale.Set(pSize[idx]);
+
+      if (pSizeScale != nullptr)
+        trans.m_vScale = trans.m_vScale.CompMul(pSizeScale[idx]);
 
       plRenderDataManager::FillPerInstanceData(instanceData[p], nullptr, trans, plInvalidIndex, pColor[idx].ToLinearFloat() * tintColor);
 

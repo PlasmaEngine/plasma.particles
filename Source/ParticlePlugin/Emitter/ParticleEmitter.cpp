@@ -12,6 +12,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEmitterFactory, 2, plRTTINoAllocator)
   PL_BEGIN_PROPERTIES
   {
     PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+    PL_MEMBER_PROPERTY("PinId", m_sPinId)->AddAttributes(new plHiddenAttribute()),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES

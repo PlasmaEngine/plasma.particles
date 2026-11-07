@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
+#include <ParticlePlugin/System/ParticleProgram.h>
 
 class PL_PARTICLEPLUGIN_DLL plParticleBehaviorFactory_SceneForces final : public plParticleBehaviorFactory
 {
@@ -10,12 +11,16 @@ public:
   virtual const plRTTI* GetBehaviorType() const override;
   virtual void CopyBehaviorProperties(plParticleBehavior* pObject, bool bFirstTime) const override;
   virtual void QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const override;
+  virtual plParticleProgramData* GetParticleProgram() override { return &m_Program; }
 
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
   float m_fInfluence = 1.0f;
   plString m_sInfluenceParameter;
+
+  /// Per-particle wires into Influence.
+  plParticleProgramData m_Program;
 };
 
 /// Makes the system react to plParticleForceFieldComponent volumes placed in the scene
@@ -30,6 +35,7 @@ class PL_PARTICLEPLUGIN_DLL plParticleBehavior_SceneForces final : public plPart
 public:
   float m_fInfluence = 1.0f;
   plTempHashedString m_sInfluenceParameter;
+  const plParticleProgramData* m_pProgram = nullptr;
 
   virtual void CreateRequiredStreams() override;
 
@@ -38,4 +44,5 @@ protected:
 
   plProcessingStream* m_pStreamPosition = nullptr;
   plProcessingStream* m_pStreamVelocity = nullptr;
+  plParticleProgramRunner m_Runner;
 };

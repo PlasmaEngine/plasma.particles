@@ -52,9 +52,9 @@ float plReadParticleAttribute(
     {
       if (pLifeTime)
       {
-        // LifeTime stream is Half2: x = remaining life (seconds), y = 1 / total life
-        const plFloat16Vec2& lt = pLifeTime->GetData<plFloat16Vec2>()[uiIndex];
-        return 1.0f - static_cast<float>(lt.x) * static_cast<float>(lt.y);
+        // LifeTime stream is Float2: x = remaining life (seconds), y = 1 / total life
+        const plVec2& lt = pLifeTime->GetData<plVec2>()[uiIndex];
+        return 1.0f - lt.x * lt.y;
       }
       return 0.0f;
     }

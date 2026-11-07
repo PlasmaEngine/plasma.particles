@@ -207,7 +207,8 @@ void plParticleInitializer_SkinnedMeshPosition::InitializeElements(plUInt64 uiSt
 
   auto SpawnFallback = [&](plUInt64 i)
   {
-    pPosition[i] = GetOwnerEffect()->GetTransform().m_vPosition.GetAsVec4(0);
+    // the effect origin in the simulation's space (zero for a local-space effect)
+    pPosition[i] = GetOwnerSystem()->GetTransform().m_vPosition.GetAsVec4(0);
     pAxis[i] = plVec3(0, 0, 1);
 
     if (pVelocity)

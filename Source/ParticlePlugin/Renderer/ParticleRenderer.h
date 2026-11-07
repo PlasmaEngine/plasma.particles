@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Foundation/Math/Color16f.h>
+#include <ParticlePlugin/Declarations.h>
 #include <ParticlePlugin/ParticlePluginDLL.h>
 #include <RendererCore/Meshes/MeshRenderer.h>
 #include <RendererCore/Shader/ConstantBufferStorage.h>
@@ -9,8 +10,28 @@
 
 #include <RendererCore/../../../Data/Base/Shaders/Particles/ParticleSystemConstants.h>
 
+#include <ParticlePlugin/../../Assets/Shaders/Particles/ParticleLookConstants.h>
+#include <ParticlePlugin/Renderer/ParticleLook.h>
+
 class plGALBufferPool;
 class plRenderContext;
+struct plMsgExtractRenderData;
+
+/// The category a render mode draws in: distortion in the distortion pass, masked and opaque with the
+/// forward-lit opaque geometry (and its depth passes), the rest as transparent.
+PL_PARTICLEPLUGIN_DLL plRenderData::Category plParticleGetRenderDataCategory(plParticleTypeRenderMode::Enum renderMode);
+
+/// Adds a particle type's render data to the category of its render mode (see plParticleGetRenderDataCategory).
+PL_PARTICLEPLUGIN_DLL void plParticleAddRenderData(plMsgExtractRenderData& ref_msg, plRenderData* pRenderData, plParticleTypeRenderMode::Enum renderMode);
+
+/// Whether a render mode draws with the opaque geometry.
+inline bool plParticleIsOpaqueRenderMode(plParticleTypeRenderMode::Enum renderMode)
+{
+  return renderMode == plParticleTypeRenderMode::Masked || renderMode == plParticleTypeRenderMode::Opaque;
+}
+
+/// Whether a type extracts nothing in this view: shadow views only take types that cast shadows.
+PL_PARTICLEPLUGIN_DLL bool plParticleSkipView(const plMsgExtractRenderData& msg, bool bCastsShadows);
 
 /// \brief Implements rendering of particle systems
 class PL_PARTICLEPLUGIN_DLL plParticleRenderer : public plRenderer
@@ -34,8 +55,14 @@ protected:
 
     void SetTrailData(float fSnapshotFraction, plInt32 iNumUsedTrailPoints);
 
+    /// Fills the look constants and binds the emissive map; every particle shader reads them.
+    void SetLookData(const plParticleLookData& look);
+
+    plRenderContext* m_pRenderContext = nullptr;
     plConstantBufferStorage<plParticleSystemConstants>* m_pConstants;
     plConstantBufferStorageHandle m_hConstantBuffer;
+    plConstantBufferStorage<plParticleLookConstants>* m_pLookConstants;
+    plConstantBufferStorageHandle m_hLookConstantBuffer;
   };
 
   void CreateParticleDataBuffer(plGALBufferPool& inout_Buffer, plUInt32 uiDataTypeSize, plUInt32 uiNumParticlesPerBatch);

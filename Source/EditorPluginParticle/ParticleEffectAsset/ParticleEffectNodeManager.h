@@ -22,12 +22,19 @@ public:
   /// until something edited a context. Connections survive the rebuild.
   void RecreateAllSystemPins();
 
-  /// Names the creation menu entries without the redundant type-name decoration: inside the
-  /// particle graph, "plParticleMathNode" only usefully reads as "Math".
+  /// The node palette: one entry per operation ("Add", "Sin", "Split Vector"), grouped as Vector & Colour, Maths,
+  /// Functions, Logic, Random, Noise, Curves, Particle, Effect & Camera and Code. The typed vector nodes that the
+  /// adaptive maths replaced still load but are not offered.
   virtual void GetNodeCreationTemplates(plDynamicArray<plVisualGraphNodeDesc>& out_templates) const override;
+
+  /// "Number", "Vector", "Colour" and so on for value pins, as the palette shows them.
+  virtual plString GetPinTypeName(const plVisualGraphPin& pin) const override;
 
   /// Strips the plParticle prefix and the Node/Factory decoration from a type name.
   static plString FriendlyTypeName(const plRTTI* pType);
+
+  /// "NormalizedAge" as "Normalized Age".
+  static plString SplitWords(plStringView sName);
 
   virtual bool InternalIsNode(const plDocumentObject* pObject) const override;
   virtual void InternalCreatePins(const plDocumentObject* pObject, NodeInternal& ref_node) override;
@@ -36,6 +43,18 @@ public:
   virtual bool InternalIsDynamicPinProperty(const plDocumentObject* pObject, const plAbstractProperty* pProp) const override;
 
 private:
-  /// Backs the plStringViews handed out in the creation templates, which do not own their text.
-  mutable plDynamicArray<plString> m_CreationNames;
+  const plDocumentObject* FindEffectNode() const;
+
+  /// Whether a per-particle value may reach targetPin: directly a property of Set Attribute or Kill If
+  /// in Initialize or Update, or an operator whose results only reach such properties.
+  plStatus CheckParticleTarget(const plVisualGraphPin& targetPin) const;
+
+  /// Whether an adaptive node may start producing newKind: everything its outputs feed has to take it, and an
+  /// adaptive node downstream widens in turn.
+  plStatus CheckWidening(const plDocumentObject* pNode, plParticleValueKind::Enum newKind, class plParticleGraphCompiler& ref_compiler, plSet<const plDocumentObject*>& ref_visited) const;
+
+  /// Back the plStringViews and property values handed out in the creation templates, which do not own
+  /// them. Deques, so adding an entry never moves the ones handed out before.
+  mutable plDeque<plString> m_CreationNames;
+  mutable plDeque<plHybridArray<plVisualGraphNodeProperty, 4>> m_CreationProperties;
 };

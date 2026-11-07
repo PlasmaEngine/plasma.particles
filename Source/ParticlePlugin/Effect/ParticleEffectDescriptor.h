@@ -12,6 +12,13 @@ public:
   plParticleEffectDescriptor();
   ~plParticleEffectDescriptor();
 
+  /// Takes ownership of the source's systems and event reactions.
+  plParticleEffectDescriptor(plParticleEffectDescriptor&& other);
+
+  // it owns its systems through raw pointers, so a copy would free them twice; copy through Save / Load
+  plParticleEffectDescriptor(const plParticleEffectDescriptor&) = delete;
+  void operator=(const plParticleEffectDescriptor&) = delete;
+
   void AddParticleSystem(plParticleSystemDescriptor* pSystem) { m_ParticleSystems.PushBack(pSystem); }
   void RemoveParticleSystem(plParticleSystemDescriptor* pSystem) { m_ParticleSystems.RemoveAndCopy(pSystem); }
   const plHybridArray<plParticleSystemDescriptor*, 8>& GetParticleSystems() const { return m_ParticleSystems; }

@@ -8,6 +8,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeFactory, 2, plRTTINoAllocator)
   PL_BEGIN_PROPERTIES
   {
     PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+    PL_MEMBER_PROPERTY("PinId", m_sPinId)->AddAttributes(new plHiddenAttribute()),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
@@ -65,7 +66,9 @@ plUInt32 plParticleType::ComputeSortingKey(plParticleTypeRenderMode::Enum mode, 
       key = plParticleTypeSortingKey::BlendedBackground;
       break;
 
+    // both are drawn with the opaque geometry
     case plParticleTypeRenderMode::Opaque:
+    case plParticleTypeRenderMode::Masked:
       key = plParticleTypeSortingKey::Opaque;
       break;
 

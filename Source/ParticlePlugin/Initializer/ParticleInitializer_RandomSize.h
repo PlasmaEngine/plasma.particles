@@ -17,8 +17,11 @@ public:
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
+  plEnum<plParticleSizeMode> m_Mode;
   plVarianceTypeFloat m_Size;
-  plVarianceTypeFloat m_Aspect; // width/height ratio; != 1 stretches quads along their local X
+  plVarianceTypeFloat m_Aspect; // Uniform only: width/height ratio; != 1 stretches quads along their local X
+  plVec3 m_vSizeAxes = plVec3(1.0f); // PerAxis only: X/Y/Z multipliers of Size
+  bool m_bSameRandomForAllAxes = false;
   plCurve1DResourceHandle m_hCurve;
 };
 
@@ -28,8 +31,11 @@ class PL_PARTICLEPLUGIN_DLL plParticleInitializer_RandomSize final : public plPa
   PL_ADD_DYNAMIC_REFLECTION(plParticleInitializer_RandomSize, plParticleInitializer);
 
 public:
+  plEnum<plParticleSizeMode> m_Mode;
   plVarianceTypeFloat m_Size;
   plVarianceTypeFloat m_Aspect;
+  plVec3 m_vSizeAxes = plVec3(1.0f);
+  bool m_bSameRandomForAllAxes = false;
   plCurve1DResourceHandle m_hCurve;
 
   virtual void CreateRequiredStreams() override;
@@ -37,6 +43,9 @@ public:
 protected:
   virtual void InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements) override;
 
+  /// The curve's normalized value at a random position, or 1 without a curve.
+  void ComputeCurveFactors(plUInt64 uiStartIndex, plUInt64 uiNumElements, plFloat16* pOut);
+
   plProcessingStream* m_pStreamSize;
-  plProcessingStream* m_pStreamSize2 = nullptr;
+  plProcessingStream* m_pStreamSizeScale = nullptr;
 };

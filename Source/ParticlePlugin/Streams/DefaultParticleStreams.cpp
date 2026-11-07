@@ -76,6 +76,59 @@ void plParticleStream_Size::InitializeElements(plUInt64 uiStartIndex, plUInt64 u
 }
 
 //////////////////////////////////////////////////////////////////////////
+// SIZE SCALE STREAM
+//////////////////////////////////////////////////////////////////////////
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStreamFactory_SizeScale, 1, plRTTIDefaultAllocator<plParticleStreamFactory_SizeScale>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStream_SizeScale, 1, plRTTIDefaultAllocator<plParticleStream_SizeScale>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+plParticleStreamFactory_SizeScale::plParticleStreamFactory_SizeScale()
+  : plParticleStreamFactory("SizeScale", plProcessingStream::DataType::Half3, plGetStaticRTTI<plParticleStream_SizeScale>())
+{
+}
+
+void plParticleStream_SizeScale::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
+{
+  plProcessingStreamIterator<plFloat16Vec3> itData(m_pStream, uiNumElements, uiStartIndex);
+
+  const plVec3 defValue(1.0f);
+  while (!itData.HasReachedEnd())
+  {
+    itData.Current() = defValue;
+    itData.Advance();
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////
+// EMISSIVE STREAM
+//////////////////////////////////////////////////////////////////////////
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStreamFactory_Emissive, 1, plRTTIDefaultAllocator<plParticleStreamFactory_Emissive>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStream_Emissive, 1, plRTTIDefaultAllocator<plParticleStream_Emissive>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+plParticleStreamFactory_Emissive::plParticleStreamFactory_Emissive()
+  : plParticleStreamFactory("Emissive", plProcessingStream::DataType::Half, plGetStaticRTTI<plParticleStream_Emissive>())
+{
+}
+
+void plParticleStream_Emissive::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
+{
+  plProcessingStreamIterator<plFloat16> itData(m_pStream, uiNumElements, uiStartIndex);
+
+  while (!itData.HasReachedEnd())
+  {
+    itData.Current() = 1.0f;
+    itData.Advance();
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////
 // COLOR STREAM
 //////////////////////////////////////////////////////////////////////////
 
@@ -258,6 +311,37 @@ void plParticleStream_Variation::Initialize(plParticleSystemInstance* pOwner)
 }
 
 void plParticleStream_Variation::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
+{
+  plProcessingStreamIterator<plUInt32> itData(m_pStream, uiNumElements, uiStartIndex);
+
+  plRandom& rng = m_pOwner->GetOwnerEffect()->GetRNG();
+
+  while (!itData.HasReachedEnd())
+  {
+    itData.Current() = rng.UInt();
+    itData.Advance();
+  }
+}
+
+//////////////////////////////////////////////////////////////////////////
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStreamFactory_RandomSeed, 1, plRTTIDefaultAllocator<plParticleStreamFactory_RandomSeed>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleStream_RandomSeed, 1, plRTTIDefaultAllocator<plParticleStream_RandomSeed>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+plParticleStreamFactory_RandomSeed::plParticleStreamFactory_RandomSeed()
+  : plParticleStreamFactory("RandomSeed", plProcessingStream::DataType::Int, plGetStaticRTTI<plParticleStream_RandomSeed>())
+{
+}
+
+void plParticleStream_RandomSeed::Initialize(plParticleSystemInstance* pOwner)
+{
+  m_pOwner = pOwner;
+}
+
+void plParticleStream_RandomSeed::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
 {
   plProcessingStreamIterator<plUInt32> itData(m_pStream, uiNumElements, uiStartIndex);
 

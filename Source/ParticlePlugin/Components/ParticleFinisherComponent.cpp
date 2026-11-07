@@ -70,15 +70,9 @@ plResult plParticleFinisherComponent::GetLocalBounds(plBoundingBoxSphere& ref_bo
 
 void plParticleFinisherComponent::OnMsgExtractRenderData(plMsgExtractRenderData& msg) const
 {
-  switch (msg.m_pView->GetCameraUsageHint())
-  {
-    case plCameraUsageHint::Shadow:
-    case plCameraUsageHint::Reflection:
-      return;
-
-    default:
-      break;
-  }
+  // shadow views reach the systems that cast shadows (the controller filters them)
+  if (msg.m_pView->GetCameraUsageHint() == plCameraUsageHint::Reflection)
+    return;
 
   m_EffectController.ExtractRenderData(msg, GetOwner()->GetGlobalTransform());
 }

@@ -10,6 +10,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory, 2, plRTTINoAllocat
   PL_BEGIN_PROPERTIES
   {
     PL_MEMBER_PROPERTY("Enabled", m_bEnabled)->AddAttributes(new plDefaultValueAttribute(true), new plHiddenAttribute()),
+    PL_MEMBER_PROPERTY("PinId", m_sPinId)->AddAttributes(new plHiddenAttribute()),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
@@ -21,6 +22,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory, 2, plRTTINoAllocat
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializer, 1, plRTTINoAllocator)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEmitterSpaceDirectionAttribute, 1, plRTTIDefaultAllocator<plParticleEmitterSpaceDirectionAttribute>)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 

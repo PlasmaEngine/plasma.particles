@@ -30,6 +30,9 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeRibbonFactory, 1, plRTTIDefaultAll
     PL_MEMBER_PROPERTY("CustomMaterial", m_sCustomMaterial)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Material", "QuadParticle")),
     PL_MEMBER_PROPERTY("Texture", m_sTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D"), new plDefaultValueAttribute(plStringView("{ e00262e8-58f5-42f5-880d-569257047201 }"))), // wrap in plStringView to prevent a memory leak report
     PL_MEMBER_PROPERTY("TintColorParam", m_sTintColorParameter),
+    PL_MEMBER_PROPERTY("DistortionTexture", m_sDistortionTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("DistortionStrength", m_fDistortionStrength)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.0f, 500.0f)),
+    PL_PARTICLE_LOOK_PROPERTIES,
   }
   PL_END_PROPERTIES;
 }
@@ -57,6 +60,7 @@ void plParticleTypeRibbonFactory::CopyTypeProperties(plParticleType* pObject, bo
   pType->m_fNormalCurvature = m_fNormalCurvature;
   pType->m_fLightDirectionality = m_fLightDirectionality;
   pType->m_hCustomMaterial.Invalidate();
+  pType->m_Look.Configure(m_Look);
 
   if (m_bUseCustomMaterial)
   {
@@ -67,12 +71,22 @@ void plParticleTypeRibbonFactory::CopyTypeProperties(plParticleType* pObject, bo
   {
     pType->m_hTexture = plResourceManager::LoadResource<plTexture2DResource>(m_sTexture);
   }
+
+  pType->m_hDistortionTexture.Invalidate();
+  if (!m_sDistortionTexture.IsEmpty())
+  {
+    pType->m_hDistortionTexture = plResourceManager::LoadResource<plTexture2DResource>(m_sDistortionTexture);
+  }
+
+  pType->m_fDistortionStrength = m_fDistortionStrength;
 }
 
 enum class TypeRibbonVersion
 {
   Version_0 = 0,
   Version_1,
+  Version_2, // added emissive map and depth blending
+  Version_3, // added distortion
 
   // insert new version numbers above
   Version_Count,
@@ -94,6 +108,13 @@ void plParticleTypeRibbonFactory::Save(plStreamWriter& inout_stream) const
   inout_stream << m_fLightDirectionality;
   inout_stream << m_bUseCustomMaterial;
   inout_stream << m_sCustomMaterial;
+
+  // Version 2
+  m_Look.Save(inout_stream);
+
+  // Version 3
+  inout_stream << m_sDistortionTexture;
+  inout_stream << m_fDistortionStrength;
 }
 
 void plParticleTypeRibbonFactory::Load(plStreamReader& inout_stream)
@@ -113,6 +134,20 @@ void plParticleTypeRibbonFactory::Load(plStreamReader& inout_stream)
   inout_stream >> m_fLightDirectionality;
   inout_stream >> m_bUseCustomMaterial;
   inout_stream >> m_sCustomMaterial;
+
+  m_Look = plParticleLookSettings();
+  if (uiVersion >= 2)
+  {
+    m_Look.Load(inout_stream);
+  }
+
+  m_sDistortionTexture.Clear();
+  m_fDistortionStrength = 100.0f;
+  if (uiVersion >= 3)
+  {
+    inout_stream >> m_sDistortionTexture;
+    inout_stream >> m_fDistortionStrength;
+  }
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -122,7 +157,7 @@ plParticleTypeRibbon::~plParticleTypeRibbon() = default;
 
 void plParticleTypeRibbon::CreateRequiredStreams()
 {
-  CreateStream("LifeTime", plProcessingStream::DataType::Half2, &m_pStreamLifeTime, false);
+  CreateStream("LifeTime", plProcessingStream::DataType::Float2, &m_pStreamLifeTime, false);
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
   CreateStream("Size", plProcessingStream::DataType::Half, &m_pStreamSize, false);
   CreateStream("Color", plProcessingStream::DataType::Half4, &m_pStreamColor, false);
@@ -130,6 +165,11 @@ void plParticleTypeRibbon::CreateRequiredStreams()
   // spawn-order index; survives the swap-erase compaction of the streams and lets
   // extraction restore the spawn order to connect the band correctly
   CreateStream("RibbonOrder", plProcessingStream::DataType::Int, &m_pStreamRibbonOrder, true);
+}
+
+void plParticleTypeRibbon::QueryOptionalStreams()
+{
+  m_pStreamSizeScale = GetOwnerSystem()->QueryStream("SizeScale", plProcessingStream::DataType::Half3);
 }
 
 void plParticleTypeRibbon::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
@@ -148,7 +188,11 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
 {
   PL_PROFILE_SCOPE("PFX: Ribbon");
 
-  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid())
+  // distortion works without a texture: the shader masks the band with a soft edge
+  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid() && m_RenderMode != plParticleTypeRenderMode::Distortion)
+    return;
+
+  if (plParticleSkipView(ref_msg, CastsShadows()))
     return;
 
   const plUInt32 numParticles = (plUInt32)GetOwnerSystem()->GetNumActiveParticles();
@@ -164,8 +208,9 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
     const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
     const plFloat16* pSize = m_pStreamSize->GetData<plFloat16>();
     const plColorLinear16f* pColor = m_pStreamColor->GetData<plColorLinear16f>();
-    const plFloat16Vec2* pLifeTime = m_pStreamLifeTime->GetData<plFloat16Vec2>();
+    const plVec2* pLifeTime = m_pStreamLifeTime->GetData<plVec2>();
     const plUInt32* pOrder = m_pStreamRibbonOrder->GetData<plUInt32>();
+    const plFloat16Vec3* pSizeScale = m_pStreamSizeScale ? m_pStreamSizeScale->GetData<plFloat16Vec3>() : nullptr;
 
     // restore spawn order (stream compaction shuffles the particle order)
     struct SortEntry
@@ -216,7 +261,7 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
 
       auto& point = m_PointData[p];
       point.Position = pPosition[uiSrcIdx].GetAsVec3();
-      point.Width = pSize[uiSrcIdx];
+      point.Width = pSizeScale != nullptr ? (float)pSize[uiSrcIdx] * (float)pSizeScale[uiSrcIdx].x : (float)pSize[uiSrcIdx];
       point.Color = pColor[uiSrcIdx].ToLinearFloat() * tintColor;
       point.Life = pLifeTime[uiSrcIdx].x * pLifeTime[uiSrcIdx].y;
       point.Dummy = 0;
@@ -253,9 +298,14 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
   pRenderData->m_fLightDirectionality = m_fLightDirectionality;
   pRenderData->m_hTexture = m_hTexture;
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
+  pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), false);
+  pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
+  pRenderData->m_Look.m_bRoundMask = !m_hTexture.IsValid();
+  pRenderData->m_Look.m_fDistortionStrength = m_fDistortionStrength;
+  pRenderData->m_hDistortionTexture = m_hDistortionTexture;
   pRenderData->m_Points = m_PointData;
 
-  ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  plParticleAddRenderData(ref_msg, pRenderData, m_RenderMode);
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_Type_Ribbon_ParticleTypeRibbon);
