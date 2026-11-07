@@ -10,5 +10,6 @@ public class PlasmaParticlesWorkspace : WorkspaceRules
         TargetNames.Add("ParticlePlugin");
         TargetNames.Add("EnginePluginParticle");
         TargetNames.Add("EditorPluginParticle");
+        TargetNames.Add("ParticlesTest");
     }
 }

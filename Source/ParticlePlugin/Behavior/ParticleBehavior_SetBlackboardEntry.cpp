@@ -3,6 +3,7 @@
 #include <Core/Utils/Blackboard.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_SetBlackboardEntry.h>
+#include <ParticlePlugin/System/ParticleFrameProgram.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 
 // clang-format off
@@ -81,11 +82,10 @@ void plParticleBehavior_SetBlackboardEntry::Process(plUInt64 uiNumElements)
     return;
 
   // Particle systems update on task threads and plBlackboard has no internal locking, so writes
-  // from concurrent effects are serialized here. This does NOT synchronize against game code
-  // touching the same blackboard from other threads mid-frame — same caveat as any cross-thread
-  // blackboard use in the engine.
-  static plMutex s_WriteMutex;
-  PL_LOCK(s_WriteMutex);
+  // and the Blackboard Entry reads of concurrent effects are serialized here. This does NOT
+  // synchronize against game code touching the same blackboard from other threads mid-frame —
+  // same caveat as any cross-thread blackboard use in the engine.
+  PL_LOCK(plParticleGetBlackboardMutex());
 
   plHashedString sBlackboardName;
   sBlackboardName.Assign(m_sBlackboard.IsEmpty() ? "Global" : m_sBlackboard.GetData());

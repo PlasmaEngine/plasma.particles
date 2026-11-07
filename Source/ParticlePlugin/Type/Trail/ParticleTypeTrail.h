@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Foundation/Containers/DynamicArray.h>
+#include <ParticlePlugin/Renderer/ParticleLook.h>
 #include <ParticlePlugin/Type/ParticleType.h>
 #include <ParticlePlugin/Type/Trail/TrailRenderer.h>
 #include <RendererFoundation/RendererFoundationDLL.h>
@@ -19,6 +20,8 @@ public:
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
+  PL_PARTICLE_LOOK_ACCESSORS
+
   plEnum<plParticleTypeRenderMode> m_RenderMode;
   plUInt16 m_uiMaxPoints;
   plTime m_UpdateDiff;
@@ -34,6 +37,7 @@ public:
   float m_fLightDirectionality = 0.5f;
   bool m_bUseCustomMaterial = false;
   plString m_sCustomMaterial;
+  plParticleLookSettings m_Look;
 };
 
 class PL_PARTICLEPLUGIN_DLL plParticleTypeTrail final : public plParticleType
@@ -58,6 +62,7 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   plMaterialResourceHandle m_hCustomMaterial;
+  plParticleLook m_Look;
 
   virtual void CreateRequiredStreams() override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
@@ -77,7 +82,11 @@ protected:
   plProcessingStream* m_pStreamColor = nullptr;
   plProcessingStream* m_pStreamTrailData = nullptr;
   plProcessingStream* m_pStreamVariation = nullptr;
+  plProcessingStream* m_pStreamSizeScale = nullptr; // optional; X scales the width
+  plProcessingStream* m_pStreamEmissive = nullptr;  // optional per-particle emissive multiplier
   plTime m_LastSnapshot;
+
+  virtual void QueryOptionalStreams() override;
   plUInt8 m_uiCurFirstIndex = 0;
   float m_fSnapshotFraction;
 

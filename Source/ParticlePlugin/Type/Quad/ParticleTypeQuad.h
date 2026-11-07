@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ParticlePlugin/Renderer/ParticleLook.h>
 #include <ParticlePlugin/Type/ParticleType.h>
 #include <ParticlePlugin/Type/Quad/QuadParticleRenderer.h>
 #include <RendererFoundation/RendererFoundationDLL.h>
@@ -26,6 +27,8 @@ struct PL_PARTICLEPLUGIN_DLL plQuadParticleOrientation
 
     Fixed_StartAxis, ///< uses the Axis stream as written at spawn time (e.g. the mesh surface normal from the Mesh Position initializer)
 
+    Custom_Facing, ///< faces the Axis stream every frame, as written by Set Attribute's Facing target; Rotation spins it around that
+
     Default = Billboard
   };
 };
@@ -45,6 +48,8 @@ public:
 
   virtual void QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const override;
 
+  PL_PARTICLE_LOOK_ACCESSORS
+
   plEnum<plQuadParticleOrientation> m_Orientation;
   plAngle m_MaxDeviation;
   plEnum<plParticleTypeRenderMode> m_RenderMode;
@@ -60,7 +65,7 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   // six-way response maps: A = light from +right/+up/+front with density in alpha,
-  // B = the opposing three directions. The Texture slot supplies the emissive on top.
+  // B = the opposing three directions. The emissive map supplies the self-lit part on top.
   plString m_sSixWayMapA;
   plString m_sSixWayMapB;
   float m_fSixWayAbsorption = 1.0f;
@@ -69,6 +74,7 @@ public:
   float m_fNormalMapStrength = 0.0f;
   bool m_bUseCustomMaterial = false;
   plString m_sCustomMaterial;
+  plParticleLookSettings m_Look;
 };
 
 class PL_PARTICLEPLUGIN_DLL plParticleTypeQuad final : public plParticleType
@@ -101,6 +107,7 @@ public:
   plTexture2DResourceHandle m_hNormalMap;
   float m_fNormalMapStrength = 0.0f;
   plMaterialResourceHandle m_hCustomMaterial;
+  plParticleLook m_Look;
 
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
 
@@ -129,7 +136,8 @@ protected:
   plProcessingStream* m_pStreamAxis = nullptr;
   plProcessingStream* m_pStreamVariation = nullptr;
   plProcessingStream* m_pStreamLastPosition = nullptr;
-  plProcessingStream* m_pStreamSize2 = nullptr; // optional per-axis size multipliers
+  plProcessingStream* m_pStreamSizeScale = nullptr; // optional per-axis size multipliers
+  plProcessingStream* m_pStreamEmissive = nullptr;  // optional per-particle emissive multiplier
 
   virtual void QueryOptionalStreams() override;
 

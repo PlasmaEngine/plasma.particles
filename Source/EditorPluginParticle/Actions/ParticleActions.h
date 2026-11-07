@@ -23,6 +23,11 @@ public:
   static plActionDescriptorHandle s_hSimulationSpeed[10];
   static plActionDescriptorHandle s_hRenderVisualizers;
   static plActionDescriptorHandle s_hTemplatesMenu;
+  static plActionDescriptorHandle s_hShowStats;
+  static plActionDescriptorHandle s_hShowEvents;
+  static plActionDescriptorHandle s_hPreviewStatic;
+  static plActionDescriptorHandle s_hPreviewOrbit;
+  static plActionDescriptorHandle s_hPreviewLine;
 };
 
 /// Dropdown listing every system template ('Particles/Templates' in any data directory);
@@ -53,6 +58,11 @@ public:
     AutoRestart,
     SimulationSpeed,
     RenderVisualizers,
+    ShowStats,
+    ShowEvents,
+    PreviewStatic,
+    PreviewOrbit,
+    PreviewLine,
   };
 
   plParticleAction(const plActionContext& context, const char* szName, ActionType type, float fSimSpeed = 1.0f);

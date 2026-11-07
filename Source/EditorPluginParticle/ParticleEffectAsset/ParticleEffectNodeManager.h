@@ -29,6 +29,9 @@ public:
   /// Strips the plParticle prefix and the Node/Factory decoration from a type name.
   static plString FriendlyTypeName(const plRTTI* pType);
 
+  /// "NormalizedAge" as "Normalized Age".
+  static plString SplitWords(plStringView sName);
+
   virtual bool InternalIsNode(const plDocumentObject* pObject) const override;
   virtual void InternalCreatePins(const plDocumentObject* pObject, NodeInternal& ref_node) override;
   virtual void GetCreateableTypes(plHybridArray<const plRTTI*, 32>& ref_types) const override;
@@ -36,6 +39,14 @@ public:
   virtual bool InternalIsDynamicPinProperty(const plDocumentObject* pObject, const plAbstractProperty* pProp) const override;
 
 private:
-  /// Backs the plStringViews handed out in the creation templates, which do not own their text.
-  mutable plDynamicArray<plString> m_CreationNames;
+  const plDocumentObject* FindEffectNode() const;
+
+  /// Whether a per-particle value may reach targetPin: directly a property of Set Attribute or Kill If
+  /// in Initialize or Update, or an operator whose results only reach such properties.
+  plStatus CheckParticleTarget(const plVisualGraphPin& targetPin) const;
+
+  /// Back the plStringViews and property values handed out in the creation templates, which do not own
+  /// them. Deques, so adding an entry never moves the ones handed out before.
+  mutable plDeque<plString> m_CreationNames;
+  mutable plDeque<plVisualGraphNodeProperty> m_CreationProperties;
 };

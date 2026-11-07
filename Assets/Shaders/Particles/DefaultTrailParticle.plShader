@@ -1,0 +1,114 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+RENDER_PASS
+PARTICLE_RENDER_MODE
+PARTICLE_LIGHTING_MODE
+SHADOW_QUALITY
+SHADING_QUALITY
+CAMERA_MODE
+
+[MATERIALPARAMETER]
+
+// The default particle shader isn't used through a material, so it doesn't define material parameters.
+
+[RENDERSTATE]
+
+#include <Shaders/Particles/ParticleRenderState.h>
+
+[SHADER]
+
+#define CUSTOM_INTERPOLATOR float FogAmount : FOG; float Life : TEXCOORD1; float Variation : TEXCOORD2; float Emissive : TEXCOORD6;
+#define USE_TEXCOORD0
+#define USE_COLOR0
+
+// the vertex shader fills Emissive, the pixel shader defines GetParticleEmissive and GetParticleDistortionOffset
+#define PARTICLE_HAS_EMISSIVE
+#define PARTICLE_HAS_DISTORTION_OFFSET
+
+[VERTEXSHADER]
+
+#include <Shaders/Particles/TrailParticleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Particles/ParticlePixelShader.h>
+
+// The default shader has to use BG_DRAW_CALL, but custom materials must use BG_MATERIAL.
+Texture2D ParticleTexture BIND_GROUP(BG_DRAW_CALL);
+SamplerState ParticleTexture_AutoSampler BIND_GROUP(BG_DRAW_CALL);
+
+#if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  Texture2D ParticleDistortionTexture BIND_GROUP(BG_DRAW_CALL);
+  SamplerState ParticleDistortionTexture_AutoSampler BIND_GROUP(BG_DRAW_CALL);
+#endif
+
+Texture2D ParticleEmissiveMap BIND_GROUP(BG_DRAW_CALL);
+SamplerState ParticleEmissiveMap_AutoSampler BIND_GROUP(BG_DRAW_CALL);
+
+// Global values use the 'static' keyword so that they can be shared between functions
+static float4 g_BaseColor = float4(0.0, 0.0, 0.0, 0.0);
+
+/* === Available input data ===
+
+G.Input looks like this:
+struct PS_IN
+{
+  float4 Position : SV_Position;
+  float2 TexCoord0 : TEXCOORD0;
+  float4 Color0 : COLOR0;
+  float FogAmount : FOG;
+  float Life : TEXCOORD1;
+  float Variation : TEXCOORD2;
+};
+
+Particle System constants can be accessed through the plParticleSystemConstants buffer, see
+  Data/Base/Shaders/Particles/ParticleSystemConstants.h
+
+*/
+
+void FillCustomGlobals()
+{
+#if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_NONE
+  // this code path isn't really necessary, but if someone tries to use the default shader in a material
+  // this makes sure it at least shows something visible
+  g_BaseColor = float4(G.Input.TexCoord0.xy, 1.0, 1.0);
+#else
+  g_BaseColor = ParticleTexture.Sample(ParticleTexture_AutoSampler, G.Input.TexCoord0.xy);
+#endif
+}
+
+float GetParticleOpacity()
+{
+  return g_BaseColor.a * G.Input.Color0.a;
+}
+
+float3 GetParticleColor()
+{
+  return g_BaseColor.rgb * G.Input.Color0.rgb;
+}
+
+// PARTICLE_RENDER_MODE_NONE shades against a stand-in input struct without these interpolators
+#if PARTICLE_RENDER_MODE != PARTICLE_RENDER_MODE_NONE
+
+float3 GetParticleEmissive()
+{
+  return SampleParticleEmissive(ParticleEmissiveMap, ParticleEmissiveMap_AutoSampler, G.Input.TexCoord0.xy, G.Input.Emissive);
+}
+
+float2 GetParticleDistortionOffset()
+{
+#  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  // without a distortion texture the trail pushes the image outwards from its centre line
+  float2 texDistort = (LookFlags & PARTICLE_LOOK_FLAG_DISTORTION_TEXTURE) != 0 ?ParticleDistortionTexture.Sample(ParticleDistortionTexture_AutoSampler, G.Input.TexCoord0.xy).xy : G.Input.TexCoord0.xy;
+  return (texDistort - 0.5) * DistortionStrength;
+#  else
+  return 0.0;
+#  endif
+}
+
+#endif
+
+

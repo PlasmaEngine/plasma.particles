@@ -16,7 +16,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_Gravity, 1, plRTTIDefa
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_MEMBER_PROPERTY("GravityFactor", m_fGravityFactor)->AddAttributes(new plDefaultValueAttribute(1.0f)),
+    PL_MEMBER_PROPERTY("GravityFactor", m_fGravityFactor)->AddAttributes(new plDefaultValueAttribute(1.0f), new plParticlePerParticleAttribute()),
   }
   PL_END_PROPERTIES;
 }
@@ -41,16 +41,18 @@ void plParticleBehaviorFactory_Gravity::CopyBehaviorProperties(plParticleBehavio
   plParticleBehavior_Gravity* pBehavior = static_cast<plParticleBehavior_Gravity*>(pObject);
 
   pBehavior->m_fGravityFactor = m_fGravityFactor;
+  pBehavior->m_pProgram = &m_Program;
 
   pBehavior->m_pPhysicsModule = (plPhysicsWorldModuleInterface*)pBehavior->GetOwnerSystem()->GetOwnerWorldModule()->GetCachedWorldModule(plGetStaticRTTI<plPhysicsWorldModuleInterface>());
 }
 
 void plParticleBehaviorFactory_Gravity::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 1;
+  const plUInt8 uiVersion = 2;
   inout_stream << uiVersion;
 
   inout_stream << m_fGravityFactor;
+  m_Program.Save(inout_stream);
 }
 
 void plParticleBehaviorFactory_Gravity::Load(plStreamReader& inout_stream)
@@ -58,7 +60,12 @@ void plParticleBehaviorFactory_Gravity::Load(plStreamReader& inout_stream)
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
 
+  PL_ASSERT_DEV(uiVersion <= 2, "Invalid version {0}", uiVersion);
+
   inout_stream >> m_fGravityFactor;
+
+  if (uiVersion >= 2)
+    m_Program.Load(inout_stream);
 }
 
 void plParticleBehaviorFactory_Gravity::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -71,6 +78,10 @@ void plParticleBehaviorFactory_Gravity::QueryFinalizerDependencies(plSet<const p
 void plParticleBehavior_Gravity::CreateRequiredStreams()
 {
   CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
+
+  m_Runner.Configure(m_pProgram);
+  m_Runner.CreateRequiredStreams([this](const char* szName, plProcessingStream::DataType type, plProcessingStream** ppStream)
+    { CreateStream(szName, type, ppStream, false); });
 }
 
 void plParticleBehavior_Gravity::Process(plUInt64 uiNumElements)
@@ -80,6 +91,19 @@ void plParticleBehavior_Gravity::Process(plUInt64 uiNumElements)
   const plVec3 vGravity = m_pPhysicsModule != nullptr ? m_pPhysicsModule->GetGravity() : plVec3(0.0f, 0.0f, -10.0f);
 
   const float tDiff = (float)m_TimeDiff.GetSeconds();
+
+  // a per-particle wire gives every particle its own factor
+  plUInt32 uiComponents = 0;
+  if (const float* pFactor = m_Runner.RunProperty(GetOwnerSystem(), uiNumElements, m_TimeDiff, "GravityFactor", uiComponents))
+  {
+    plVec3* pVelocity = m_pStreamVelocity->GetWritableData<plVec3>();
+
+    for (plUInt64 i = 0; i < uiNumElements; ++i)
+      pVelocity[i] += vGravity * (pFactor[i * uiComponents] * tDiff);
+
+    return;
+  }
+
   const plVec3 addGravity = vGravity * m_fGravityFactor * tDiff;
 
   plProcessingStreamIterator<plVec3> itVelocity(m_pStreamVelocity, uiNumElements, 0);

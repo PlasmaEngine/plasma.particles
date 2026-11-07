@@ -58,7 +58,25 @@ public:
 
   const plHybridArray<plParticleSystemInstance*, 8>& GetParticleSystems() const { return m_ParticleSystems; }
 
-  void AddParticleEvent(const plParticleEvent& pe);
+  /// How many events one effect queues per frame; more are dropped and counted by the raising system.
+  static constexpr plUInt32 s_uiMaxEventsPerFrame = 256;
+
+  /// Queues an event for the next frame; false when the queue is full and the event was dropped.
+  bool AddParticleEvent(const plParticleEvent& pe);
+
+  /// Counts events dropped before they reached the queue (a GPU system's beyond its buffer).
+  void CountDroppedEvents(plUInt32 uiCount)
+  {
+    m_uiTotalEventsRaised += uiCount;
+    m_uiTotalEventsDropped += uiCount;
+  }
+
+  /// All events raised since the effect started, and how many of them were dropped.
+  plUInt64 GetTotalEventsRaised() const { return m_uiTotalEventsRaised; }
+  plUInt64 GetTotalEventsDropped() const { return m_uiTotalEventsDropped; }
+
+  /// The events the systems and reactions received at the start of this frame.
+  plArrayPtr<const plParticleEvent> GetLastEvents() const { return m_LastEvents; }
 
   /// \brief Tags of the game object that owns this effect. They are forwarded to the finisher
   /// component's object, so tag-based render filters keep working while a detached effect dies out.
@@ -69,6 +87,18 @@ public:
   /// world module each update. Emitters multiply it into their spawn counts.
   void SetDynamicSpawnScale(float fScale) { m_fDynamicSpawnScale = fScale; }
   float GetDynamicSpawnScale() const { return m_fDynamicSpawnScale; }
+
+  /// \brief Every how many frames Colour Gradient and Fade Out update a particle (1, 2 or 4), and the camera
+  /// distance it was picked from (negative when unknown, such as for shared effects). Written by the world module
+  /// each update (cvar Particles.LodUpdateInterval).
+  void SetLodUpdateInterval(plUInt8 uiInterval, float fDistance)
+  {
+    m_uiLodUpdateInterval = uiInterval;
+    m_fLodDistance = fDistance;
+  }
+
+  plUInt8 GetLodUpdateInterval() const { return m_uiLodUpdateInterval; }
+  float GetLodDistance() const { return m_fLodDistance; }
 
   /// \brief The animated mesh this effect emits from (skeletal emission). The world module
   /// snapshots the component's pose each update before the simulation tasks start.
@@ -116,6 +146,9 @@ public:
 
   /// \brief Returns the transform of the main or shared instance.
   const plTransform& GetTransform() const { return m_Transform; }
+
+  /// \brief The velocity passed along with the transform, usually the owner object's velocity.
+  const plVec3& GetVelocity() const { return m_vVelocity; }
 
   /// \brief For the renderer to know whether the instance transform has to be applied to each particle position.
   bool NeedsToApplyTransform() const { return m_bSimulateInLocalSpace || m_bIsSharedEffect; }
@@ -241,6 +274,7 @@ private:
     PL_DECLARE_POD_TYPE();
     plUInt64 m_uiNameHash;
     float m_fValue;
+    bool m_bSetByOwner; // false while it still holds the descriptor's default
   };
 
   struct ColorParameter
@@ -248,10 +282,15 @@ private:
     PL_DECLARE_POD_TYPE();
     plUInt64 m_uiNameHash;
     plColor m_Value;
+    bool m_bSetByOwner;
   };
 
   plHybridArray<FloatParameter, 2> m_FloatParameters;
   plHybridArray<ColorParameter, 2> m_ColorParameters;
+
+  // writes a parameter without the shared-effect guard; the descriptor's defaults apply to shared effects too
+  void SetParameterValue(const plTempHashedString& sName, float value, bool bSetByOwner);
+  void SetParameterValue(const plTempHashedString& sName, const plColor& value, bool bSetByOwner);
 
   /// @}
 
@@ -278,6 +317,8 @@ private:
   plInt8 m_iMinSimStepsToDo = 0;
   float m_fApplyInstanceVelocity = 0;
   float m_fDynamicSpawnScale = 1.0f;
+  plUInt8 m_uiLodUpdateInterval = 2;
+  float m_fLodDistance = -1.0f;
   float m_fFadeOutStartDistance = 0.0f;
   float m_fFadeOutEndDistance = 0.0f;
   plEnum<plParticleEffectImportance> m_Importance;
@@ -293,5 +334,8 @@ private:
 
   plSharedPtr<plTask> m_pTask;
 
-  plStaticArray<plParticleEvent, 16> m_EventQueue;
+  plDynamicArray<plParticleEvent> m_EventQueue; ///< at most s_uiMaxEventsPerFrame
+  plDynamicArray<plParticleEvent> m_LastEvents;
+  plUInt64 m_uiTotalEventsRaised = 0;
+  plUInt64 m_uiTotalEventsDropped = 0;
 };

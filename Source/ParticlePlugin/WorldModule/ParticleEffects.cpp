@@ -11,6 +11,22 @@
 #include <RendererCore/RenderWorld/RenderWorld.h>
 
 plCVarInt cvar_ParticlesMaxParticles("Particles.MaxParticles", 0, plCVarFlags::Save, "World particle budget: Cosmetic effects scale their spawn counts down when the total exceeds this (0 = unlimited).");
+plCVarInt cvar_ParticlesLodUpdateInterval("Particles.LodUpdateInterval", 1, plCVarFlags::Save, "1 = Colour Gradient and Fade Out update every frame up close, every 2nd frame from 15 m and every 4th from 30 m. 0 = every 2nd frame at any distance.");
+
+namespace
+{
+  /// The Colour Gradient and Fade Out update interval for an effect this far from the camera (negative = unknown).
+  plUInt8 PickLodUpdateInterval(float fDistance)
+  {
+    if (cvar_ParticlesLodUpdateInterval == 0 || fDistance < 0.0f)
+      return 2;
+
+    if (fDistance < 15.0f)
+      return 1;
+
+    return fDistance < 30.0f ? 2 : 4;
+  }
+} // namespace
 
 plParticleEffectHandle plParticleWorldModule::InternalCreateEffectInstance(const plParticleEffectResourceHandle& hResource, plUInt64 uiRandomSeed,
   bool bIsShared, plArrayPtr<plParticleEffectFloatParam> floatParams, plArrayPtr<plParticleEffectColorParam> colorParams)
@@ -141,6 +157,7 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
 {
   PL_LOCK(m_Mutex);
 
+  FreeRetiredReadbacks(false);
   DestroyFinishedEffects();
   ReconfigureEffects();
 
@@ -158,6 +175,9 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
       break;
     }
   }
+
+  // per-frame graph programs read it from the update tasks
+  m_vMainCameraPosition = vMainCameraPos;
 
   // snapshot the active force fields so the update tasks can sample them lock-free
   {
@@ -218,14 +238,17 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
     auto& effect = m_ParticleEffects[i];
 
     // shared effects are rendered from many positions, a single distance would be wrong
+    const float fDistance = (bHasMainCamera && !effect.IsSharedEffect()) ? (effect.GetTransform().m_vPosition - vMainCameraPos).GetLength() : -1.0f;
+
     float fLodScale = 1.0f;
-    if (bHasMainCamera && !effect.IsSharedEffect() && effect.GetFadeOutEndDistance() > effect.GetFadeOutStartDistance())
+    if (fDistance >= 0.0f && effect.GetFadeOutEndDistance() > effect.GetFadeOutStartDistance())
     {
-      const float fDistance = (effect.GetTransform().m_vPosition - vMainCameraPos).GetLength();
       const float fFade = (fDistance - effect.GetFadeOutStartDistance()) / (effect.GetFadeOutEndDistance() - effect.GetFadeOutStartDistance());
 
       fLodScale = 1.0f - plMath::Saturate(fFade);
     }
+
+    effect.SetLodUpdateInterval(PickLodUpdateInterval(fDistance), fDistance);
 
     const float fEffectBudgetScale = (effect.GetImportance() == plParticleEffectImportance::Gameplay) ? 1.0f : fBudgetScale;
 

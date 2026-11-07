@@ -60,11 +60,13 @@ public:
 
   ///@}
 
+  /// \brief The live effect instance, or nullptr once the effect is gone. For inspection by tests and tools.
+  plParticleEffectInstance* GetInstance() const;
+
 private:
   friend class plParticleWorldModule;
 
   plParticleEffectController(plParticleWorldModule* pModule, plParticleEffectHandle hEffect);
-  plParticleEffectInstance* GetInstance() const;
 
   const void* m_pSharedInstanceOwner = nullptr;
   plParticleWorldModule* m_pModule = nullptr;

@@ -103,6 +103,7 @@ void plParticleQuadRenderer::RenderBatch(const plRenderViewContext& renderViewCo
     plUInt32 uiNumParticles = pRenderData->m_BaseParticleData.GetCount();
 
     ConfigureRenderMode(pRenderData, pRenderContext);
+    systemConstants.SetLookData(pRenderData->m_Look);
 
     // GPU-simulated: the data is already in device buffers and only the GPU knows how many
     // particles survived, so bind them as-is and let the draw args carry the count
@@ -183,6 +184,13 @@ void plParticleQuadRenderer::ConfigureRenderMode(const plParticleQuadRenderData*
     case plParticleTypeRenderMode::BlendAdd:
       pRenderContext->SetShaderPermutationVariable("PARTICLE_RENDER_MODE", "PARTICLE_RENDER_MODE_BLENDADD");
       break;
+  }
+
+  // distortion writes screen offsets in its own pass, which binds no lights
+  if (pRenderData->m_RenderMode == plParticleTypeRenderMode::Distortion)
+  {
+    pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
+    return;
   }
 
   switch (pRenderData->m_LightingMode)

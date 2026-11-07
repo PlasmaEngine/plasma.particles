@@ -28,7 +28,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_AttractToPosition, 1, 
     PL_ENUM_MEMBER_PROPERTY("Shape", plParticleAttractorShape, m_Shape),
     PL_MEMBER_PROPERTY("CustomPosition", m_vCustomPosition),
     PL_MEMBER_PROPERTY("Axis", m_vAxis)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1))),
-    PL_MEMBER_PROPERTY("Force", m_fForce)->AddAttributes(new plDefaultValueAttribute(5.0f)),
+    PL_MEMBER_PROPERTY("Force", m_fForce)->AddAttributes(new plDefaultValueAttribute(5.0f), new plParticlePerParticleAttribute()),
     PL_MEMBER_PROPERTY("MaxDistance", m_fMaxDistance)->AddAttributes(new plDefaultValueAttribute(10.0f), new plClampValueAttribute(0.0f, {})),
     PL_MEMBER_PROPERTY("MinDistance", m_fMinDistance)->AddAttributes(new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.001f, {})),
     PL_MEMBER_PROPERTY("AffectVelocity", m_bAffectVelocity)->AddAttributes(new plDefaultValueAttribute(true)),
@@ -62,6 +62,7 @@ void plParticleBehaviorFactory_AttractToPosition::CopyBehaviorProperties(plParti
   pBehavior->m_fMinDistance = m_fMinDistance;
   pBehavior->m_bAffectVelocity = m_bAffectVelocity;
   pBehavior->m_bRepel = m_bRepel;
+  pBehavior->m_pProgram = &m_Program;
 }
 
 void plParticleBehaviorFactory_AttractToPosition::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -74,7 +75,7 @@ void plParticleBehaviorFactory_AttractToPosition::QueryFinalizerDependencies(plS
 
 void plParticleBehaviorFactory_AttractToPosition::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 2;
+  const plUInt8 uiVersion = 3;
   inout_stream << uiVersion;
 
   inout_stream << m_Target;
@@ -88,6 +89,9 @@ void plParticleBehaviorFactory_AttractToPosition::Save(plStreamWriter& inout_str
   inout_stream << m_Shape;
   inout_stream << m_vAxis;
   inout_stream << m_bRepel;
+
+  // version 3
+  m_Program.Save(inout_stream);
 }
 
 void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_stream)
@@ -95,7 +99,7 @@ void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_str
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
 
-  PL_ASSERT_DEV(uiVersion <= 2, "Invalid version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion <= 3, "Invalid version {0}", uiVersion);
 
   inout_stream >> m_Target;
   inout_stream >> m_vCustomPosition;
@@ -110,12 +114,19 @@ void plParticleBehaviorFactory_AttractToPosition::Load(plStreamReader& inout_str
     inout_stream >> m_vAxis;
     inout_stream >> m_bRepel;
   }
+
+  if (uiVersion >= 3)
+    m_Program.Load(inout_stream);
 }
 
 void plParticleBehavior_AttractToPosition::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
   CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
+
+  m_Runner.Configure(m_pProgram);
+  m_Runner.CreateRequiredStreams([this](const char* szName, plProcessingStream::DataType type, plProcessingStream** ppStream)
+    { CreateStream(szName, type, ppStream, false); });
 }
 
 void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
@@ -142,7 +153,12 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
 
   const float fMaxDistSqr = m_fMaxDistance * m_fMaxDistance;
   const float fMinDistSqr = m_fMinDistance * m_fMinDistance;
-  const float fForce = m_bRepel ? -m_fForce : m_fForce;
+  const float fSign = m_bRepel ? -1.0f : 1.0f;
+
+  // a per-particle wire gives every particle its own force
+  plUInt32 uiForceComponents = 0;
+  const float* pForce = m_Runner.RunProperty(GetOwnerSystem(), uiNumElements, m_TimeDiff, "Force", uiForceComponents);
+  plUInt64 uiParticle = 0;
 
   // vector from the particle to the closest point of the attractor geometry
   auto GetToTarget = [&](const plVec3& pos) -> plVec3
@@ -173,6 +189,7 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
 
       // Linear falloff: full force at minDist, zero at maxDist
       const float falloff = 1.0f - (dist - m_fMinDistance) / (m_fMaxDistance - m_fMinDistance);
+      const float fForce = fSign * (pForce != nullptr ? pForce[uiParticle * uiForceComponents] : m_fForce);
       const float amount = fForce * falloff * tDiff;
 
       plVec3 vDir = dirToTarget;
@@ -199,6 +216,7 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
       }
     }
 
+    ++uiParticle;
     itPosition.Advance();
     itVelocity.Advance();
   }

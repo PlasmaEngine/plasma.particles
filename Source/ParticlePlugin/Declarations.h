@@ -111,6 +111,23 @@ PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleLightingMode);
 
 //////////////////////////////////////////////////////////////////////////
 
+/// \brief Whether a size block writes one size or separate X/Y/Z multipliers (the SizeScale stream).
+struct PL_PARTICLEPLUGIN_DLL plParticleSizeMode
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Uniform,
+    PerAxis,
+    Default = Uniform
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plParticleSizeMode);
+
+//////////////////////////////////////////////////////////////////////////
+
 /// \brief What to do when an effect is not visible.
 struct PL_PARTICLEPLUGIN_DLL plEffectInvisibleUpdateRate
 {

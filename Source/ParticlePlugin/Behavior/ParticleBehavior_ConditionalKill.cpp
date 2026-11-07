@@ -1,36 +1,25 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
-#include <Foundation/DataProcessing/Stream/ProcessingStreamIterator.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_ConditionalKill.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 
 // clang-format off
-PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleKillAttribute, 1)
-  PL_ENUM_CONSTANT(plParticleKillAttribute::PositionX),
-  PL_ENUM_CONSTANT(plParticleKillAttribute::PositionY),
-  PL_ENUM_CONSTANT(plParticleKillAttribute::PositionZ),
-  PL_ENUM_CONSTANT(plParticleKillAttribute::Speed),
-  PL_ENUM_CONSTANT(plParticleKillAttribute::Size),
-  PL_ENUM_CONSTANT(plParticleKillAttribute::ColorAlpha),
-PL_END_STATIC_REFLECTED_ENUM;
-
-PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleComparisonOp, 1)
-  PL_ENUM_CONSTANT(plParticleComparisonOp::Less),
-  PL_ENUM_CONSTANT(plParticleComparisonOp::LessEqual),
-  PL_ENUM_CONSTANT(plParticleComparisonOp::Greater),
-  PL_ENUM_CONSTANT(plParticleComparisonOp::GreaterEqual),
-PL_END_STATIC_REFLECTED_ENUM;
-
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_ConditionalKill, 1, plRTTIDefaultAllocator<plParticleBehaviorFactory_ConditionalKill>)
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_ConditionalKill, 2, plRTTIDefaultAllocator<plParticleBehaviorFactory_ConditionalKill>)
 {
   PL_BEGIN_PROPERTIES
   {
-    PL_ENUM_MEMBER_PROPERTY("Attribute", plParticleKillAttribute, m_Attribute),
-    PL_ENUM_MEMBER_PROPERTY("Comparison", plParticleComparisonOp, m_Comparison),
+    PL_ENUM_MEMBER_PROPERTY("Attribute", plParticleAttribute, m_Attribute)->AddAttributes(new plDefaultValueAttribute((plInt32)plParticleAttribute::PositionZ)),
+    PL_ENUM_MEMBER_PROPERTY("Comparison", plParticleConditionOp, m_Comparison),
     PL_MEMBER_PROPERTY("Threshold", m_fThreshold),
   }
   PL_END_PROPERTIES;
+  PL_BEGIN_ATTRIBUTES
+  {
+    // converted into Kill If by the editor; still reflected so existing effects load
+    new plHiddenAttribute(),
+  }
+  PL_END_ATTRIBUTES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
@@ -38,7 +27,19 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehavior_ConditionalKill, 1, plRTTIDef
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 
-plParticleBehaviorFactory_ConditionalKill::plParticleBehaviorFactory_ConditionalKill() = default;
+namespace
+{
+  /// Version 1 stored its own attribute list: PositionX, PositionY, PositionZ, Speed, Size, ColorAlpha.
+  plParticleAttribute::Enum FromVersion1Attribute(plUInt8 uiValue)
+  {
+    return uiValue == 5 ? plParticleAttribute::ColorA : (plParticleAttribute::Enum)plMath::Min<plUInt8>(uiValue, 4);
+  }
+} // namespace
+
+plParticleBehaviorFactory_ConditionalKill::plParticleBehaviorFactory_ConditionalKill()
+{
+  m_Attribute = plParticleAttribute::PositionZ;
+}
 
 const plRTTI* plParticleBehaviorFactory_ConditionalKill::GetBehaviorType() const
 {
@@ -56,7 +57,7 @@ void plParticleBehaviorFactory_ConditionalKill::CopyBehaviorProperties(plParticl
 
 void plParticleBehaviorFactory_ConditionalKill::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 1;
+  const plUInt8 uiVersion = 2;
   inout_stream << uiVersion;
 
   inout_stream << m_Attribute;
@@ -69,10 +70,23 @@ void plParticleBehaviorFactory_ConditionalKill::Load(plStreamReader& inout_strea
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
 
-  PL_ASSERT_DEV(uiVersion <= 1, "Invalid version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion <= 2, "Invalid version {0}", uiVersion);
 
-  inout_stream >> m_Attribute;
-  inout_stream >> m_Comparison;
+  if (uiVersion >= 2)
+  {
+    inout_stream >> m_Attribute;
+    inout_stream >> m_Comparison;
+  }
+  else
+  {
+    // the comparison list of version 1 is the start of plParticleConditionOp
+    plUInt8 uiAttribute = 0, uiComparison = 0;
+    inout_stream >> uiAttribute;
+    inout_stream >> uiComparison;
+    m_Attribute = FromVersion1Attribute(uiAttribute);
+    m_Comparison = (plParticleConditionOp::Enum)uiComparison;
+  }
+
   inout_stream >> m_fThreshold;
 }
 
@@ -86,93 +100,21 @@ void plParticleBehavior_ConditionalKill::QueryOptionalStreams()
   m_pStreamVelocity = GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Float3);
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
   m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
-}
-
-static float GetAttributeValue(
-  plParticleKillAttribute::Enum attr,
-  const plSimdVec4f& position,
-  const plVec3* pVelocity,
-  const plFloat16* pSize,
-  const plFloat16Vec4* pColor)
-{
-  switch (attr)
-  {
-    case plParticleKillAttribute::PositionX:
-      return position.GetComponent<0>();
-    case plParticleKillAttribute::PositionY:
-      return position.GetComponent<1>();
-    case plParticleKillAttribute::PositionZ:
-      return position.GetComponent<2>();
-    case plParticleKillAttribute::Speed:
-    {
-      if (pVelocity)
-        return pVelocity->GetLength();
-      return 0.0f;
-    }
-    case plParticleKillAttribute::Size:
-    {
-      if (pSize)
-        return static_cast<float>(*pSize);
-      return 0.0f;
-    }
-    case plParticleKillAttribute::ColorAlpha:
-    {
-      if (pColor)
-        return static_cast<float>(pColor->w);
-      return 1.0f;
-    }
-    default:
-      return 0.0f;
-  }
-}
-
-static bool CompareValue(plParticleComparisonOp::Enum op, float fValue, float fThreshold)
-{
-  switch (op)
-  {
-    case plParticleComparisonOp::Less:
-      return fValue < fThreshold;
-    case plParticleComparisonOp::LessEqual:
-      return fValue <= fThreshold;
-    case plParticleComparisonOp::Greater:
-      return fValue > fThreshold;
-    case plParticleComparisonOp::GreaterEqual:
-      return fValue >= fThreshold;
-    default:
-      return false;
-  }
+  m_pStreamLifeTime = GetOwnerSystem()->QueryStream("LifeTime", plProcessingStream::DataType::Float2);
 }
 
 void plParticleBehavior_ConditionalKill::Process(plUInt64 uiNumElements)
 {
   PL_PROFILE_SCOPE("PFX: ConditionalKill");
 
-  plProcessingStreamIterator<plSimdVec4f> itPosition(m_pStreamPosition, uiNumElements, 0);
-
-  const plVec3* pVelocityData = m_pStreamVelocity ? m_pStreamVelocity->GetData<plVec3>() : nullptr;
-  const plFloat16* pSizeData = m_pStreamSize ? m_pStreamSize->GetData<plFloat16>() : nullptr;
-  const plFloat16Vec4* pColorData = m_pStreamColor ? m_pStreamColor->GetData<plFloat16Vec4>() : nullptr;
-
-  plUInt32 idx = 0;
-
-  while (!itPosition.HasReachedEnd())
+  for (plUInt32 i = 0; i < (plUInt32)uiNumElements; ++i)
   {
-    const plSimdVec4f pos = itPosition.Current();
+    const float fValue = plReadParticleAttribute(m_Attribute, i, m_pStreamPosition, m_pStreamVelocity, m_pStreamSize, m_pStreamColor, m_pStreamLifeTime);
 
-    const float fValue = GetAttributeValue(
-      m_Attribute,
-      pos,
-      pVelocityData ? &pVelocityData[idx] : nullptr,
-      pSizeData ? &pSizeData[idx] : nullptr,
-      pColorData ? &pColorData[idx] : nullptr);
-
-    if (CompareValue(m_Comparison, fValue, m_fThreshold))
+    if (plEvaluateParticleCondition(m_Comparison, fValue, m_fThreshold))
     {
-      m_pStreamGroup->RemoveElement(idx);
+      m_pStreamGroup->RemoveElement(i);
     }
-
-    ++idx;
-    itPosition.Advance();
   }
 }
 

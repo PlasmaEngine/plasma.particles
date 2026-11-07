@@ -7,6 +7,7 @@
 #include <Core/World/World.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_Raycast.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
+#include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <ParticlePlugin/Type/GPU/GPUParticleRenderer.h>
@@ -15,11 +16,13 @@
 #include <ParticlePlugin/Type/Quad/QuadParticleRenderer.h>
 #include <ParticlePlugin/Type/Trail/TrailRenderer.h>
 #include <RendererCore/Lights/GPUParticleDataProvider.h>
+#include <RendererCore/Pipeline/Passes/GPUParticlePass.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
 #include <RendererCore/Textures/Texture2DResource.h>
 #include <RendererFoundation/Device/Device.h>
+#include <RendererFoundation/Resources/ReadbackHelper.h>
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeGPUFactory, 1, plRTTIDefaultAllocator<plParticleTypeGPUFactory>)
@@ -170,32 +173,82 @@ void plParticleTypeGPU::CreateRequiredStreams()
 {
   CreateStream("Position", plProcessingStream::DataType::Float4, &m_pStreamPosition, false);
   CreateStream("Velocity", plProcessingStream::DataType::Float3, &m_pStreamVelocity, false);
-  CreateStream("LifeTime", plProcessingStream::DataType::Half2, &m_pStreamLifeTime, false);
+  CreateStream("LifeTime", plProcessingStream::DataType::Float2, &m_pStreamLifeTime, false);
   CreateStream("Size", plProcessingStream::DataType::Half, &m_pStreamSize, false);
   CreateStream("Color", plProcessingStream::DataType::Half4, &m_pStreamColor, false);
   CreateStream("RotationSpeed", plProcessingStream::DataType::Half, &m_pStreamRotationSpeed, false);
   CreateStream("RotationOffset", plProcessingStream::DataType::Half, &m_pStreamRotationOffset, false);
+
+  // the seed stream's own initializer fills it at spawn; the GPU keeps it per slot for the programs
+  m_pStreamRandomSeed = nullptr;
+  if (m_Programs.ReadsRandomSeed())
+    CreateStream("RandomSeed", plProcessingStream::DataType::Int, &m_pStreamRandomSeed, false);
+}
+
+bool plParticleTypeGPU::HasActiveGPUElements() const
+{
+  // GPU particles never outlive the life they were spawned with, so once that has run out on the
+  // effect's clock nothing can be left alive, even though the buffers still exist
+  if (!m_PendingSpawns.IsEmpty() || GetOwnerEffect()->GetTotalEffectLifeTime() < m_LastParticleDeathTime)
+    return true;
+
+  // the last deaths' events are still on their way back; an effect that is no longer drawn never
+  // receives them, so this holds it only for a few frames
+  const plUInt64 uiFrame = plRenderWorld::GetFrameCounter();
+  for (const EventReadback& readback : m_EventReadbacks)
+  {
+    if (readback.m_bRequested && uiFrame < readback.m_uiRequestFrame + 8)
+      return true;
+  }
+
+  return false;
+}
+
+float plParticleTypeGPU::GetMaxParticleRadius(float fParticleSize) const
+{
+  // The system's bounds come from the CPU copies of the particles, which only move by their initial
+  // velocity. Add how far the GPU simulation can carry a particle beyond that within its life: every
+  // acceleration with a known strength, applied for the whole life. Wind and scene forces are not
+  // included, so the bounds stay approximate for them.
+  const float fLife = m_fLongestLifeSeconds;
+
+  float fAcceleration = plMath::Abs(m_fGravityFactor) * 10.0f;
+  fAcceleration += 2.0f * plMath::Abs(m_fTurbStrength);
+  fAcceleration += plMath::Abs(m_fVectorFieldStrength);
+  fAcceleration += plMath::Abs(m_fAttractorForce);
+
+  const float fTravel = 0.5f * fAcceleration * fLife * fLife + plMath::Abs(m_fRiseSpeed) * fLife;
+
+  // a size curve can grow the particle beyond the size it spawned with
+  const float fSize = m_hSizeCurveLUT.IsValid() ? plMath::Max(fParticleSize, m_fSizeBase + m_fSizeScale) : fParticleSize;
+
+  return fSize * 0.5f + fTravel;
 }
 
 void plParticleTypeGPU::StepParticleSystem(const plTime& tDiff, plUInt32 uiNumNewParticles)
 {
+  // the GPU steps by the effect's own clock, so pause, time scale and fixed tick apply to it too
+  m_PendingSimulationTime += tDiff;
+
+  if (tDiff.IsPositive())
+  {
+    m_LastStepDuration = tDiff;
+  }
+
   const plVec3 vPos = GetOwnerSystem()->GetTransform().m_vPosition;
 
   if (m_bPullAlongFirstStep)
   {
     m_bPullAlongFirstStep = false;
-    m_vApplyPull.SetZero();
   }
   else
   {
-    m_vApplyPull = (vPos - m_vLastEmitterPosition) * m_fPullAlongStrength;
+    m_vPendingPull += (vPos - m_vLastEmitterPosition) * m_fPullAlongStrength;
   }
 
   m_vLastEmitterPosition = vPos;
 
   // flies: the timer runs on the CPU, the shader only sees "change heading this frame"
-  m_bFliesChangeDirThisFrame = false;
-
   if (m_bFlies && m_fFliesSpeed > 0.0f)
   {
     const plTime tCur = GetOwnerEffect()->GetTotalEffectLifeTime();
@@ -203,7 +256,7 @@ void plParticleTypeGPU::StepParticleSystem(const plTime& tDiff, plUInt32 uiNumNe
     if (tCur >= m_FliesTimeToChangeDir)
     {
       m_FliesTimeToChangeDir = tCur + plTime::MakeFromSeconds(m_fFliesPathLength / m_fFliesSpeed);
-      m_bFliesChangeDirThisFrame = true;
+      m_bPendingFliesChangeDir = true;
     }
   }
 }
@@ -216,8 +269,87 @@ void plParticleTypeGPU::QueryOptionalStreams()
 
 void plParticleTypeGPU::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
 {
-  m_uiNewParticleStartIndex = uiStartIndex;
-  m_uiNumNewParticles = (plUInt32)uiNumElements;
+  // types run after every initializer and default initializer, so the streams are complete here
+  PackSpawnedParticles(uiStartIndex, uiNumElements);
+}
+
+void plParticleTypeGPU::PackSpawnedParticles(plUInt64 uiStartIndex, plUInt64 uiNumElements)
+{
+  // the emit dispatch takes at most this many per hand-off; the rest would be dropped there anyway
+  const plUInt32 uiCapacity = plMath::Min<plUInt32>(m_uiMaxGPUParticles, GPU_PARTICLE_MAX_EMIT_PER_FRAME);
+  const plUInt32 uiNumToPack = plMath::Min<plUInt32>((plUInt32)uiNumElements, uiCapacity - plMath::Min(uiCapacity, m_PendingSpawns.GetCount()));
+
+  if (uiNumToPack == 0)
+    return;
+
+  const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
+  const plVec3* pVelocity = m_pStreamVelocity->GetData<plVec3>();
+  const plVec2* pLifeTime = m_pStreamLifeTime->GetData<plVec2>();
+  const plFloat16* pSize = m_pStreamSize->GetData<plFloat16>();
+  const plColorLinear16f* pColor = m_pStreamColor->GetData<plColorLinear16f>();
+  const plFloat16* pRotSpeed = m_pStreamRotationSpeed != nullptr ? m_pStreamRotationSpeed->GetData<plFloat16>() : nullptr;
+  const plFloat16* pRotOffset = m_pStreamRotationOffset != nullptr ? m_pStreamRotationOffset->GetData<plFloat16>() : nullptr;
+  const plVec3* pAxis = m_pStreamAxis != nullptr ? m_pStreamAxis->GetData<plVec3>() : nullptr;
+  const plUInt32* pVariation = m_pStreamVariation != nullptr ? m_pStreamVariation->GetData<plUInt32>() : nullptr;
+
+  // 3x10 bit signed, unpacked by UnpackParticleAxis in GPUParticleSimulate.plShader
+  auto PackAxis = [](const plVec3& v) -> plUInt32
+  {
+    auto q = [](float f) -> plUInt32
+    {
+      const plInt32 i = (plInt32)plMath::Round(plMath::Clamp(f, -1.0f, 1.0f) * 511.0f);
+      return (plUInt32)(i & 0x3FF);
+    };
+
+    return q(v.x) | (q(v.y) << 10) | (q(v.z) << 20);
+  };
+
+  const plTime tNow = GetOwnerEffect()->GetTotalEffectLifeTime();
+  float fLongestRemaining = 0.0f;
+
+  const plUInt32* pSeed = m_pStreamRandomSeed != nullptr ? m_pStreamRandomSeed->GetData<plUInt32>() : nullptr;
+
+  for (plUInt32 i = 0; i < uiNumToPack; ++i)
+  {
+    const plUInt64 srcIdx = uiStartIndex + i;
+    plGPUParticle& p = m_PendingSpawns.ExpandAndGetRef();
+
+    if (pSeed != nullptr)
+      m_PendingSeeds.PushBack(pSeed[srcIdx]);
+
+    p.Position = pPosition[srcIdx].GetAsVec3();
+    p.Velocity = pVelocity[srcIdx];
+
+    // LifeTime stream: x = remaining seconds, y = 1 / total seconds.
+    // The simulate shader stores Life as the remaining-life fraction and ages it by dt * MaxLife.
+    const float fRemainingSeconds = pLifeTime[srcIdx].x;
+    const float fInvTotalSeconds = plMath::Max(pLifeTime[srcIdx].y, 0.0001f);
+    p.Life = plMath::Clamp(fRemainingSeconds * fInvTotalSeconds, 0.0f, 1.0f);
+    p.MaxLife = fInvTotalSeconds;
+    fLongestRemaining = plMath::Max(fLongestRemaining, fRemainingSeconds);
+    m_fLongestLifeSeconds = plMath::Max(m_fLongestLifeSeconds, 1.0f / fInvTotalSeconds);
+
+    p.Size = pSize[srcIdx];
+    p.InitialSize = p.Size;
+    p.RotationOffset = pRotOffset != nullptr ? (float)pRotOffset[srcIdx] : 0.0f;
+    p.RotationSpeed = pRotSpeed != nullptr ? (float)pRotSpeed[srcIdx] : 0.0f;
+
+    // bit 0 alive, bits 8-15 the atlas variation
+    p.Flags = 1;
+    if (pVariation != nullptr)
+    {
+      p.Flags |= (pVariation[srcIdx] & 0xFF) << 8;
+    }
+
+    plColorLinear16f col = pColor[srcIdx];
+    plUInt32* pColorU32 = reinterpret_cast<plUInt32*>(&p.Color);
+    pColorU32[0] = (plUInt32)col.r.GetRawData() | ((plUInt32)col.g.GetRawData() << 16);
+    pColorU32[1] = (plUInt32)col.b.GetRawData() | ((plUInt32)col.a.GetRawData() << 16);
+
+    p.AxisPacked = pAxis != nullptr ? PackAxis(pAxis[srcIdx]) : PackAxis(plVec3(0, 0, 1));
+  }
+
+  m_LastParticleDeathTime = plMath::Max(m_LastParticleDeathTime, tNow + plTime::MakeFromSeconds(fLongestRemaining));
 }
 
 void plParticleTypeGPU::EnsureGPUBuffers() const
@@ -279,6 +411,21 @@ void plParticleTypeGPU::EnsureGPUBuffers() const
     m_hSortKeyBuffer = pDevice->CreateBuffer(desc, zeroData.GetArrayPtr());
   }
 
+  // the random seed of each pool slot, written by the emit dispatch, for graph programs that read it
+  if (m_Programs.ReadsRandomSeed())
+  {
+    plGALBufferCreationDescription desc;
+    desc.m_uiStructSize = sizeof(plUInt32);
+    desc.m_uiTotalSize = m_uiMaxGPUParticles * sizeof(plUInt32);
+    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource | plGALBufferUsageFlags::UnorderedAccess;
+    desc.m_ResourceAccess.m_bImmutable = false;
+
+    plDynamicArray<plUInt8> zeroData;
+    zeroData.SetCountUninitialized(desc.m_uiTotalSize);
+    plMemoryUtils::ZeroFill(zeroData.GetData(), zeroData.GetCount());
+    m_hSeedBuffer = pDevice->CreateBuffer(desc, zeroData.GetArrayPtr());
+  }
+
   // Compacted alive-slot list, rebuilt by every simulate dispatch
   {
     plGALBufferCreationDescription desc;
@@ -303,6 +450,18 @@ void plParticleTypeGPU::EnsureGPUBuffers() const
 
     const plUInt32 args[4] = {0, 1, 0, 0};
     m_hDrawArgsBuffer = pDevice->CreateBuffer(desc, plMakeArrayPtr(args).ToByteArray());
+  }
+
+  // Indirect dispatch args {groups, 1, 1, sorted count} of the sort and scatter passes, written on the GPU
+  // from the alive count, so they cover the alive particles instead of the pool
+  {
+    plGALBufferCreationDescription desc;
+    desc.m_uiTotalSize = 4 * sizeof(plUInt32);
+    desc.m_BufferFlags = plGALBufferUsageFlags::UnorderedAccess | plGALBufferUsageFlags::ByteAddressBuffer | plGALBufferUsageFlags::DrawIndirect;
+    desc.m_ResourceAccess.m_bImmutable = false;
+
+    const plUInt32 args[4] = {1, 1, 1, 1};
+    m_hSortArgsBuffer = pDevice->CreateBuffer(desc, plMakeArrayPtr(args).ToByteArray());
   }
 
   // Per-particle structs for the quad renderer, written by the simulate dispatch. Both quad
@@ -386,7 +545,44 @@ void plParticleTypeGPU::DestroyGPUBuffers()
     pDevice->DestroyBuffer(m_hTrailPointsPackedBuffer);
   if (!m_hSortKeyBuffer.IsInvalidated())
     pDevice->DestroyBuffer(m_hSortKeyBuffer);
+  if (!m_hSeedBuffer.IsInvalidated())
+    pDevice->DestroyBuffer(m_hSeedBuffer);
+  if (!m_hSortArgsBuffer.IsInvalidated())
+    pDevice->DestroyBuffer(m_hSortArgsBuffer);
+  if (!m_hSpyBuffer.IsInvalidated())
+    pDevice->DestroyBuffer(m_hSpyBuffer);
+  for (plGALBufferHandle* phBuffer : {&m_hProgramWordBuffer, &m_hProgramDataBuffer, &m_hSeedStagingBuffer})
+  {
+    if (!phBuffer->IsInvalidated())
+      pDevice->DestroyBuffer(*phBuffer);
+    phBuffer->Invalidate();
+  }
 
+  if (!m_hEventBuffer.IsInvalidated())
+    pDevice->DestroyBuffer(m_hEventBuffer);
+  m_hEventBuffer.Invalidate();
+
+  // the render thread may still record into the readbacks, so the world module frees them later
+  plParticleWorldModule* pWorldModule = GetOwnerSystem() != nullptr ? GetOwnerSystem()->GetOwnerWorldModule() : nullptr;
+  auto Retire = [pWorldModule](plUniquePtr<plGALReadbackBufferHelper>& ref_pReadback)
+  {
+    if (pWorldModule != nullptr)
+      pWorldModule->RetireReadback(ref_pReadback.Release());
+    else
+      ref_pReadback.Clear();
+  };
+
+  for (EventReadback& readback : m_EventReadbacks)
+  {
+    Retire(readback.m_pHelper);
+    readback = EventReadback();
+  }
+
+  Retire(m_pSpyReadback);
+  m_bSpyReadbackPending = false;
+  m_hSpyBuffer.Invalidate();
+  m_hSeedBuffer.Invalidate();
+  m_hSortArgsBuffer.Invalidate();
   m_hParticleBuffer.Invalidate();
   m_hCounterBuffer.Invalidate();
   m_hAliveListBuffer.Invalidate();
@@ -410,75 +606,31 @@ void plParticleTypeGPU::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, c
 {
   EnsureGPUBuffers();
 
-  const plUInt32 numParticles = m_uiNumNewParticles;
-  m_uiNumNewParticles = 0;
+  // every view draws the system, but only the first extraction of a frame hands off the
+  // simulation; a second hand-off would step the particles twice
+  const bool bQueueSimulation = m_uiLastQueuedFrame != plRenderWorld::GetFrameCounter();
 
   plArrayPtr<plGPUParticle> newParticles;
-  if (numParticles > 0)
+  plArrayPtr<plUInt32> newSeeds;
+  plUInt32 uiActiveSlotCount = m_uiActiveSlotCount;
+
+  if (bQueueSimulation && !m_PendingSpawns.IsEmpty())
   {
-    newParticles = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plGPUParticle, numParticles);
+    // the pass reads the spawns while rendering, so they must live in frame memory
+    newParticles = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plGPUParticle, m_PendingSpawns.GetCount());
+    newParticles.CopyFrom(m_PendingSpawns);
+    m_PendingSpawns.Clear();
 
-    const plUInt64 srcStart = m_uiNewParticleStartIndex;
-    const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
-    const plVec3* pVelocity = m_pStreamVelocity->GetData<plVec3>();
-    const plFloat16Vec2* pLifeTime = m_pStreamLifeTime->GetData<plFloat16Vec2>();
-    const plFloat16* pSize = m_pStreamSize->GetData<plFloat16>();
-    const plColorLinear16f* pColor = m_pStreamColor->GetData<plColorLinear16f>();
-    const plFloat16* pRotSpeed = m_pStreamRotationSpeed != nullptr ? m_pStreamRotationSpeed->GetData<plFloat16>() : nullptr;
-    const plFloat16* pRotOffset = m_pStreamRotationOffset != nullptr ? m_pStreamRotationOffset->GetData<plFloat16>() : nullptr;
-    const plVec3* pAxis = m_pStreamAxis != nullptr ? m_pStreamAxis->GetData<plVec3>() : nullptr;
-    const plUInt32* pVariation = m_pStreamVariation != nullptr ? m_pStreamVariation->GetData<plUInt32>() : nullptr;
-
-    // 3x10 bit signed, unpacked by UnpackParticleAxis in GPUParticleSimulate.plShader
-    auto PackAxis = [](const plVec3& v) -> plUInt32
+    if (m_PendingSeeds.GetCount() == newParticles.GetCount())
     {
-      auto q = [](float f) -> plUInt32
-      {
-        const plInt32 i = (plInt32)plMath::Round(plMath::Clamp(f, -1.0f, 1.0f) * 511.0f);
-        return (plUInt32)(i & 0x3FF);
-      };
-
-      return q(v.x) | (q(v.y) << 10) | (q(v.z) << 20);
-    };
-
-    for (plUInt32 i = 0; i < numParticles; ++i)
-    {
-      const plUInt64 srcIdx = srcStart + i;
-      plGPUParticle& p = newParticles[i];
-
-      p.Position = pPosition[srcIdx].GetAsVec3();
-      p.Velocity = pVelocity[srcIdx];
-
-      // LifeTime stream: x = remaining seconds, y = 1 / total seconds.
-      // The simulate shader stores Life as the remaining-life fraction and ages it by dt * MaxLife.
-      const float fRemainingSeconds = (float)pLifeTime[srcIdx].x;
-      const float fInvTotalSeconds = plMath::Max((float)pLifeTime[srcIdx].y, 0.0001f);
-      p.Life = plMath::Clamp(fRemainingSeconds * fInvTotalSeconds, 0.0f, 1.0f);
-      p.MaxLife = fInvTotalSeconds;
-
-      p.Size = pSize[srcIdx];
-      p.InitialSize = p.Size;
-      p.RotationOffset = pRotOffset != nullptr ? (float)pRotOffset[srcIdx] : 0.0f;
-      p.RotationSpeed = pRotSpeed != nullptr ? (float)pRotSpeed[srcIdx] : 0.0f;
-
-      // bit 0 alive, bits 8-15 the atlas variation
-      p.Flags = 1;
-      if (pVariation != nullptr)
-      {
-        p.Flags |= (pVariation[srcIdx] & 0xFF) << 8;
-      }
-
-      plColorLinear16f col = pColor[srcIdx];
-      plUInt32* pColorU32 = reinterpret_cast<plUInt32*>(&p.Color);
-      pColorU32[0] = (plUInt32)col.r.GetRawData() | ((plUInt32)col.g.GetRawData() << 16);
-      pColorU32[1] = (plUInt32)col.b.GetRawData() | ((plUInt32)col.a.GetRawData() << 16);
-
-      p.AxisPacked = pAxis != nullptr ? PackAxis(pAxis[srcIdx]) : PackAxis(plVec3(0, 0, 1));
+      newSeeds = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plUInt32, m_PendingSeeds.GetCount());
+      newSeeds.CopyFrom(m_PendingSeeds);
     }
-  }
+    m_PendingSeeds.Clear();
 
-  // Compute active slot count including the new particles about to be emitted
-  const plUInt32 uiActiveSlotCount = plMath::Min(m_uiActiveSlotCount + numParticles, m_uiMaxGPUParticles);
+    // dispatch bound for the simulation; slots are recycled, so it never exceeds the pool
+    uiActiveSlotCount = plMath::Min(m_uiActiveSlotCount + newParticles.GetCount(), m_uiMaxGPUParticles);
+  }
 
   switch (m_CPURenderPath)
   {
@@ -496,9 +648,17 @@ void plParticleTypeGPU::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, c
       break;
   }
 
-  QueueSimulation(instanceTransform, uiActiveSlotCount, newParticles);
+  if (!bQueueSimulation)
+    return;
+
+  m_uiLastQueuedFrame = plRenderWorld::GetFrameCounter();
+
+  QueueSimulation(instanceTransform, uiActiveSlotCount, newParticles, newSeeds);
 
   m_uiActiveSlotCount = uiActiveSlotCount;
+  m_PendingSimulationTime = plTime::MakeZero();
+  m_vPendingPull.SetZero();
+  m_bPendingFliesChangeDir = false;
 
   // Advance trail write index for trail types
   if (m_GPURenderType == plGPUParticleRenderType::Trail)
@@ -534,6 +694,8 @@ void plParticleTypeGPU::AddQuadRenderData(plMsgExtractRenderData& ref_msg, const
   pRenderData->m_fNormalCurvature = m_fNormalCurvature;
   pRenderData->m_fLightDirectionality = m_fLightDirectionality;
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
+  pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), false);
+  pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
 
   pRenderData->m_uiNumVariationsX = 1;
   pRenderData->m_uiNumVariationsY = 1;
@@ -577,13 +739,18 @@ void plParticleTypeGPU::AddQuadRenderData(plMsgExtractRenderData& ref_msg, const
   pRenderData->m_hGpuTangentDataBuffer = m_hQuadTangentBuffer;
   pRenderData->m_hGpuDrawArgsBuffer = m_hDrawArgsBuffer;
 
-  ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  // distortion is drawn by the particle distortion pass, everything else by the transparent pass
+  const plRenderData::Category category = (m_RenderMode == plParticleTypeRenderMode::Distortion) ? plParticleRenderDataCategories::Distortion : plDefaultRenderDataCategories::LitTransparent;
+  if (category == plParticleRenderDataCategories::Distortion)
+    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
 
-  // the transparent pass reads what the simulate dispatch wrote
-  ref_msg.AddDependency(m_hDrawArgsBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::IndirectArgument);
-  ref_msg.AddDependency(m_hQuadBaseBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
-  ref_msg.AddDependency(m_hQuadBillboardBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
-  ref_msg.AddDependency(m_hQuadTangentBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddRenderData(pRenderData, category, plRenderData::Caching::Never);
+
+  // the drawing pass reads what the simulate dispatch wrote
+  ref_msg.AddDependency(m_hDrawArgsBuffer, category, plGALResourceState::IndirectArgument);
+  ref_msg.AddDependency(m_hQuadBaseBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddDependency(m_hQuadBillboardBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddDependency(m_hQuadTangentBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
 }
 
 void plParticleTypeGPU::AddPointRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
@@ -625,6 +792,8 @@ void plParticleTypeGPU::AddTrailRenderData(plMsgExtractRenderData& ref_msg, cons
   pRenderData->m_RenderMode = m_RenderMode;
   pRenderData->m_hTexture = m_hTexture;
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
+  pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), false);
+  pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
   pRenderData->m_hDistortionTexture = m_hDistortionTexture;
   pRenderData->m_fDistortionStrength = m_fDistortionStrength;
   pRenderData->m_LightingMode = m_LightingMode;
@@ -663,12 +832,16 @@ void plParticleTypeGPU::AddTrailRenderData(plMsgExtractRenderData& ref_msg, cons
   pRenderData->m_hGpuTrailPointsBuffer = m_hTrailPointsPackedBuffer;
   pRenderData->m_hGpuDrawArgsBuffer = m_hDrawArgsBuffer;
 
-  ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  const plRenderData::Category category = (m_RenderMode == plParticleTypeRenderMode::Distortion) ? plParticleRenderDataCategories::Distortion : plDefaultRenderDataCategories::LitTransparent;
+  if (category == plParticleRenderDataCategories::Distortion)
+    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
 
-  ref_msg.AddDependency(m_hDrawArgsBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::IndirectArgument);
-  ref_msg.AddDependency(m_hQuadBaseBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
-  ref_msg.AddDependency(m_hTrailDataBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
-  ref_msg.AddDependency(m_hTrailPointsPackedBuffer, plDefaultRenderDataCategories::LitTransparent, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddRenderData(pRenderData, category, plRenderData::Caching::Never);
+
+  ref_msg.AddDependency(m_hDrawArgsBuffer, category, plGALResourceState::IndirectArgument);
+  ref_msg.AddDependency(m_hQuadBaseBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddDependency(m_hTrailDataBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+  ref_msg.AddDependency(m_hTrailPointsPackedBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
 }
 
 void plParticleTypeGPU::AddGPURenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform, plUInt32 uiActiveSlotCount, plArrayPtr<plGPUParticle> newParticles) const
@@ -751,7 +924,267 @@ plArrayPtr<plGPUParticleForceField> plParticleTypeGPU::GatherForceFields(const p
 }
 
 // Registers this system with the data provider so the compute pass simulates it this frame.
-void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, plUInt32 uiActiveSlotCount, plArrayPtr<plGPUParticle> newParticles) const
+void plParticleTypeGPU::SetSpyProgram(const plParticleProgramData* pProgram)
+{
+  m_SpyProgram = pProgram != nullptr ? *pProgram : plParticleProgramData();
+  m_Programs.Build(m_LoweredBehaviors, nullptr, GetSpyProgram());
+  m_bSpyReadbackPending = false;
+
+  if (!m_Programs.HasSpy() && !m_hSpyBuffer.IsInvalidated())
+  {
+    plGALDevice::GetDefaultDevice()->DestroyBuffer(m_hSpyBuffer);
+    m_hSpyBuffer.Invalidate();
+  }
+}
+
+bool plParticleTypeGPU::FetchSpyValues(plDynamicArray<float>& out_values)
+{
+  if (!m_bSpyReadbackPending || m_pSpyReadback == nullptr)
+    return false;
+
+  const plEnum<plGALAsyncResult> result = m_pSpyReadback->GetReadbackResult(plTime::MakeZero());
+  if (result == plGALAsyncResult::Pending)
+    return false;
+
+  m_bSpyReadbackPending = false;
+  if (result != plGALAsyncResult::Ready)
+    return false;
+
+  plArrayPtr<const plUInt8> memory;
+  plReadbackBufferLock lock = m_pSpyReadback->LockBuffer(memory);
+  if (!lock)
+    return false;
+
+  // dead slots hold NaN
+  out_values.Clear();
+  const plArrayPtr<const float> values(reinterpret_cast<const float*>(memory.GetPtr()), memory.GetCount() / sizeof(float));
+  for (float f : values)
+  {
+    if (!plMath::IsNaN(f))
+      out_values.PushBack(f);
+  }
+
+  return true;
+}
+
+void plParticleTypeGPU::SetSpyRange(float fMin, float fMax)
+{
+  m_fSpyMin = fMin;
+  m_fSpyMax = fMax;
+}
+
+void plParticleTypeGPU::FillProgramInfo(plGPUParticleSystemInfo& ref_info) const
+{
+  if (m_Programs.IsEmpty())
+    return;
+
+  // the pass uploads both while rendering, so they live in frame memory like the spawns
+  const plArrayPtr<const plUInt32> words = m_Programs.GetWords();
+  auto wordCopy = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), plUInt32, words.GetCount());
+  wordCopy.CopyFrom(words);
+
+  auto data = PL_NEW_ARRAY(plFrameAllocator::GetCurrentAllocator(), float, m_Programs.GetDataCount());
+  m_Programs.FillData(GetOwnerSystem(), m_PendingSimulationTime, data);
+
+  ref_info.m_ProgramWords = wordCopy;
+  ref_info.m_ProgramData = data;
+
+  // the system's own buffers for them, made once at their largest
+  plGALDevice* pProgramDevice = plGALDevice::GetDefaultDevice();
+  auto CreateReadBuffer = [&](plGALBufferHandle& ref_hBuffer, plUInt32 uiCount)
+  {
+    if (!ref_hBuffer.IsInvalidated())
+      return;
+
+    plGALBufferCreationDescription desc;
+    desc.m_uiStructSize = sizeof(plUInt32);
+    desc.m_uiTotalSize = uiCount * sizeof(plUInt32);
+    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource;
+    desc.m_ResourceAccess.m_bImmutable = false;
+    ref_hBuffer = pProgramDevice->CreateBuffer(desc);
+  };
+
+  CreateReadBuffer(m_hProgramWordBuffer, GPU_PROGRAM_MAX_WORDS);
+  CreateReadBuffer(m_hProgramDataBuffer, GPU_PROGRAM_MAX_DATA);
+  ref_info.m_hProgramWordBuffer = m_hProgramWordBuffer;
+  ref_info.m_hProgramDataBuffer = m_hProgramDataBuffer;
+
+  if (m_Programs.ReadsRandomSeed())
+  {
+    CreateReadBuffer(m_hSeedStagingBuffer, GPU_PARTICLE_MAX_EMIT_PER_FRAME);
+    ref_info.m_hSeedStagingBuffer = m_hSeedStagingBuffer;
+  }
+  ref_info.m_uiProgramCount = m_Programs.GetProgramCount();
+  ref_info.m_fProgramDragScale = m_fProgramDragScale;
+  ref_info.m_fProgramForceSign = m_fProgramForceSign;
+  ref_info.m_fProgramInfluenceScale = plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSceneForceParameter, 1.0f), 0.0f);
+  ref_info.m_hSeedBuffer = m_hSeedBuffer;
+
+  // a per-particle Gravity Factor scales the physics gravity itself
+  plVec3 vGravity = plVec3(0, 0, -10.0f);
+  if (auto pPhysics = static_cast<const plPhysicsWorldModuleInterface*>(GetOwnerSystem()->GetOwnerWorldModule()->GetCachedWorldModule(plGetStaticRTTI<plPhysicsWorldModuleInterface>())))
+  {
+    vGravity = pPhysics->GetGravity();
+  }
+  ref_info.m_vProgramGravity = vGravity;
+
+  // the editor's value spy: a float per slot, NaN until a particle lives there, read back four times a second
+  if (!m_Programs.HasSpy())
+    return;
+
+  plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
+  if (m_hSpyBuffer.IsInvalidated())
+  {
+    plGALBufferCreationDescription desc;
+    desc.m_uiStructSize = sizeof(float);
+    desc.m_uiTotalSize = m_uiMaxGPUParticles * sizeof(float);
+    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource | plGALBufferUsageFlags::UnorderedAccess;
+    desc.m_ResourceAccess.m_bImmutable = false;
+
+    plDynamicArray<float> nans;
+    nans.SetCount(m_uiMaxGPUParticles, plMath::NaN<float>());
+    m_hSpyBuffer = pDevice->CreateBuffer(desc, nans.GetArrayPtr().ToByteArray());
+  }
+
+  if (m_pSpyReadback == nullptr)
+    m_pSpyReadback = PL_DEFAULT_NEW(plGALReadbackBufferHelper);
+
+  const plTime tNow = plTime::Now();
+  const bool bRead = !m_bSpyReadbackPending && tNow - m_LastSpyReadback >= plTime::MakeFromMilliseconds(250);
+  if (bRead)
+  {
+    m_bSpyReadbackPending = true;
+    m_LastSpyReadback = tNow;
+  }
+
+  ref_info.m_hSpyBuffer = m_hSpyBuffer;
+  ref_info.m_pSpyReadback = m_pSpyReadback.Borrow();
+  ref_info.m_bReadSpy = bRead;
+  ref_info.m_fSpyMin = m_fSpyMin;
+  ref_info.m_fSpyMax = m_fSpyMax;
+}
+
+void plParticleTypeGPU::FillEventInfo(plGPUParticleSystemInfo& ref_info) const
+{
+  if (!RaisesEvents())
+    return;
+
+  // the older frames' events first, so a free readback is likely
+  ReceiveEvents();
+
+  if (m_hEventBuffer.IsInvalidated())
+  {
+    plGALBufferCreationDescription desc;
+    desc.m_uiTotalSize = GPU_PARTICLE_EVENT_BUFFER_SIZE;
+    desc.m_BufferFlags = plGALBufferUsageFlags::ByteAddressBuffer | plGALBufferUsageFlags::ShaderResource | plGALBufferUsageFlags::UnorderedAccess;
+    desc.m_ResourceAccess.m_bImmutable = false;
+
+    plDynamicArray<plUInt8> zeroData;
+    zeroData.SetCount(GPU_PARTICLE_EVENT_BUFFER_SIZE, 0);
+    m_hEventBuffer = plGALDevice::GetDefaultDevice()->CreateBuffer(desc, zeroData.GetArrayPtr());
+  }
+
+  ref_info.m_hEventBuffer = m_hEventBuffer;
+  ref_info.m_uiEventFlags = (m_DeathEvents.IsEmpty() ? 0u : GPU_PARTICLE_EVENT_DEATH) | (m_CollideEvents.IsEmpty() ? 0u : GPU_PARTICLE_EVENT_COLLIDE);
+
+  // this frame's copy; when the GPU is too far behind for a free readback, the frame's events are lost
+  for (EventReadback& readback : m_EventReadbacks)
+  {
+    if (readback.m_bRequested)
+      continue;
+
+    if (readback.m_pHelper == nullptr)
+      readback.m_pHelper = PL_DEFAULT_NEW(plGALReadbackBufferHelper);
+
+    readback.m_bRequested = true;
+    readback.m_uiRequestFrame = plRenderWorld::GetFrameCounter();
+    ref_info.m_pEventReadback = readback.m_pHelper.Borrow();
+    return;
+  }
+}
+
+void plParticleTypeGPU::ReceiveEvents() const
+{
+  const plUInt64 uiFrame = plRenderWorld::GetFrameCounter();
+
+  // the system raises them like its CPU modules do; this runs at extraction, outside the update tasks
+  plParticleSystemInstance* pSystem = const_cast<plParticleSystemInstance*>(GetOwnerSystem());
+
+  while (true)
+  {
+    // oldest first, so the effect gets them in the order they happened
+    EventReadback* pReadback = nullptr;
+    for (EventReadback& readback : m_EventReadbacks)
+    {
+      if (readback.m_bRequested && (pReadback == nullptr || readback.m_uiRequestFrame < pReadback->m_uiRequestFrame))
+        pReadback = &readback;
+    }
+
+    // the render thread records a frame's copy while the next frame updates, so give it two
+    if (pReadback == nullptr || uiFrame < pReadback->m_uiRequestFrame + 2)
+      return;
+
+    const plGALFenceHandle hFence = pReadback->m_pHelper->GetCurrentFence();
+    if (hFence == 0 || hFence == pReadback->m_hReceivedFence)
+    {
+      // not recorded: the system was not simulated that frame
+      if (uiFrame < pReadback->m_uiRequestFrame + 8)
+        return;
+
+      pReadback->m_bRequested = false;
+      continue;
+    }
+
+    if (pReadback->m_pHelper->GetReadbackResult(plTime::MakeZero()) != plGALAsyncResult::Ready)
+      return;
+
+    {
+      plArrayPtr<const plUInt8> memory;
+      plReadbackBufferLock lock = pReadback->m_pHelper->LockBuffer(memory);
+
+      if (lock && memory.GetCount() >= 16)
+      {
+        const plUInt32* pWords = reinterpret_cast<const plUInt32*>(memory.GetPtr());
+        const plUInt32 uiRaised = pWords[0];
+        const plUInt32 uiCapacity = plMath::Min<plUInt32>(GPU_PARTICLE_MAX_EVENTS, (memory.GetCount() - 16) / (GPU_PARTICLE_EVENT_WORDS * 4));
+        const plUInt32 uiStored = plMath::Min(uiRaised, uiCapacity);
+
+        for (plUInt32 i = 0; i < uiStored; ++i)
+        {
+          const plUInt32* pEntry = pWords + 4 + i * GPU_PARTICLE_EVENT_WORDS;
+          const float* f = reinterpret_cast<const float*>(pEntry);
+          const bool bCollide = pEntry[0] == GPU_PARTICLE_EVENT_COLLIDE;
+
+          plParticleEvent e;
+          e.m_vPosition.Set(f[1], f[2], f[3]);
+          e.m_vVelocity.Set(f[4], f[5], f[6]);
+          e.m_vNormal.Set(f[7], f[8], f[9]);
+          e.m_Color = plColor(f[10], f[11], f[12], f[13]);
+          e.m_fSize = f[14];
+
+          // as on the CPU: a collision's direction is where the particle was heading, a death's its velocity
+          e.m_vDirection = e.m_vVelocity;
+          if (bCollide)
+            e.m_vDirection.NormalizeIfNotZero(plVec3::MakeZero()).IgnoreResult();
+
+          for (const plTempHashedString& sEvent : bCollide ? m_CollideEvents : m_DeathEvents)
+          {
+            e.m_EventType = sEvent;
+            pSystem->RaiseEvent(e);
+          }
+        }
+
+        pSystem->CountDroppedEvents(uiRaised - uiStored);
+      }
+    }
+
+    pReadback->m_hReceivedFence = hFence;
+    pReadback->m_bRequested = false;
+    m_uiEventLatencyFrames = (plUInt32)(uiFrame - pReadback->m_uiRequestFrame);
+  }
+}
+
+void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, plUInt32 uiActiveSlotCount, plArrayPtr<plGPUParticle> newParticles, plArrayPtr<plUInt32> newSeeds) const
 {
   {
     plGPUParticleSystemInfo sysInfo;
@@ -762,6 +1195,8 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_uiMaxParticles = m_uiMaxGPUParticles;
     sysInfo.m_uiActiveSlotCount = uiActiveSlotCount;
     sysInfo.m_NewParticles = newParticles;
+    sysInfo.m_fDeltaTime = (float)m_PendingSimulationTime.GetSeconds();
+    sysInfo.m_fStretchDeltaTime = (float)m_LastStepDuration.GetSeconds();
 
     sysInfo.m_uiFeatureFlags = m_uiFeatureFlags;
 
@@ -822,7 +1257,7 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_fAttractorMinDist = m_fAttractorMinDist;
     sysInfo.m_uiAttractorShape = m_uiAttractorShape;
 
-    sysInfo.m_vPullAlong = m_vApplyPull;
+    sysInfo.m_vPullAlong = m_vPendingPull;
 
     sysInfo.m_vSphereCenter = instanceTransform * m_vSphereOffset;
     sysInfo.m_fSphereRadius = m_fSphereRadius;
@@ -854,6 +1289,7 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_hTrailDataBuffer = m_hTrailDataBuffer;
     sysInfo.m_hTrailPointsPackedBuffer = m_hTrailPointsPackedBuffer;
     sysInfo.m_hSortKeyBuffer = m_hSortKeyBuffer;
+    sysInfo.m_hSortArgsBuffer = m_hSortArgsBuffer;
     sysInfo.m_uiSortCount = plMath::PowerOfTwo_Ceil(m_uiMaxGPUParticles);
     // only blended modes need back-to-front ordering; additive and opaque are order independent
     sysInfo.m_bNeedsSorting = m_RenderMode == plParticleTypeRenderMode::Blended || m_RenderMode == plParticleTypeRenderMode::BlendedBackground || m_RenderMode == plParticleTypeRenderMode::BlendedForeground || m_RenderMode == plParticleTypeRenderMode::BlendAdd;
@@ -867,7 +1303,7 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_fFliesSpeed = m_fFliesSpeed;
     sysInfo.m_fFliesMaxEmitterDistance = m_fFliesMaxEmitterDistance;
     sysInfo.m_fFliesSteeringAngle = m_FliesMaxSteeringAngle.GetRadian();
-    sysInfo.m_bFliesChangeDirection = m_bFliesChangeDirThisFrame;
+    sysInfo.m_bFliesChangeDirection = m_bPendingFliesChangeDir;
     sysInfo.m_uiRandomSeed = (plUInt32)plRenderWorld::GetFrameCounter();
 
     if (m_bSceneForces)
@@ -875,6 +1311,10 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
       sysInfo.m_fForceFieldInfluence = m_fSceneForceInfluence * plMath::Max(GetOwnerEffect()->GetFloatParameter(m_sSceneForceParameter, 1.0f), 0.0f);
       sysInfo.m_ForceFields = GatherForceFields(instanceTransform);
     }
+
+    FillProgramInfo(sysInfo);
+    FillEventInfo(sysInfo);
+    sysInfo.m_NewParticleSeeds = newSeeds;
 
     plGPUParticleDataProvider::QueueSystem(sysInfo);
   }

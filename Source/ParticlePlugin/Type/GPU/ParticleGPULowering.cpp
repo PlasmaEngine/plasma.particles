@@ -1,6 +1,8 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
 #include <ParticlePlugin/Behavior/ParticleBehavior_AttractToPosition.h>
+#include <ParticlePlugin/Behavior/ParticleBehavior_Attribute.h>
+#include <ParticlePlugin/Behavior/ParticleBehavior_KillIf.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_Bounds.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_BoundsSphere.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_ColorGradient.h>
@@ -16,9 +18,12 @@
 #include <ParticlePlugin/Behavior/ParticleBehavior_VectorField.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_Velocity.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
+#include <ParticlePlugin/Initializer/ParticleInitializer_RandomSize.h>
+#include <ParticlePlugin/Initializer/ParticleInitializer_SetAttribute.h>
 #include <ParticlePlugin/System/ParticleSystemDescriptor.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 #include <ParticlePlugin/Type/GPU/ParticleGPULowering.h>
+#include <ParticlePlugin/Type/GPU/ParticleGPUProgram.h>
 #include <ParticlePlugin/Type/GPU/ParticleTypeGPU.h>
 #include <ParticlePlugin/Type/Point/ParticleTypePoint.h>
 #include <ParticlePlugin/Type/Quad/ParticleTypeQuad.h>
@@ -253,16 +258,25 @@ namespace
   // behind the particle-direction orientation has no GPU equivalent.
   plStringView CheckQuadTypeLowerable(const plParticleTypeQuadFactory* pQuad)
   {
-    PL_IGNORE_UNUSED(pQuad);
+    // the simulate kernel builds the quad tangents itself and has no Facing (Axis) per particle
+    if (pQuad->m_Orientation == plQuadParticleOrientation::Custom_Facing)
+      return "Custom Facing orientation";
+
     return {};
+  }
+
+  /// Sink targets the simulate kernel keeps no data for.
+  bool IsCPUOnlySinkTarget(plParticleSinkTarget::Enum target)
+  {
+    return target == plParticleSinkTarget::Rotation || target == plParticleSinkTarget::Facing || target == plParticleSinkTarget::SizeScale || target == plParticleSinkTarget::Emissive;
   }
 } // namespace
 
-plStringView plParticleGPULowering::FindLoweringBlocker(
+plString plParticleGPULowering::FindLoweringBlocker(
   const plParticleSystemDescriptor* pDescriptor, BlockerKind* out_pKind, plUInt32* out_uiIndex)
 {
   // A small helper so every early-out reports where the blocker was found.
-  auto blocked = [&](BlockerKind kind, plUInt32 uiIndex, plStringView sReason) -> plStringView
+  auto blocked = [&](BlockerKind kind, plUInt32 uiIndex, plStringView sReason) -> plString
   {
     if (out_pKind != nullptr)
       *out_pKind = kind;
@@ -294,6 +308,24 @@ plStringView plParticleGPULowering::FindLoweringBlocker(
     return blocked(BlockerKind::Type, 0, typeFactories[0]->GetDynamicRTTI()->GetTypeName());
   }
 
+  // ---- initializers: they run on the CPU at spawn, but the kernel only keeps the streams it knows ----
+  plUInt32 uiInitializerIndex = 0;
+  for (const plParticleInitializerFactory* pFactory : pDescriptor->GetInitializerFactories())
+  {
+    const plUInt32 uiIndex = uiInitializerIndex++;
+
+    if (const auto* pSize = plDynamicCast<const plParticleInitializerFactory_RandomSize*>(pFactory))
+    {
+      if (pSize->m_Mode == plParticleSizeMode::PerAxis)
+        return blocked(BlockerKind::Initializer, uiIndex, "Per-axis size");
+    }
+    else if (const auto* pSet = plDynamicCast<const plParticleInitializerFactory_SetAttribute*>(pFactory))
+    {
+      if (IsCPUOnlySinkTarget(pSet->m_Settings.m_Target))
+        return blocked(BlockerKind::Initializer, uiIndex, "Set Attribute writes Rotation, Facing, Size Per Axis or Emissive, which GPU systems do not keep");
+    }
+  }
+
   // ---- behaviors: every module needs a GPU equivalent, one instance of each kind ----
   plSet<const plRTTI*> seenKinds;
   plUInt32 uiBehaviorIndex = 0;
@@ -303,7 +335,9 @@ plStringView plParticleGPULowering::FindLoweringBlocker(
     const plRTTI* pRtti = pFactory->GetDynamicRTTI();
     const plUInt32 uiIndex = uiBehaviorIndex++;
 
-    if (seenKinds.Contains(pRtti) && pRtti != plGetStaticRTTI<plParticleBehaviorFactory_Gravity>())
+    // Set Attribute and Kill If are program records, any number of them up to the program limit
+    const bool bRecord = pRtti == plGetStaticRTTI<plParticleBehaviorFactory_Attribute>() || pRtti == plGetStaticRTTI<plParticleBehaviorFactory_KillIf>();
+    if (seenKinds.Contains(pRtti) && pRtti != plGetStaticRTTI<plParticleBehaviorFactory_Gravity>() && !bRecord)
       return blocked(BlockerKind::Behavior, uiIndex, "Duplicate behavior (the GPU runs one instance of each kind)");
     seenKinds.Insert(pRtti);
 
@@ -312,12 +346,18 @@ plStringView plParticleGPULowering::FindLoweringBlocker(
       if (pDrag->m_bSizeRelative)
         return blocked(BlockerKind::Behavior, uiIndex, "Size-relative drag");
     }
-    else if (const auto* pRaycast = plDynamicCast<const plParticleBehaviorFactory_Raycast*>(pFactory))
+    else if (const auto* pSizeCurve = plDynamicCast<const plParticleBehaviorFactory_SizeCurve*>(pFactory); pSizeCurve != nullptr && pSizeCurve->m_Mode == plParticleSizeMode::PerAxis)
     {
-      // the GPU approximates collision against the depth buffer and the scene SDF, which cannot
-      // raise a CPU-side event or honour a physics collision layer
-      if (!pRaycast->m_sOnCollideEvent.IsEmpty())
-        return blocked(BlockerKind::Behavior, uiIndex, "Raycast collision event");
+      return blocked(BlockerKind::Behavior, uiIndex, "Per-axis Size Curve");
+    }
+    else if (const auto* pAttribute = plDynamicCast<const plParticleBehaviorFactory_Attribute*>(pFactory); pAttribute != nullptr && IsCPUOnlySinkTarget(pAttribute->m_Settings.m_Target))
+    {
+      return blocked(BlockerKind::Behavior, uiIndex, "Set Attribute writes Rotation, Facing, Size Per Axis or Emissive, which GPU systems do not keep");
+    }
+    else if (plDynamicCast<const plParticleBehaviorFactory_Raycast*>(pFactory))
+    {
+      // the GPU approximates collision against the depth buffer and the scene SDF; it ignores the
+      // collision layer, and its collision events reach the CPU a few frames late
     }
     else if (plDynamicCast<const plParticleBehaviorFactory_Velocity*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_Gravity*>(pFactory) ||
              plDynamicCast<const plParticleBehaviorFactory_ColorGradient*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_SizeCurve*>(pFactory) ||
@@ -325,9 +365,10 @@ plStringView plParticleGPULowering::FindLoweringBlocker(
              plDynamicCast<const plParticleBehaviorFactory_VectorField*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_Bounds*>(pFactory) ||
              plDynamicCast<const plParticleBehaviorFactory_AttractToPosition*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_PullAlong*>(pFactory) ||
              plDynamicCast<const plParticleBehaviorFactory_BoundsSphere*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_SceneForces*>(pFactory) ||
-             plDynamicCast<const plParticleBehaviorFactory_Flies*>(pFactory))
+             plDynamicCast<const plParticleBehaviorFactory_Flies*>(pFactory) ||
+             plDynamicCast<const plParticleBehaviorFactory_Attribute*>(pFactory) || plDynamicCast<const plParticleBehaviorFactory_KillIf*>(pFactory))
     {
-      // lowerable
+      // lowerable; Set Attribute, Kill If and per-particle properties need their programs to fit the GPU (below)
     }
     else
     {
@@ -335,20 +376,43 @@ plStringView plParticleGPULowering::FindLoweringBlocker(
     }
   }
 
+  // ---- graph programs: they run in the simulate kernel when they fit its limits ----
+  const auto& behaviors = pDescriptor->GetBehaviorFactories();
+  plUInt32 uiProgramBlock = plInvalidIndex;
+  const plString sProgramReason = plParticleGPUProgramSet::FindBlocker(plArrayPtr<const plParticleBehaviorFactory* const>(behaviors.GetData(), behaviors.GetCount()), &uiProgramBlock);
+  if (!sProgramReason.IsEmpty())
+    return blocked(BlockerKind::Behavior, uiProgramBlock != plInvalidIndex ? uiProgramBlock : 0, sProgramReason);
+
   return {};
 }
 
 void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const plParticleSystemDescriptor* pDescriptor, plParticleSystemInstance* pOwner)
 {
+  const auto& behaviors = pDescriptor->GetBehaviorFactories();
+  const auto& types = pDescriptor->GetTypeFactories();
+
+  ConfigureLoweredType(pType, plArrayPtr<const plParticleBehaviorFactory* const>(behaviors.GetData(), behaviors.GetCount()),
+    plArrayPtr<const plParticleTypeFactory* const>(types.GetData(), types.GetCount()), pOwner);
+
+  // the kernel raises the deaths; the CPU copies' deaths raise nothing (plParticleFinalizer_Age)
+  plParticleSplitEventNames(pDescriptor->m_sOnDeathEvent, pType->m_DeathEvents);
+}
+
+void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, plArrayPtr<const plParticleBehaviorFactory* const> behaviors,
+  plArrayPtr<const plParticleTypeFactory* const> types, plParticleSystemInstance* pOwner)
+{
   plParticleEffectInstance* pEffect = pOwner->GetOwnerEffect();
 
   pType->m_bLowered = true;
   pType->m_uiFeatureFlags = 0;
+
+  // the per-frame program configures the type again whenever its values change; the death event comes
+  // from the system descriptor, which only the first configuration sees, so it is left as it is
   pType->m_uiMaxGPUParticles = plMath::Max<plUInt32>(32, (plUInt32)pOwner->GetMaxParticles());
   pType->m_fGravityFactor = 0.0f; // no Gravity behavior means no gravity
 
   // ---- render type ----
-  if (const auto* pQuad = plDynamicCast<const plParticleTypeQuadFactory*>(pDescriptor->GetTypeFactories()[0]))
+  if (const auto* pQuad = plDynamicCast<const plParticleTypeQuadFactory*>(types[0]))
   {
     // rendered through the normal quad renderer, so the whole quad feature set carries over
     pType->m_CPURenderPath = plParticleTypeGPU::CPURenderPath::Quad;
@@ -367,6 +431,7 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
     pType->m_fNormalCurvature = pQuad->m_fNormalCurvature;
     pType->m_fLightDirectionality = pQuad->m_fLightDirectionality;
     pType->m_fSixWayAbsorption = pQuad->m_fSixWayAbsorption;
+    pType->m_Look.Configure(pQuad->m_Look);
 
     // A GPU system can light once per particle in the scatter dispatch instead of at each of the
     // four quad corners, which is both cheaper and independent of overdraw. The render side then
@@ -402,7 +467,7 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
       pType->m_hCustomMaterial = plResourceManager::LoadResource<plMaterialResource>(pQuad->m_sCustomMaterial);
     }
   }
-  else if (const auto* pTrail = plDynamicCast<const plParticleTypeTrailFactory*>(pDescriptor->GetTypeFactories()[0]))
+  else if (const auto* pTrail = plDynamicCast<const plParticleTypeTrailFactory*>(types[0]))
   {
     // the trail renderer reads the same base data plus its point list, which the simulate
     // dispatch repacks out of the GPU trail ring
@@ -421,6 +486,7 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
     pType->m_LightingMode = pTrail->m_LightingMode;
     pType->m_fNormalCurvature = pTrail->m_fNormalCurvature;
     pType->m_fLightDirectionality = pTrail->m_fLightDirectionality;
+    pType->m_Look.Configure(pTrail->m_Look);
 
     if (!pTrail->m_sTexture.IsEmpty())
     {
@@ -447,8 +513,14 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
     pType->m_RenderMode = plParticleTypeRenderMode::Blended;
   }
 
+  // ---- graph programs; FindLoweringBlocker made sure they fit ----
+  pType->m_LoweredBehaviors = behaviors;
+  pType->m_Programs.Build(behaviors, nullptr, pType->GetSpyProgram());
+  pType->m_fProgramDragScale = 1.0f;
+  pType->m_fProgramForceSign = 1.0f;
+
   // ---- behaviors ----
-  for (const plParticleBehaviorFactory* pFactory : pDescriptor->GetBehaviorFactories())
+  for (const plParticleBehaviorFactory* pFactory : behaviors)
   {
     if (const auto* pGravity = plDynamicCast<const plParticleBehaviorFactory_Gravity*>(pFactory))
     {
@@ -471,6 +543,7 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
       // the collision layer has no equivalent and is ignored
       pType->m_bEnableDepthCollision = true;
       pType->m_bEnableSDFCollision = true;
+      plParticleSplitEventNames(pRaycast->m_sOnCollideEvent, pType->m_CollideEvents);
       pType->m_CollisionReaction = pRaycast->m_Reaction;
       pType->m_fCollisionBounceFactor = pRaycast->m_fBounceFactor;
       pType->m_fCollisionSlideFactor = pRaycast->m_fSlideFactor;
@@ -484,10 +557,12 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
       // same parameter fold as plParticleBehaviorFactory_Drag::CopyBehaviorProperties
       const float fDragScale = plMath::Max(pEffect->GetFloatParameter(plTempHashedString(pDrag->m_sDragParameter.GetData()), 1.0f), 0.0f);
       pType->m_fLinearDrag = pDrag->m_fDrag * fDragScale;
+      pType->m_fProgramDragScale = fDragScale;
     }
     else if (const auto* pGradient = plDynamicCast<const plParticleBehaviorFactory_ColorGradient*>(pFactory))
     {
-      pType->m_hGradientLUT = BakeGradientLUT(pGradient->m_hGradient, pGradient->m_TintColor);
+      // a per-particle tint multiplies the LUT in the kernel, so it is baked without one
+      pType->m_hGradientLUT = BakeGradientLUT(pGradient->m_hGradient, pType->m_Programs.HasTintProgram() ? plColor::White : pGradient->m_TintColor);
 
       if (pType->m_hGradientLUT.IsValid())
       {
@@ -588,6 +663,7 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, const
       pType->m_vAttractorPos = pAttractor->m_vCustomPosition;
       pType->m_vAttractorAxis = pAttractor->m_vAxis.GetNormalized();
       pType->m_fAttractorForce = pAttractor->m_bRepel ? -pAttractor->m_fForce : pAttractor->m_fForce;
+      pType->m_fProgramForceSign = pAttractor->m_bRepel ? -1.0f : 1.0f;
       pType->m_fAttractorMaxDist = pAttractor->m_fMaxDistance;
       pType->m_fAttractorMinDist = pAttractor->m_fMinDistance;
       pType->m_uiAttractorShape = (plUInt8)pAttractor->m_Shape.GetValue();

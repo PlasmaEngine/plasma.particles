@@ -3,6 +3,7 @@
 #include <Core/Interfaces/PhysicsWorldModule.h>
 #include <Core/World/World.h>
 #include <Foundation/DataProcessing/Stream/ProcessingStreamIterator.h>
+#include <Foundation/Math/Color16f.h>
 #include <Foundation/Math/Float16.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_Raycast.h>
@@ -24,7 +25,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBehaviorFactory_Raycast, 1, plRTTIDefa
     PL_MEMBER_PROPERTY("SlideFactor", m_fSlideFactor)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("SizeFactor", m_fSizeFactor)->AddAttributes(new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("CollisionLayer", m_uiCollisionLayer)->AddAttributes(new plDynamicEnumAttribute("PhysicsCollisionLayer")),
-    PL_MEMBER_PROPERTY("OnCollideEvent", m_sOnCollideEvent),
+    // set from the system's Raise on Collision blocks; the editor turns a value from before 1.6 into one
+    PL_MEMBER_PROPERTY("OnCollideEvent", m_sOnCollideEvent)->AddAttributes(new plHiddenAttribute()),
   }
   PL_END_PROPERTIES;
 }
@@ -52,7 +54,7 @@ void plParticleBehaviorFactory_Raycast::CopyBehaviorProperties(plParticleBehavio
 
   pBehavior->m_Reaction = m_Reaction;
   pBehavior->m_uiCollisionLayer = m_uiCollisionLayer;
-  pBehavior->m_sOnCollideEvent = plTempHashedString(m_sOnCollideEvent.GetData());
+  plParticleSplitEventNames(m_sOnCollideEvent, pBehavior->m_OnCollideEvents);
   pBehavior->m_fBounceFactor = m_fBounceFactor;
   pBehavior->m_fSlideFactor = m_fSlideFactor;
   pBehavior->m_fSizeFactor = m_fSizeFactor;
@@ -137,6 +139,7 @@ void plParticleBehavior_Raycast::CreateRequiredStreams()
 void plParticleBehavior_Raycast::QueryOptionalStreams()
 {
   m_pStreamSize = GetOwnerSystem()->QueryStream("Size", plProcessingStream::DataType::Half);
+  m_pStreamColor = GetOwnerSystem()->QueryStream("Color", plProcessingStream::DataType::Half4);
 }
 
 void plParticleBehavior_Raycast::Process(plUInt64 uiNumElements)
@@ -177,6 +180,7 @@ void plParticleBehavior_Raycast::Process(plUInt64 uiNumElements)
         if (m_pPhysicsModule != nullptr && m_pPhysicsModule->Raycast(hitResult, vLastPos, vDirection, fMaxLen + fSize, query))
         {
           hitResult.m_vPosition -= vDirection * fSize;
+          const plVec3 vHitVelocity = itVelocity.Current();
           const float fRemainingLen = (vCurPos - hitResult.m_vPosition).GetLength();
           const float fRemainder = fRemainingLen / fMaxLen;
 
@@ -209,15 +213,21 @@ void plParticleBehavior_Raycast::Process(plUInt64 uiNumElements)
             itVelocity.Current().SetZero();
           }
 
-          if (!m_sOnCollideEvent.IsEmpty())
+          if (!m_OnCollideEvents.IsEmpty())
           {
             plParticleEvent e;
-            e.m_EventType = m_sOnCollideEvent;
             e.m_vPosition = hitResult.m_vPosition;
             e.m_vNormal = hitResult.m_vNormal;
             e.m_vDirection = vDirection;
+            e.m_vVelocity = vHitVelocity;
+            e.m_Color = m_pStreamColor != nullptr ? m_pStreamColor->GetData<plColorLinear16f>()[i].ToLinearFloat() : plColor::White;
+            e.m_fSize = m_pStreamSize != nullptr ? (float)*pSize : 1.0f;
 
-            GetOwnerEffect()->AddParticleEvent(e);
+            for (const plTempHashedString& sEvent : m_OnCollideEvents)
+            {
+              e.m_EventType = sEvent;
+              GetOwnerSystem()->RaiseEvent(e);
+            }
           }
         }
 

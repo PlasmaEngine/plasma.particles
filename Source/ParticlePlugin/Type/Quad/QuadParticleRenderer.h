@@ -41,6 +41,7 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   plMaterialResourceHandle m_hCustomMaterial;
+  plParticleLookData m_Look;
 
   // GPU-simulated systems fill these buffers in the particle compute pass instead of handing over
   // CPU arrays; when the draw-args handle is valid the renderer binds them and draws indirectly

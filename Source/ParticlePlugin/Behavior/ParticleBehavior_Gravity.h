@@ -1,6 +1,7 @@
 #pragma once
 
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
+#include <ParticlePlugin/System/ParticleProgram.h>
 
 class plPhysicsWorldModuleInterface;
 
@@ -15,12 +16,16 @@ public:
   virtual void CopyBehaviorProperties(plParticleBehavior* pObject, bool bFirstTime) const override;
 
   virtual void QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const override;
+  virtual plParticleProgramData* GetParticleProgram() override { return &m_Program; }
 
   virtual void Save(plStreamWriter& inout_stream) const override;
   virtual void Load(plStreamReader& inout_stream) override;
 
 public:
   float m_fGravityFactor;
+
+  /// Per-particle wires into GravityFactor.
+  plParticleProgramData m_Program;
 };
 
 
@@ -43,4 +48,7 @@ protected:
   plPhysicsWorldModuleInterface* m_pPhysicsModule;
 
   plProcessingStream* m_pStreamVelocity;
+
+  const plParticleProgramData* m_pProgram = nullptr;
+  plParticleProgramRunner m_Runner;
 };
