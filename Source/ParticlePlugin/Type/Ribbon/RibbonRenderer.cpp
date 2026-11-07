@@ -21,7 +21,7 @@ bool plParticleRibbonRenderData::CanBatch(const plRenderData& other0) const
 {
   const auto& other = plStaticCast<const plParticleRibbonRenderData&>(other0);
 
-  return m_RenderMode == other.m_RenderMode && m_hTexture == other.m_hTexture && m_hCustomMaterial == other.m_hCustomMaterial;
+  return m_RenderMode == other.m_RenderMode && m_hTexture == other.m_hTexture && m_hCustomMaterial == other.m_hCustomMaterial && m_hDistortionTexture == other.m_hDistortionTexture;
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -76,6 +76,11 @@ void plParticleRibbonRenderer::RenderBatch(const plRenderViewContext& renderView
       }
 
       bindGroupMaterial.BindTexture("ParticleTexture", pRenderData->m_hTexture);
+
+      if (pRenderData->m_RenderMode == plParticleTypeRenderMode::Distortion)
+      {
+        bindGroupMaterial.BindTexture("ParticleDistortionTexture", pRenderData->m_hDistortionTexture);
+      }
     }
 
     ConfigureShader(pRenderData, renderViewContext);
@@ -123,16 +128,20 @@ void plParticleRibbonRenderer::ConfigureShader(const plParticleRibbonRenderData*
     case plParticleTypeRenderMode::BlendAdd:
       pRenderContext->SetShaderPermutationVariable("PARTICLE_RENDER_MODE", "PARTICLE_RENDER_MODE_BLENDADD");
       break;
+    case plParticleTypeRenderMode::Masked:
+      pRenderContext->SetShaderPermutationVariable("PARTICLE_RENDER_MODE", "PARTICLE_RENDER_MODE_MASKED");
+      break;
   }
 
-  switch (pRenderData->m_LightingMode)
+  // distortion writes screen offsets in its own pass, which binds no lights
+  // the ribbon shader has no six-way, per-pixel or surface path; every lit mode shades per vertex
+  if (pRenderData->m_RenderMode == plParticleTypeRenderMode::Distortion || pRenderData->m_LightingMode == plParticleLightingMode::Fullbright)
   {
-    case plParticleLightingMode::Fullbright:
-      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
-      break;
-    case plParticleLightingMode::VertexLit:
-      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");
-      break;
+    pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
+  }
+  else
+  {
+    pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");
   }
 }
 

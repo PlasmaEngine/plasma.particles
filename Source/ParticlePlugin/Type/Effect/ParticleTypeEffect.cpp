@@ -160,6 +160,10 @@ void plParticleTypeEffect::Process(plUInt64 uiNumElements)
 
   const plUInt64 uiRandomSeed = GetOwnerEffect()->GetRandomSeed();
 
+  // child effects live in world space; a local-space parent's particles are in its own frame
+  const bool bLocalParent = GetOwnerEffect()->NeedsToApplyTransform();
+  const plTransform& parentTransform = GetOwnerEffect()->GetTransform();
+
   for (plUInt32 i = 0; i < uiNumElements; ++i)
   {
     if (pEffectID[i] == 0) // always an invalid ID
@@ -183,10 +187,12 @@ void plParticleTypeEffect::Process(plUInt64 uiNumElements)
       plTransform t;
       t.m_qRotation.SetIdentity();
       t.m_vScale.Set(1.0f);
-      t.m_vPosition = pPosition[i].GetAsVec3();
+      t.m_vPosition = bLocalParent ? parentTransform.TransformPosition(pPosition[i].GetAsVec3()) : pPosition[i].GetAsVec3();
 
       // the sub-effect's own 'ApplyOwnerVelocity' factor decides how much of this it inherits
-      const plVec3 vInheritedVelocity = pVelocity ? pVelocity[i] : plVec3::MakeZero();
+      plVec3 vInheritedVelocity = pVelocity ? pVelocity[i] : plVec3::MakeZero();
+      if (bLocalParent)
+        vInheritedVelocity = parentTransform.TransformDirection(vInheritedVelocity);
 
       pEffect->SetVisibleIf(GetOwnerEffect());
       pEffect->SetTransformForNextFrame(t, vInheritedVelocity);

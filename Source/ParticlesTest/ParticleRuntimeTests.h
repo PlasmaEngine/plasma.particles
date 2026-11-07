@@ -50,6 +50,14 @@ private:
     GPULoweringNewFeatures,
     DistortionPipeline,
 
+    // artist requests round 2 (1.10.0, ParticleRound2Tests.cpp)
+    ParticleDirAtRest,
+    VelocityConeAxisRotated,
+    EmitterDirAtSpawn,
+    LocalSpaceAttractor,
+    GPUSpawnAxis,
+    Round2Serialization,
+
     // P7 measurements: they always pass and append their numbers to the file PL_PARTICLES_BENCH names
     BenchMassDeaths,
     BenchRaycast,
@@ -89,6 +97,14 @@ private:
   void CheckLookSettings();
   void CheckGPULoweringNewFeatures();
   void CheckDistortionPipeline();
+
+  // artist requests round 2 (ParticleRound2Tests.cpp)
+  void SetupRound2Test(plInt32 iIdentifier, plParticleEffectDescriptor& ref_desc);
+  void PlaceRound2Owner(plInt32 iIdentifier);
+  void SetEffectOwnerTransform(const plTransform& transform);
+  plTestAppRun RunRound2Test(plInt32 iIdentifier);
+  void CheckRound2Serialization();
+  plDynamicArray<plVec3> m_Round2Axes;
 
   // performance (P7, ParticleRuntimeBenchmarks.cpp)
   void SetupBenchmark(plInt32 iIdentifier, plParticleEffectDescriptor& ref_desc);

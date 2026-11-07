@@ -34,6 +34,7 @@ public:
   float m_fSixWayAbsorption = 1.0f;
   plTexture2DResourceHandle m_hNormalMap;
   float m_fNormalMapStrength = 0.0f;
+  plTexture2DResourceHandle m_hOrmMap; ///< Surface lighting
   plTempHashedString m_QuadModePermutation;
 
   plEnum<plParticleTypeRenderMode> m_RenderMode;

@@ -46,6 +46,8 @@ public:
   float m_fLightDirectionality = 0.5f;
   bool m_bUseCustomMaterial = false;
   plString m_sCustomMaterial;
+  plString m_sDistortionTexture;
+  float m_fDistortionStrength = 100.0f;
   plParticleLookSettings m_Look;
 };
 
@@ -71,10 +73,13 @@ public:
   float m_fNormalCurvature = 0.5f;
   float m_fLightDirectionality = 0.5f;
   plMaterialResourceHandle m_hCustomMaterial;
+  plTexture2DResourceHandle m_hDistortionTexture;
+  float m_fDistortionStrength = 100.0f;
   plParticleLook m_Look;
 
   virtual void CreateRequiredStreams() override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
+  virtual bool CastsShadows() const override { return m_Look.m_bCastShadows && plParticleIsOpaqueRenderMode(m_RenderMode); }
 
 protected:
   friend class plParticleTypeRibbonFactory;

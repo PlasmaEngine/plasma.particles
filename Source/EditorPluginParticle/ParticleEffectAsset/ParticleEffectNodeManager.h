@@ -22,9 +22,13 @@ public:
   /// until something edited a context. Connections survive the rebuild.
   void RecreateAllSystemPins();
 
-  /// Names the creation menu entries without the redundant type-name decoration: inside the
-  /// particle graph, "plParticleMathNode" only usefully reads as "Math".
+  /// The node palette: one entry per operation ("Add", "Sin", "Split Vector"), grouped as Vector & Colour, Maths,
+  /// Functions, Logic, Random, Noise, Curves, Particle, Effect & Camera and Code. The typed vector nodes that the
+  /// adaptive maths replaced still load but are not offered.
   virtual void GetNodeCreationTemplates(plDynamicArray<plVisualGraphNodeDesc>& out_templates) const override;
+
+  /// "Number", "Vector", "Colour" and so on for value pins, as the palette shows them.
+  virtual plString GetPinTypeName(const plVisualGraphPin& pin) const override;
 
   /// Strips the plParticle prefix and the Node/Factory decoration from a type name.
   static plString FriendlyTypeName(const plRTTI* pType);
@@ -45,8 +49,12 @@ private:
   /// in Initialize or Update, or an operator whose results only reach such properties.
   plStatus CheckParticleTarget(const plVisualGraphPin& targetPin) const;
 
+  /// Whether an adaptive node may start producing newKind: everything its outputs feed has to take it, and an
+  /// adaptive node downstream widens in turn.
+  plStatus CheckWidening(const plDocumentObject* pNode, plParticleValueKind::Enum newKind, class plParticleGraphCompiler& ref_compiler, plSet<const plDocumentObject*>& ref_visited) const;
+
   /// Back the plStringViews and property values handed out in the creation templates, which do not own
   /// them. Deques, so adding an entry never moves the ones handed out before.
   mutable plDeque<plString> m_CreationNames;
-  mutable plDeque<plVisualGraphNodeProperty> m_CreationProperties;
+  mutable plDeque<plHybridArray<plVisualGraphNodeProperty, 4>> m_CreationProperties;
 };

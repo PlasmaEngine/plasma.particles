@@ -3,6 +3,7 @@
 #include <EditorPluginParticle/EditorPluginParticleDLL.h>
 #include <Foundation/Reflection/Reflection.h>
 #include <Foundation/Types/VarianceTypes.h>
+#include <GuiFoundation/Widgets/CurveEditData.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior.h>
 #include <ParticlePlugin/Declarations.h>
 #include <ParticlePlugin/Emitter/ParticleEmitter.h>
@@ -233,6 +234,7 @@ struct plParticleMathOp
     Divide,
     Min,
     Max,
+    Modulo, ///< the remainder of A / B, with the sign of A
 
     Default = Multiply
   };
@@ -257,7 +259,10 @@ struct plParticleCompareOp
 };
 PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleCompareOp);
 
-/// Combines two numbers. Either input can be wired or left as the literal on the node.
+/// Combines two values. Either input can be wired or left as the literal on the node.
+///
+/// Like every adaptive operator it computes in the widest kind wired into it: numbers, vectors or colours, with a
+/// number applied to every component of the others.
 class plParticleMathNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleMathNode, plReflectedClass);
@@ -279,7 +284,7 @@ public:
   double m_fB = 0.0;
 };
 
-/// Picks one of two numbers. This is the If behavior's job, done in the graph instead of per particle.
+/// Picks one of two values. This is the If behavior's job, done in the graph instead of per particle.
 class plParticleBranchNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleBranchNode, plReflectedClass);
@@ -371,6 +376,11 @@ struct plParticleSystemVector
     EffectUp,       ///< the effect's +Z
     EffectVelocity, ///< the owner's velocity
     CameraPosition, ///< the main camera
+    EffectRight,    ///< the effect's +Y
+    EffectScale,    ///< the effect's scale per axis
+    CameraForward,  ///< the main camera's view direction
+    CameraRight,
+    CameraUp,
 
     Default = EffectPosition
   };
@@ -411,8 +421,8 @@ struct plParticleFunctionOp
 
   enum Enum
   {
-    Sine,   ///< of radians
-    Cosine, ///< of radians
+    Sine,   ///< of degrees
+    Cosine, ///< of degrees
     Abs,
     Floor,
     Ceil,
@@ -421,13 +431,30 @@ struct plParticleFunctionOp
     Saturate, ///< clamp to 0..1
     Negate,
     OneMinus,
+    Tan,  ///< of degrees
+    ASin, ///< in degrees
+    ACos, ///< in degrees
+    ATan, ///< in degrees
+    Exp,
+    Log, ///< natural logarithm
+    Log2,
+    Round,
+    Trunc,
+    Sign,
+    Reciprocal, ///< 1 / x, and 0 for 0
+    Square,
+    DegreesToRadians,
+    RadiansToDegrees,
 
     Default = Sine
   };
+
+  /// The ops whose input (Sin, Cos, Tan) or result (ASin, ACos, ATan) is an angle.
+  static bool IsTrigonometric(plInt64 iOperation);
 };
 PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleFunctionOp);
 
-/// One number in, one number out.
+/// One value in, one value out, per component for vectors and colours.
 class plParticleFunctionNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleFunctionNode, plReflectedClass);
@@ -435,9 +462,13 @@ class plParticleFunctionNode : public plReflectedClass
 public:
   plEnum<plParticleFunctionOp> m_Operation;
   double m_fValue = 0.0;
+
+  /// The angles of the trigonometric ops are radians instead of degrees. Nodes of type version 1 load with it set.
+  bool m_bRadians = false;
 };
 
-/// Maps a number from one range to another, by default clamped to the target range.
+/// Maps a value from one range to another, by default clamped to the target range. Every range end is a pin; an
+/// unwired one uses the typed value.
 class plParticleRemapNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleRemapNode, plReflectedClass);
@@ -462,7 +493,7 @@ public:
   double m_fT = 0.5;
 };
 
-/// Keeps a number between Min and Max.
+/// Keeps a value between Min and Max.
 class plParticleClampNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleClampNode, plReflectedClass);
@@ -581,7 +612,9 @@ public:
 
 /// A formula as text, of up to four numbers A to D, such as "a * (1 + 0.5 * sin(b * 12.57))".
 ///
-/// The code compiles into the same program as the rest of the graph; variables are a, b, c and d.
+/// The code compiles into the same program as the rest of the graph; variables are a, b, c and d. Besides the
+/// expression VM's functions it can call random(seed), noise(x, y, z[, octaves]), curve(t) (the node's Curve),
+/// step(edge, x), sign(x) and atan2(y, x), and read pi and tau. Its angles are radians, as in most code.
 class plParticleExpressionNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleExpressionNode, plReflectedClass);
@@ -592,6 +625,7 @@ public:
   double m_fB = 0.0;
   double m_fC = 0.0;
   double m_fD = 0.0;
+  plString m_sCurve; ///< what curve(t) samples
 };
 
 /// The dot product of two vectors.
@@ -627,6 +661,7 @@ public:
 
 /// The colour of a gradient asset at T, from 0 at the gradient's start to 1 at its end. Evaluated
 /// while the effect runs (per frame at least), because the gradient is only known to the runtime.
+/// A Gradient node wired into its Gradient pin replaces the one picked on the node.
 class plParticleSampleGradientNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleSampleGradientNode, plReflectedClass);
@@ -636,8 +671,9 @@ public:
   double m_fT = 0.0;
 };
 
-/// The value of a curve asset at T, from 0 at the curve's start to 1 at its end. Evaluated while
-/// the effect runs, like Sample Gradient.
+/// The value of a curve asset at T, from 0 at the curve's start to 1 at its end, as the curve stores it.
+/// Evaluated while the effect runs, like Sample Gradient. A Curve node wired into its Curve pin replaces the one
+/// picked on the node.
 class plParticleSampleCurveNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleSampleCurveNode, plReflectedClass);
@@ -647,7 +683,8 @@ public:
   double m_fT = 0.0;
 };
 
-/// Smooth 3D noise in 0..1 at Position x Frequency, summed over Octaves of rising frequency.
+/// Smooth 3D noise in 0..1 at Position x Frequency, summed over Octaves of rising frequency. Octaves takes constant and
+/// per-frame values only.
 class plParticleNoiseNode : public plReflectedClass
 {
   PL_ADD_DYNAMIC_REFLECTION(plParticleNoiseNode, plReflectedClass);
@@ -671,6 +708,7 @@ struct plParticleInputValue
     Lifetime,      ///< seconds; the system's lifetime in Initialize, where a particle's own is not set yet
     Size,
     RotationSpeed, ///< radians per second
+    RemainingLife, ///< seconds until it dies: lifetime minus age; the system's lifetime in Initialize
 
     Default = Speed
   };
@@ -815,6 +853,413 @@ public:
   plColor m_Default = plColor::White;
 };
 
+//////////////////////////////////////////////////////////////////////////
+// Vector and colour
+
+/// A vector's three components, each on its own output.
+class plParticleSplitVectorNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleSplitVectorNode, plReflectedClass);
+
+public:
+  plVec3 m_vVector = plVec3::MakeZero();
+};
+
+/// A colour's four channels, each on its own output.
+class plParticleSplitColorNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleSplitColorNode, plReflectedClass);
+
+public:
+  plColor m_Colour = plColor::White;
+};
+
+/// A colour from four numbers; an unwired channel uses the typed value.
+class plParticleMakeColorNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleMakeColorNode, plReflectedClass);
+
+public:
+  double m_fR = 1.0;
+  double m_fG = 1.0;
+  double m_fB = 1.0;
+  double m_fA = 1.0;
+};
+
+/// A vector with its components reordered or repeated by a pattern of three of x, y and z, such as "zyx" or "xxz".
+class plParticleSwizzleNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleSwizzleNode, plReflectedClass);
+
+public:
+  plString m_sPattern = "xyz";
+  plVec3 m_vVector = plVec3::MakeZero();
+
+  /// The components the pattern picks (0 to 2); false when it is not three of x, y, z (or r, g, b).
+  static bool ParsePattern(plStringView sPattern, plUInt32* out_pComponents);
+};
+
+/// The distance between two points.
+class plParticleDistanceNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleDistanceNode, plReflectedClass);
+
+public:
+  plVec3 m_vA = plVec3::MakeZero();
+  plVec3 m_vB = plVec3::MakeZero();
+};
+
+/// The cross product of two vectors.
+class plParticleCrossNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleCrossNode, plReflectedClass);
+
+public:
+  plVec3 m_vA = plVec3(1, 0, 0);
+  plVec3 m_vB = plVec3(0, 1, 0);
+};
+
+/// A direction mirrored about a normal.
+class plParticleReflectNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleReflectNode, plReflectedClass);
+
+public:
+  plVec3 m_vDirection = plVec3(0, 0, -1);
+  plVec3 m_vNormal = plVec3(0, 0, 1);
+};
+
+/// The part of a vector along another one.
+class plParticleProjectNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleProjectNode, plReflectedClass);
+
+public:
+  plVec3 m_vVector = plVec3(1, 0, 0);
+  plVec3 m_vOnto = plVec3(0, 0, 1);
+};
+
+/// A vector rotated about an axis by an angle in degrees, right-handed.
+class plParticleRotateAboutAxisNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleRotateAboutAxisNode, plReflectedClass);
+
+public:
+  plVec3 m_vVector = plVec3(1, 0, 0);
+  plVec3 m_vAxis = plVec3(0, 0, 1);
+  double m_fDegrees = 90.0;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Maths
+
+/// Base raised to Exponent, per component.
+class plParticlePowerNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticlePowerNode, plReflectedClass);
+
+public:
+  double m_fBase = 1.0;
+  double m_fExponent = 2.0;
+};
+
+/// 0 below Edge, 1 at or above it, per component.
+class plParticleStepNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleStepNode, plReflectedClass);
+
+public:
+  double m_fEdge = 0.5;
+  double m_fX = 0.0;
+};
+
+/// A smooth 0-to-1 ramp of X between Edge 0 and Edge 1, per component; Smoother flattens its ends further.
+class plParticleSmoothStepNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleSmoothStepNode, plReflectedClass);
+
+public:
+  double m_fEdge0 = 0.0;
+  double m_fEdge1 = 1.0;
+  double m_fX = 0.0;
+  bool m_bSmoother = false;
+};
+
+/// Where Value sits between A and B: 0 at A, 1 at B.
+class plParticleInverseLerpNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleInverseLerpNode, plReflectedClass);
+
+public:
+  double m_fA = 0.0;
+  double m_fB = 1.0;
+  double m_fValue = 0.5;
+  bool m_bClamp = true;
+};
+
+/// The angle of (X, Y) from the X axis, in degrees, -180..180.
+class plParticleATan2Node : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleATan2Node, plReflectedClass);
+
+public:
+  double m_fY = 0.0;
+  double m_fX = 1.0;
+};
+
+/// The constants a Math Constant node gives.
+struct plParticleMathConstant
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Pi,
+    Tau, ///< 2 pi
+    E,   ///< Euler's number
+
+    Default = Pi
+  };
+
+  static double GetValue(plInt64 iConstant);
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleMathConstant);
+
+class plParticleMathConstantNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleMathConstantNode, plReflectedClass);
+
+public:
+  plEnum<plParticleMathConstant> m_Constant;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Logic
+
+struct plParticleLogicOp
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    And,
+    Or,
+    Xor, ///< one of the two, not both
+
+    Default = And
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleLogicOp);
+
+/// Combines two conditions.
+class plParticleLogicNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleLogicNode, plReflectedClass);
+
+public:
+  plEnum<plParticleLogicOp> m_Operation;
+  bool m_bA = true;
+  bool m_bB = true;
+};
+
+/// The opposite of a condition.
+class plParticleNotNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleNotNode, plReflectedClass);
+
+public:
+  bool m_bValue = false;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Random and noise
+
+/// A random value between Min and Max that stays the same for a particle all its life; vectors and colours get their
+/// own random value per component.
+class plParticleRandomRangeNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleRandomRangeNode, plReflectedClass);
+
+public:
+  plInt32 m_iSeed = 0;
+  double m_fMin = 0.0;
+  double m_fMax = 1.0;
+};
+
+/// A random whole number from Min to Max, both included, the same for a particle all its life.
+class plParticleRandomIntegerNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleRandomIntegerNode, plReflectedClass);
+
+public:
+  plInt32 m_iSeed = 0;
+  plInt32 m_iMin = 0;
+  plInt32 m_iMax = 9;
+};
+
+struct plParticleRandomVectorShape
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    InSphere,
+    OnSphere,
+    InBox,  ///< -Radius to +Radius on every axis
+    InCone, ///< a direction at most Cone Angle off +Z, Radius long
+
+    Default = InSphere
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleRandomVectorShape);
+
+/// A random vector in or on a shape, the same for a particle all its life.
+class plParticleRandomVectorNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleRandomVectorNode, plReflectedClass);
+
+public:
+  plEnum<plParticleRandomVectorShape> m_Shape;
+  plInt32 m_iSeed = 0;
+  double m_fRadius = 1.0;
+  double m_fConeAngle = 30.0; ///< degrees
+};
+
+/// Three independent channels of smooth noise at Position x Frequency, each -1..1, for jitter and wobble.
+class plParticleVectorNoiseNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleVectorNoiseNode, plReflectedClass);
+
+public:
+  plVec3 m_vPosition = plVec3::MakeZero();
+  double m_fFrequency = 1.0;
+  plUInt32 m_uiOctaves = 1;
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Effect and camera
+
+struct plParticleTransformSpace
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    LocalToWorld, ///< from the effect's own frame into simulation space
+    WorldToLocal,
+
+    Default = LocalToWorld
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleTransformSpace);
+
+struct plParticleTransformKind
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Position,  ///< moved, rotated and scaled
+    Direction, ///< rotated only
+
+    Default = Position
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleTransformKind);
+
+/// A position or direction moved between the effect's local frame and simulation space, with the effect transform of
+/// the current step.
+class plParticleTransformNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleTransformNode, plReflectedClass);
+
+public:
+  plEnum<plParticleTransformSpace> m_Space;
+  plEnum<plParticleTransformKind> m_Kind;
+  plVec3 m_vVector = plVec3::MakeZero();
+};
+
+//////////////////////////////////////////////////////////////////////////
+// Curves over life
+
+/// What the T of a Curve Over Life or Gradient Over Life node is, when its T pin is unwired.
+struct plParticleCurveInput
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    NormalizedAge, ///< 0 at birth, 1 at death
+    Age,           ///< seconds since birth / Input Max
+    Speed,         ///< speed / Input Max
+
+    Default = NormalizedAge
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleCurveInput);
+
+/// The palette presets of Curve Over Life. A preset node gets its curve and a Set Attribute block once it is added, and
+/// the property goes back to None.
+struct plParticleCurvePreset
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    None,
+    SizeOverLife,
+    OpacityOverLife,
+    EmissiveOverLife,
+
+    Default = None
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_EDITORPLUGINPARTICLE_DLL, plParticleCurvePreset);
+
+/// A curve over a particle's life, mapped into Output Min..Max.
+///
+/// The curve is drawn from 0 to 1 in both directions and stored in the effect; with no keys it is a straight line from
+/// 0 to 1. A Curve asset replaces it, its values mapped to 0..1 the way Size Curve maps them. The T pin, when wired,
+/// replaces the Input choice.
+class plParticleCurveOverLifeNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleCurveOverLifeNode, plReflectedClass);
+
+public:
+  plEnum<plParticleCurveInput> m_Input;
+  double m_fInputMax = 1.0; ///< seconds for Age, metres per second for Speed: the T of 1
+  plSingleCurveData m_Curve;
+  plString m_sCurve;
+  double m_fOutputMin = 0.0;
+  double m_fOutputMax = 1.0;
+  plEnum<plParticleCurvePreset> m_Preset;
+};
+
+/// One stop of an inline gradient: a colour (HDR, with alpha) at a position from 0 to 1.
+class plParticleGradientStop : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleGradientStop, plReflectedClass);
+
+public:
+  float m_fPosition = 0.0f;
+  plColor m_Color = plColor::White;
+};
+
+/// A colour gradient over a particle's life.
+///
+/// The stops are stored in the effect and blend linearly; with none the gradient is white. A Gradient asset replaces
+/// them. The T pin, when wired, replaces the Input choice.
+class plParticleGradientOverLifeNode : public plReflectedClass
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleGradientOverLifeNode, plReflectedClass);
+
+public:
+  plEnum<plParticleCurveInput> m_Input;
+  double m_fInputMax = 1.0;
+  plDynamicArray<plParticleGradientStop> m_Stops;
+  plString m_sGradient;
+};
+
 /// What an operator node produces, and what a block property expects. A wire is only allowed when
 /// the two agree, so a texture cannot be dropped into a numeric port.
 struct plParticleValueKind
@@ -831,17 +1276,33 @@ struct plParticleValueKind
     Curve,
     OtherAsset, ///< material, mesh, effect: wireable but with no operator yet
     Text,
+    Adaptive, ///< an operator input that takes a number, vector or colour; the node computes in the widest one wired
   };
 
   /// The kind a property accepts, or None when it must stay constant (enums, flags, structs).
   static Enum FromProperty(const plAbstractProperty* pProp);
 
-  /// The kind an operator node produces, plus the property holding its value. The property is
-  /// empty for computed nodes, whose value comes from evaluating their inputs.
+  /// The kind an operator node produces with nothing wired, plus the property holding its value. The property is
+  /// empty for computed nodes, whose value comes from evaluating their inputs. Adaptive nodes give Number here;
+  /// plParticleGraphCompiler::GetOutputKind gives what they produce with their wires.
   static Enum FromNode(const plRTTI* pNodeType, plStringView& out_sValueProperty);
 
   /// The kind one of an operator node's input pins accepts, or None if there is no such pin.
   static Enum FromNodeInput(const plRTTI* pNodeType, plStringView sPinName);
+
+  /// True for operator nodes whose Adaptive inputs decide what they produce.
+  static bool IsAdaptiveNode(const plRTTI* pNodeType);
+
+  /// Whether a value of one kind can feed an input of another: the same kind, numbers and bools both ways,
+  /// vectors and colours both ways (a vector becomes a colour with A = 1, a colour a vector without its A), and
+  /// numbers, bools, vectors and colours into an Adaptive input.
+  static bool CanConvert(Enum source, Enum target);
+
+  /// The wider of two kinds an adaptive node meets: Number (and Bool) < Vector < Color.
+  static Enum Widen(Enum a, Enum b);
+
+  /// "number", "vector", "colour" and so on, for messages.
+  static const char* GetName(Enum kind);
 };
 
 /// The input pins an operator node offers, and the literal used when one is left unwired.
@@ -852,9 +1313,29 @@ struct plParticleOperatorInputs
     const char* m_szPin;
     const char* m_szLiteral; ///< property holding the value used when the pin is unconnected
     plParticleValueKind::Enum m_Kind;
+    bool m_bUniform = false; ///< takes constant and per-frame values only, never per-particle ones
   };
 
   static plArrayPtr<const Input> Get(const plRTTI* pNodeType);
+
+  /// The input of a node by pin name, or null.
+  static const Input* Find(const plRTTI* pNodeType, plStringView sPinName);
+};
+
+/// The output pins an operator node offers. Most have one, "Value"; Split Vector and Split Colour have one per
+/// component.
+struct plParticleOperatorOutputs
+{
+  struct Output
+  {
+    const char* m_szPin;
+    plParticleValueKind::Enum m_Kind; ///< None: the node's own kind (plParticleValueKind::FromNode)
+  };
+
+  static plArrayPtr<const Output> Get(const plRTTI* pNodeType);
+
+  /// The index of an output pin by name; 0 for a name the node does not have.
+  static plUInt32 FindIndex(const plRTTI* pNodeType, plStringView sPinName);
 };
 
 /// Encodes and decodes the pin name identifying one property of one block.

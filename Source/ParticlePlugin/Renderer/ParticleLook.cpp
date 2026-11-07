@@ -5,7 +5,7 @@
 
 void plParticleLookSettings::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 1;
+  const plUInt8 uiVersion = 2;
   inout_stream << uiVersion;
 
   inout_stream << m_sEmissiveMap;
@@ -14,13 +14,17 @@ void plParticleLookSettings::Save(plStreamWriter& inout_stream) const
   inout_stream << m_sEmissiveColorParameter;
   inout_stream << m_fSoftEdgeDistance;
   inout_stream << m_fCameraFadeDistance;
+
+  // version 2
+  inout_stream << m_fAlphaCutoff;
+  inout_stream << m_bCastShadows;
 }
 
 void plParticleLookSettings::Load(plStreamReader& inout_stream)
 {
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
-  PL_ASSERT_DEV(uiVersion == 1, "Invalid particle look version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion >= 1 && uiVersion <= 2, "Invalid particle look version {0}", uiVersion);
 
   inout_stream >> m_sEmissiveMap;
   inout_stream >> m_EmissiveColor;
@@ -28,6 +32,14 @@ void plParticleLookSettings::Load(plStreamReader& inout_stream)
   inout_stream >> m_sEmissiveColorParameter;
   inout_stream >> m_fSoftEdgeDistance;
   inout_stream >> m_fCameraFadeDistance;
+
+  m_fAlphaCutoff = 0.5f;
+  m_bCastShadows = false;
+  if (uiVersion >= 2)
+  {
+    inout_stream >> m_fAlphaCutoff;
+    inout_stream >> m_bCastShadows;
+  }
 }
 
 void plParticleLook::Configure(const plParticleLookSettings& settings)
@@ -41,6 +53,8 @@ void plParticleLook::Configure(const plParticleLookSettings& settings)
   m_sEmissiveColorParameter = plTempHashedString(settings.m_sEmissiveColorParameter.GetData());
   m_fSoftEdgeDistance = settings.m_fSoftEdgeDistance;
   m_fCameraFadeDistance = settings.m_fCameraFadeDistance;
+  m_fAlphaCutoff = plMath::Clamp(settings.m_fAlphaCutoff, 0.01f, 0.99f);
+  m_bCastShadows = settings.m_bCastShadows;
 }
 
 plParticleLookData plParticleLook::GetRenderData(const plParticleEffectInstance* pEffect, bool bPerParticleEmissive) const
@@ -49,6 +63,7 @@ plParticleLookData plParticleLook::GetRenderData(const plParticleEffectInstance*
   data.m_hEmissiveMap = m_hEmissiveMap;
   data.m_fSoftEdgeDistance = m_fSoftEdgeDistance;
   data.m_fCameraFadeDistance = m_fCameraFadeDistance;
+  data.m_fAlphaCutoff = m_fAlphaCutoff;
   data.m_bPerParticleEmissive = bPerParticleEmissive && m_hEmissiveMap.IsValid();
 
   if (m_hEmissiveMap.IsValid())

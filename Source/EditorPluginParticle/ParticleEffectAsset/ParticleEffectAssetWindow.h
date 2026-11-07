@@ -40,6 +40,4 @@ private:
   plOrbitCamViewWidget* m_pViewWidget;
 
   bool m_bDoLiveResourceUpdate = true;
-
-  plEngineViewLightSettings m_LightSettings;
 };

@@ -11,6 +11,7 @@
 #include <functional>
 
 struct plDocumentObjectStructureEvent;
+struct plDocumentObjectPropertyEvent;
 struct plSelectionManagerEvent;
 struct plParticleEffectAssetEvent;
 
@@ -42,6 +43,10 @@ public:
   void ExtendNodeMenu(const plDocumentObject* pNode, plVisualGraphMenu& ref_menu) override;
   void ExtendBackgroundMenu(const plVec2& vGraphPosition, plVisualGraphMenu& ref_menu) override;
   bool OnKey(const plEditorUiKeyEvent& e) override;
+
+  /// A wire dropped on the palette connects the new node itself, so the Over Life presets, which add and wire their
+  /// own Set Attribute, are only offered without one.
+  void GetNodeTemplates(plDynamicArray<plVisualGraphNodeDesc>& out_templates, plDeque<plVisualGraphNodeProperty>& ref_storage, const plVisualGraphPin* pFromPin = nullptr) const override;
 
   void LayoutCustomNode(const plDocumentObject* pNode, plVec2& out_vSize, plDynamicArray<plVisualGraphPinPlacement>& out_pins) const override;
   void BuildCustomNode(const plDocumentObject* pNode, plUiElement* pNodePanel, plStringView sNamePrefix) const override;
@@ -131,9 +136,19 @@ private:
 
     // operators
     plDynamicArray<ValueRowLayout> m_Rows;
-    plString m_sIssue; ///< why the node produces no value; shown under its header
+    plHybridArray<plString, 4> m_OutputLabels; ///< nodes with several outputs: one row each, the pin on its right
+    plHybridArray<plRectFloat, 4> m_OutputRects;
+    plString m_sIssue;           ///< why the node produces no value; shown under its header
     bool m_bIssueIsNote = false; ///< m_sIssue is information rather than a fault
     plRectFloat m_IssueRect = plRectFloat(0, 0, 0, 0);
+
+    // the inline curve or gradient of an Over Life node, drawn in the node; a click on the curve edits it
+    plRectFloat m_CurveRect = plRectFloat(0, 0, 0, 0);
+    plHybridArray<plVec2, 64> m_CurvePoints; ///< 0..1 in both directions
+    plHybridArray<plColorGammaUB, 32> m_GradientColors;
+    plString m_sCurveNote; ///< what the band shows instead of the inline data, such as the asset's name
+    plUuid m_CurveObject;  ///< the plSingleCurveData to edit, invalid for gradients
+
     plString m_sCode; ///< an Expression node's code, shown in a box above its inputs
     plRectFloat m_CodeRect = plRectFloat(0, 0, 0, 0);
     plParticleValueRow m_CodeRow; ///< the row that edits the code when the box is clicked
@@ -167,6 +182,7 @@ private:
       BlockEnable,
       Value,
       Preview,
+      Curve, ///< the inline curve of a Curve Over Life node
     };
 
     Target m_Target = Target::None;
@@ -210,6 +226,8 @@ private:
   void BuildBlock(const BlockLayout& block, plColorGammaUB accent, plUiElement* pPanel) const;
   void BuildOperator(const NodeLayout& layout, plUiElement* pPanel) const;
   void BuildPreview(const NodeLayout& layout, plUiElement* pPanel) const;
+  void BuildCurve(const NodeLayout& layout, plUiElement* pPanel) const;
+  void LayoutOverLife(const plDocumentObject* pNode, NodeLayout& ref_layout, float fWidth, float& ref_fY) const;
   void BuildSpy(const NodeLayout& layout, plUiElement* pPanel) const;
   void BuildHeader(const NodeLayout& layout, plUiElement* pPanel) const;
   void BuildValueRow(const ValueRowLayout& row, plColorGammaUB accent, plUiElement* pPanel) const;
@@ -245,6 +263,10 @@ private:
   void StructureEventHandler(const plDocumentObjectStructureEvent& e);
   void SelectionEventHandler(const plSelectionManagerEvent& e);
   void EffectEventHandler(const plParticleEffectAssetEvent& e);
+
+  /// A Curve Over Life added by a palette preset gets its curve and Set Attribute once the transaction that added it
+  /// is done.
+  void PropertyEventHandler(const plDocumentObjectPropertyEvent& e);
 
   class plParticleEffectAssetDocument* GetEffectDocument() const;
   plTime m_LastSpyRefresh;

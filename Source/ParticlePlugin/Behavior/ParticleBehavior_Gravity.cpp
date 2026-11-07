@@ -88,7 +88,13 @@ void plParticleBehavior_Gravity::Process(plUInt64 uiNumElements)
 {
   PL_PROFILE_SCOPE("PFX: Gravity");
 
-  const plVec3 vGravity = m_pPhysicsModule != nullptr ? m_pPhysicsModule->GetGravity() : plVec3(0.0f, 0.0f, -10.0f);
+  plVec3 vGravity = m_pPhysicsModule != nullptr ? m_pPhysicsModule->GetGravity() : plVec3(0.0f, 0.0f, -10.0f);
+
+  // gravity points down in the world, also for a local-space effect that is rotated
+  if (GetOwnerEffect()->NeedsToApplyTransform())
+  {
+    vGravity = GetOwnerEffect()->GetTransform().m_qRotation.GetInverse() * vGravity;
+  }
 
   const float tDiff = (float)m_TimeDiff.GetSeconds();
 

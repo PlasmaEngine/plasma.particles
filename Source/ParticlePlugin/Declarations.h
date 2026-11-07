@@ -85,6 +85,7 @@ struct PL_PARTICLEPLUGIN_DLL plParticleTypeRenderMode
     BlendedBackground,
     BlendedForeground,
     BlendAdd,
+    Masked, ///< clipped at the alpha cutoff, drawn with the opaque geometry and its depth
     Default = Additive
   };
 };
@@ -103,6 +104,7 @@ struct PL_PARTICLEPLUGIN_DLL plParticleLightingMode
     VertexLit,
     SixWay,   ///< blends six baked directional light responses, giving a flat card internal volume
     PerPixel, ///< full clustered lighting per pixel; for small bright particles, not for smoke
+    Surface,  ///< lit like a mesh material: base colour, normal, roughness and metal; for blood, debris, wet splats
     Default = Fullbright
   };
 };

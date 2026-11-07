@@ -322,11 +322,12 @@ void plParticleEffectGraphController::LayoutSystemContexts(const plDocumentObjec
       for (const plVisualGraphConnection* pConnection : m_pManager->GetConnections(*pPin))
       {
         const plDocumentObject* pSource = pConnection->GetSourcePin().GetParent();
+        const plUInt32 uiSourceOutput = plParticleGraphCompiler::GetOutputIndex(pConnection->GetSourcePin());
 
         row.m_bDriven = true;
         row.m_DrivenTier = compiler.GetTier(pSource);
-        row.m_bDrivenUnresolved = !compiler.Fold(pSource).IsValid();
-        row.m_sDrivenBy = compiler.Describe(pSource);
+        row.m_bDrivenUnresolved = !compiler.Fold(pSource, uiSourceOutput).IsValid();
+        row.m_sDrivenBy = compiler.Describe(pSource, 2, uiSourceOutput);
         break;
       }
     }
@@ -620,9 +621,10 @@ void plParticleEffectGraphController::LayoutOperator(const plDocumentObject* pNo
 
   ref_layout.m_sTitle = plParticleGraphEditing::GetOperatorTitle(pNode);
 
-  // the badge is coloured by what the node produces, so it matches its output pin and wires
-  plStringView sValueProperty;
-  ref_layout.m_BadgeColor = plParticleGraphEditing::GetValueKindColor(plParticleValueKind::FromNode(pType, sValueProperty));
+  plParticleGraphCompiler compiler(m_pManager, FindEffectNode());
+
+  // the badge is coloured by what the node produces, which for adaptive maths follows what is wired into it
+  ref_layout.m_BadgeColor = plParticleGraphEditing::GetValueKindColor(compiler.GetOutputKind(pNode));
 
   if (const plCategoryAttribute* pCategory = pType->GetAttributeByType<plCategoryAttribute>())
   {
@@ -697,7 +699,20 @@ void plParticleEffectGraphController::LayoutOperator(const plDocumentObject* pNo
     LayoutValueRows(ref_layout.m_Rows, s_fPad, w - 2.0f * s_fPad, s_fValueRow, 0.56f, y);
   }
 
-  plParticleGraphCompiler compiler(m_pManager, FindEffectNode());
+  LayoutOverLife(pNode, ref_layout, w, y);
+
+  // a node with several outputs gives each its own row, its pin at the right end
+  const auto outputPins = m_pManager->GetOutputPins(pNode);
+  if (outputPins.GetCount() > 1)
+  {
+    for (const auto& pOutput : outputPins)
+    {
+      ref_layout.m_OutputLabels.PushBack(pOutput->GetName());
+      ref_layout.m_OutputRects.PushBack(plRectFloat(s_fPad, y, w - 2.0f * s_fPad, s_fValueRow - 1.0f));
+      y += s_fValueRow;
+    }
+  }
+
   ref_layout.m_Tier = compiler.GetTier(pNode);
 
   // the selected node shows its live values in the preview; a constant shows its value already
@@ -722,8 +737,14 @@ void plParticleEffectGraphController::LayoutOperator(const plDocumentObject* pNo
     y += fHeight + 6.0f;
   }
 
-  // a node that cannot produce a value says why, instead of its wires being dropped silently
+  // a node that cannot produce a value says why, instead of its wires being dropped silently; without a fault
+  // it can still have something to say, such as where it keeps its system off the GPU
   ref_layout.m_sIssue = compiler.GetIssue(pNode);
+  if (ref_layout.m_sIssue.IsEmpty())
+  {
+    ref_layout.m_sIssue = compiler.GetNote(pNode);
+    ref_layout.m_bIssueIsNote = !ref_layout.m_sIssue.IsEmpty();
+  }
 
   // a blackboard entry the preview does not have reads as the node's default, and the node says so
   if (const auto* pDocument = plDynamicCast<const plParticleEffectAssetDocument*>(m_pManager->GetDocument()); pDocument != nullptr && ref_layout.m_sIssue.IsEmpty())
@@ -744,6 +765,7 @@ void plParticleEffectGraphController::LayoutOperator(const plDocumentObject* pNo
   ref_layout.m_vSize.Set(w, y + 6.0f);
 
   // inputs sit on the row of the literal they override
+  plHybridArray<const plVisualGraphPin*, 8> placedInputs;
   for (ValueRowLayout& row : ref_layout.m_Rows)
   {
     if (row.m_sPin.IsEmpty())
@@ -753,26 +775,88 @@ void plParticleEffectGraphController::LayoutOperator(const plDocumentObject* pNo
     {
       row.m_bDriven = row.m_Kind != plParticleValueRow::Kind::PinOnly && m_pManager->HasConnections(*pPin);
       AddPin(out_pins, pPin, plVec2(0.0f, row.m_Rect.GetCenter().y));
+      placedInputs.PushBack(pPin);
 
       if (row.m_bDriven)
       {
-        const plDocumentObject* pSource = compiler.GetInputSource(pNode, row.m_sPin);
+        plUInt32 uiSourceOutput = 0;
+        const plDocumentObject* pSource = compiler.GetInputSource(pNode, row.m_sPin, &uiSourceOutput);
         row.m_DrivenTier = compiler.GetTier(pSource);
-        row.m_bDrivenUnresolved = !compiler.Fold(pSource).IsValid();
-        row.m_sDrivenBy = compiler.Describe(pSource, 1);
+        row.m_bDrivenUnresolved = !compiler.Fold(pSource, uiSourceOutput).IsValid();
+        row.m_sDrivenBy = compiler.Describe(pSource, 1, uiSourceOutput);
       }
     }
+  }
+
+  // a wired input whose row the current mode hides keeps its wire on the header
+  for (const auto& pInput : m_pManager->GetInputPins(pNode))
+  {
+    if (!placedInputs.Contains(pInput.Borrow()) && m_pManager->HasConnections(*pInput))
+      AddPin(out_pins, pInput.Borrow(), plVec2(0.0f, ref_layout.m_fHeaderHeight * 0.5f));
+  }
+
+  if (!ref_layout.m_OutputRects.IsEmpty())
+  {
+    for (plUInt32 i = 0; i < outputPins.GetCount() && i < ref_layout.m_OutputRects.GetCount(); ++i)
+      AddPin(out_pins, outputPins[i].Borrow(), plVec2(w, ref_layout.m_OutputRects[i].GetCenter().y));
+
+    return;
   }
 
   // the output lines up with what the node produces: the preview, else the middle of the rows
   float fBodyCenter = ref_layout.m_fHeaderHeight * 0.5f;
   if (ref_layout.m_bHasPreview)
     fBodyCenter = ref_layout.m_PreviewRect.GetCenter().y;
+  else if (ref_layout.m_CurveRect.width > 0.0f)
+    fBodyCenter = ref_layout.m_CurveRect.GetCenter().y;
   else if (!ref_layout.m_Rows.IsEmpty())
     fBodyCenter = (ref_layout.m_Rows[0].m_Rect.y + ref_layout.m_Rows.PeekBack().m_Rect.Bottom()) * 0.5f;
 
-  for (const auto& pPin : m_pManager->GetOutputPins(pNode))
+  for (const auto& pPin : outputPins)
     AddPin(out_pins, pPin.Borrow(), plVec2(w, fBodyCenter));
+}
+
+void plParticleEffectGraphController::LayoutOverLife(const plDocumentObject* pNode, NodeLayout& ref_layout, float fWidth, float& ref_fY) const
+{
+  const plRTTI* pType = pNode->GetTypeAccessor().GetType();
+  const bool bCurve = pType->IsDerivedFrom<plParticleCurveOverLifeNode>();
+  if (!bCurve && !pType->IsDerivedFrom<plParticleGradientOverLifeNode>())
+    return;
+
+  constexpr float fBandHeight = 56.0f;
+  ref_layout.m_CurveRect = plRectFloat(s_fPad, ref_fY + 2.0f, fWidth - 2.0f * s_fPad, bCurve ? fBandHeight : s_fPreviewBand * 0.5f);
+  ref_fY += ref_layout.m_CurveRect.height + 6.0f;
+
+  // an asset replaces the inline data, which the band then names instead of drawing
+  const plString sAsset = pNode->GetTypeAccessor().GetValue(bCurve ? "CurveAsset" : "GradientAsset").ConvertTo<plString>();
+  if (!sAsset.IsEmpty())
+  {
+    ref_layout.m_sCurveNote = plParticleGraphEditing::GetAssetDisplayName(sAsset);
+    return;
+  }
+
+  constexpr plUInt32 n = plParticleProgramTables::s_uiTableSize;
+
+  if (bCurve)
+  {
+    float table[n];
+    plParticleGraphCompiler::BakeInlineCurve(pNode, plArrayPtr<float>(table, n));
+
+    for (plUInt32 i = 0; i < n; ++i)
+      ref_layout.m_CurvePoints.PushBack(plVec2((float)i / (n - 1), table[i]));
+
+    if (const plDocumentObject* pCurve = plParticleGraphCompiler::GetInlineCurveObject(pNode))
+      ref_layout.m_CurveObject = pCurve->GetGuid();
+
+    return;
+  }
+
+  plVec4 table[n];
+  plParticleGraphCompiler::BakeInlineGradient(pNode, plArrayPtr<plVec4>(table, n));
+
+  // every other entry is plenty for a strip this wide
+  for (plUInt32 i = 0; i < n; i += 2)
+    ref_layout.m_GradientColors.PushBack(plColorGammaUB(plColor(table[i].x, table[i].y, table[i].z, 1.0f)));
 }
 
 //////////////////////////////////////////////////////////////////////////
@@ -1151,6 +1235,13 @@ void plParticleEffectGraphController::BuildOperator(const NodeLayout& layout, pl
   for (const ValueRowLayout& row : layout.m_Rows)
     BuildValueRow(row, plEditorUi::Accent(), pPanel);
 
+  if (layout.m_CurveRect.width > 0.0f)
+    BuildCurve(layout, pPanel);
+
+  // the outputs of a node with several, named on the right next to their pins
+  for (plUInt32 i = 0; i < layout.m_OutputLabels.GetCount(); ++i)
+    AddText(pPanel, layout.m_OutputRects[i], plTranslate(layout.m_OutputLabels[i]), s_uiSmallSize, plEditorUi::Muted(), plUiTextHAlign::Right);
+
   if (layout.m_bSpy)
     BuildSpy(layout, pPanel);
 
@@ -1162,6 +1253,62 @@ void plParticleEffectGraphController::BuildOperator(const NodeLayout& layout, pl
 
     plUiText* pText = AddText(pPanel, Inset(layout.m_IssueRect, 6.0f, 6.0f), layout.m_sIssue, s_uiSmallSize, color);
     pText->m_bWrap = true;
+  }
+}
+
+void plParticleEffectGraphController::BuildCurve(const NodeLayout& layout, plUiElement* pPanel) const
+{
+  const plRectFloat& rect = layout.m_CurveRect;
+
+  // the curve's band lights up under the pointer, since a click edits it
+  if (layout.m_CurveObject.IsValid())
+  {
+    plUiButton* pPlate = AddHoverPlate(pPanel, rect, plEditorUi::Field(), 3.0f);
+    pPlate->m_fBorderWidth = 1.0f;
+    pPlate->m_BorderColor = plEditorUi::Line();
+  }
+  else
+  {
+    AddFrame(pPanel, rect, plEditorUi::Line(), 3.0f, plEditorUi::Field());
+  }
+
+  if (!layout.m_sCurveNote.IsEmpty())
+  {
+    AddText(pPanel, Inset(rect, 6.0f, 6.0f), layout.m_sCurveNote, s_uiSmallSize, plEditorUi::Dim(), plUiTextHAlign::Center);
+    return;
+  }
+
+  // a gradient as a strip of its colours
+  if (!layout.m_GradientColors.IsEmpty())
+  {
+    const plRectFloat strip(rect.x + 3.0f, rect.y + 3.0f, rect.width - 6.0f, rect.height - 6.0f);
+    const float fStep = strip.width / layout.m_GradientColors.GetCount();
+
+    for (plUInt32 i = 0; i < layout.m_GradientColors.GetCount(); ++i)
+      AddPanel(pPanel, plRectFloat(strip.x + i * fStep, strip.y, fStep + 0.5f, strip.height), layout.m_GradientColors[i]);
+
+    return;
+  }
+
+  // a curve as line segments, 0 at the bottom and 1 at the top
+  const plRectFloat plot(rect.x + 4.0f, rect.y + 4.0f, rect.width - 8.0f, rect.height - 8.0f);
+  auto toNode = [&](const plVec2& p)
+  { return plVec2(plot.x + plMath::Saturate(p.x) * plot.width, plot.Bottom() - plMath::Clamp(p.y, -0.1f, 1.1f) * plot.height); };
+
+  // the midline marks 0.5, so the curve's scale reads at a glance
+  AddPanel(pPanel, plRectFloat(plot.x, plot.y + plot.height * 0.5f, plot.width, 1.0f), WithAlpha(plEditorUi::Line(), 160));
+
+  const plColorGammaUB curveColor = plParticleGraphEditing::GetValueKindColor(plParticleValueKind::Curve);
+  for (plUInt32 i = 1; i < layout.m_CurvePoints.GetCount(); ++i)
+  {
+    const plVec2 start = toNode(layout.m_CurvePoints[i - 1]);
+    const plVec2 delta = toNode(layout.m_CurvePoints[i]) - start;
+    if (delta.GetLengthSquared() < 0.0001f)
+      continue;
+
+    plUiPanel* pSegment = AddPanel(pPanel, plRectFloat(start.x, start.y, delta.GetLength(), 1.5f), curveColor);
+    pSegment->m_vTransformOrigin = plVec2::MakeZero();
+    pSegment->m_vTransformRotation.z = plMath::ATan2(delta.y, delta.x).GetDegree();
   }
 }
 

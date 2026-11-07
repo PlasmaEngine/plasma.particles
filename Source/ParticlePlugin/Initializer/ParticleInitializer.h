@@ -12,6 +12,15 @@ class plParticleInitializer;
 class plParticleEffectInstance;
 struct plParticleProgramData;
 
+/// \brief Marks a vector property as a direction relative to the emitter.
+///
+/// A typed value is used as it is. A per-frame wire computes its value in the simulation's space, so the frame
+/// program turns it into emitter space before it writes the property.
+class PL_PARTICLEPLUGIN_DLL plParticleEmitterSpaceDirectionAttribute : public plPropertyAttribute
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleEmitterSpaceDirectionAttribute, plPropertyAttribute);
+};
+
 /// \brief Base class for all particle emitters
 class PL_PARTICLEPLUGIN_DLL plParticleInitializerFactory : public plReflectedClass
 {

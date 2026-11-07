@@ -54,6 +54,9 @@ public:
   /// Whether this type manages GPU-side particles that the CPU stream group doesn't track.
   virtual bool HasActiveGPUElements() const { return false; }
 
+  /// Masked and opaque types can draw into shadow maps; every other type extracts nothing in shadow views.
+  virtual bool CastsShadows() const { return false; }
+
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const = 0;
 
 protected:

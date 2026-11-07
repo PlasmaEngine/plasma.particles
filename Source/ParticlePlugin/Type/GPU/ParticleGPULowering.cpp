@@ -121,9 +121,8 @@ namespace
     {
       const float x = (float)i / (float)(c_uiLUTWidth - 1);
 
-      // must match plParticleBehavior_SizeCurve (normalized-position eval, normalized value)
-      const double evalPos = curve.ConvertNormalizedPos(x);
-      data[i] = (float)curve.NormalizeValue(curve.Evaluate(evalPos));
+      // the same normalized value plParticleBehavior_SizeCurve bakes: a flat curve reads 1
+      data[i] = plParticleProgramTables::SampleCurveAsset(curve, x, true);
     }
 
     plGALSystemMemoryDescription initData;
@@ -254,13 +253,16 @@ namespace
   }
 
   // A lowered quad system is drawn by the ordinary quad renderer from structs the simulate
-  // dispatch writes, so every quad feature works; only the CPU-side last-position tracking
-  // behind the particle-direction orientation has no GPU equivalent.
+  // dispatch writes, so most quad features work.
   plStringView CheckQuadTypeLowerable(const plParticleTypeQuadFactory* pQuad)
   {
     // the simulate kernel builds the quad tangents itself and has no Facing (Axis) per particle
     if (pQuad->m_Orientation == plQuadParticleOrientation::Custom_Facing)
       return "Custom Facing orientation";
+
+    // the lowered render data carries no normal or ORM map
+    if (pQuad->m_LightingMode == plParticleLightingMode::Surface)
+      return "Surface lighting";
 
     return {};
   }
@@ -323,6 +325,9 @@ plString plParticleGPULowering::FindLoweringBlocker(
     {
       if (IsCPUOnlySinkTarget(pSet->m_Settings.m_Target))
         return blocked(BlockerKind::Initializer, uiIndex, "Set Attribute writes Rotation, Facing, Size Per Axis or Emissive, which GPU systems do not keep");
+
+      if (pSet->m_Settings.m_Target == plParticleSinkTarget::Custom)
+        return blocked(BlockerKind::Initializer, uiIndex, "Set Attribute writes a custom attribute, which GPU systems do not keep");
     }
   }
 
@@ -421,6 +426,16 @@ void plParticleGPULowering::ConfigureLoweredType(plParticleTypeGPU* pType, plArr
 
     pType->m_RenderMode = pQuad->m_RenderMode;
     pType->m_QuadOrientation = pQuad->m_Orientation;
+    pType->m_EmitterDirSampling = pQuad->m_EmitterDirSampling;
+    pType->m_MaxDeviation = pQuad->m_MaxDeviation;
+    pType->m_fFacingMinSpeed = plMath::Max(pQuad->m_fMinSpeed, 0.0f);
+
+    // the emitter direction modes read the direction captured at spawn
+    const bool bEmitterDirMode = pQuad->m_Orientation == plQuadParticleOrientation::FixedAxis_EmitterDir || pQuad->m_Orientation == plQuadParticleOrientation::Rotating_EmitterDir || pQuad->m_Orientation == plQuadParticleOrientation::Rotating_OrthoEmitterDir;
+    if (bEmitterDirMode && pQuad->m_EmitterDirSampling == plQuadParticleEmitterDirSampling::AtSpawn)
+    {
+      pType->m_uiFeatureFlags |= GPU_PARTICLE_FEATURE_SPAWN_EMITTER_DIR;
+    }
     pType->m_TextureAtlasType = pQuad->m_TextureAtlasType;
     pType->m_uiNumSpritesX = pQuad->m_uiNumSpritesX;
     pType->m_uiNumSpritesY = pQuad->m_uiNumSpritesY;

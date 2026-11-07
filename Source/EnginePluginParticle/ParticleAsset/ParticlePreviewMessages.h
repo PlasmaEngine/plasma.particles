@@ -19,6 +19,22 @@ struct PL_ENGINEPLUGINPARTICLE_DLL plParticlePreviewMotion
 };
 PL_DECLARE_REFLECTABLE_TYPE(PL_ENGINEPLUGINPARTICLE_DLL, plParticlePreviewMotion);
 
+/// What the particle editor shows around the preview effect.
+struct PL_ENGINEPLUGINPARTICLE_DLL plParticlePreviewBackdrop
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Stage, ///< a floor, a back wall that is light on the left and dark on the right, a ramp and a 1.8 m figure
+    Floor, ///< only the floor
+    None,  ///< nothing; the sky shows behind the effect
+
+    Default = Stage
+  };
+};
+PL_DECLARE_REFLECTABLE_TYPE(PL_ENGINEPLUGINPARTICLE_DLL, plParticlePreviewBackdrop);
+
 /// The particle editor's preview settings, sent with every redraw.
 class PL_ENGINEPLUGINPARTICLE_DLL plParticlePreviewSettingsMsgToEngine : public plEditorEngineDocumentMsg
 {
@@ -28,6 +44,7 @@ public:
   bool m_bShowStats = true;
   bool m_bShowEvents = true;
   plEnum<plParticlePreviewMotion> m_Motion;
+  plEnum<plParticlePreviewBackdrop> m_Backdrop;
 
   /// The names of the effect's systems, in descriptor order; the runtime does not keep them.
   plDynamicArray<plString> m_SystemNames;

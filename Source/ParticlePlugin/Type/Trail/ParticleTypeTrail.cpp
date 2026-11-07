@@ -4,7 +4,6 @@
 #include <Foundation/Math/Float16.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
-#include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/Type/Trail/ParticleTypeTrail.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <RendererCore/Material/MaterialResource.h>
@@ -243,7 +242,11 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
 {
   PL_PROFILE_SCOPE("PFX: Trail");
 
-  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid())
+  // distortion works without a texture: the shader masks the trail with a soft edge
+  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid() && m_RenderMode != plParticleTypeRenderMode::Distortion)
+    return;
+
+  if (plParticleSkipView(ref_msg, CastsShadows()))
     return;
 
   const plUInt32 numActiveParticles = (plUInt32)GetOwnerSystem()->GetNumActiveParticles();
@@ -367,15 +370,7 @@ void plParticleTypeTrail::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg,
       break;
   }
 
-  if (m_RenderMode == plParticleTypeRenderMode::Distortion)
-  {
-    ref_msg.AddRenderData(pRenderData, plParticleRenderDataCategories::Distortion, plRenderData::Caching::Never);
-    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
-  }
-  else
-  {
-    ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
-  }
+  plParticleAddRenderData(ref_msg, pRenderData, m_RenderMode);
 }
 
 void plParticleTypeTrail::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)

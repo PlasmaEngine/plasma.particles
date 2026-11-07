@@ -10,6 +10,7 @@
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleTypeRenderMode, 1)
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::Opaque),
+  PL_ENUM_CONSTANT(plParticleTypeRenderMode::Masked),
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::Additive),
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::Blended),
   PL_ENUM_CONSTANT(plParticleTypeRenderMode::BlendedForeground),
@@ -25,6 +26,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleLightingMode, 1)
   PL_ENUM_CONSTANT(plParticleLightingMode::VertexLit),
   PL_ENUM_CONSTANT(plParticleLightingMode::SixWay),
   PL_ENUM_CONSTANT(plParticleLightingMode::PerPixel),
+  PL_ENUM_CONSTANT(plParticleLightingMode::Surface),
 PL_END_STATIC_REFLECTED_ENUM;
 
 //////////////////////////////////////////////////////////////////////////

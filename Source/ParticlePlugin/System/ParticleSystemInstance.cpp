@@ -19,6 +19,7 @@
 #include <ParticlePlugin/Type/GPU/ParticleGPULowering.h>
 #include <ParticlePlugin/Type/GPU/ParticleTypeGPU.h>
 #include <ParticlePlugin/Type/ParticleType.h>
+#include <RendererCore/Pipeline/View.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
 
@@ -790,8 +791,14 @@ plParticleWorldModule* plParticleSystemInstance::GetOwnerWorldModule() const
 
 void plParticleSystemInstance::ExtractSystemRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
 {
+  // shadow views only take the types that draw into shadow maps
+  const bool bShadowView = ref_msg.m_pView->GetCameraUsageHint() == plCameraUsageHint::Shadow;
+
   for (auto pType : m_Types)
   {
+    if (bShadowView && !pType->CastsShadows())
+      continue;
+
     pType->ExtractTypeRenderData(ref_msg, instanceTransform);
   }
 }

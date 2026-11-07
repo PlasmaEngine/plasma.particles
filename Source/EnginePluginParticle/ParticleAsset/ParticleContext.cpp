@@ -68,6 +68,14 @@ void plParticleContext::HandleMessage(const plEditorEngineDocumentMsg* pMsg)
     m_Motion = pSettings->m_Motion;
     m_SystemNames = pSettings->m_SystemNames;
     m_BlackboardEntries = pSettings->m_BlackboardEntries;
+
+    if (m_Backdrop != pSettings->m_Backdrop.GetValue())
+    {
+      m_Backdrop = pSettings->m_Backdrop;
+
+      PL_LOCK(m_pWorld->GetWriteMarker());
+      ApplyBackdrop();
+    }
     return;
   }
 
@@ -556,103 +564,175 @@ void plParticleContext::OnInitialize()
     m_pComponent->SetParticleEffect(m_hParticle);
   }
 
-  const char* szMeshName = "ParticlePreviewBackgroundMesh";
-  m_hPreviewMeshResource = plResourceManager::GetExistingResource<plMeshResource>(szMeshName);
+  CreateStage();
+  ApplyBackdrop();
+}
 
-  if (!m_hPreviewMeshResource.IsValid())
+namespace
+{
+  // Every stage surface uses the white prototype material, a 1 m grid mapped in world space, so a mesh of
+  // any size shows the same grid; the mesh colour gives each surface its shade.
+  constexpr const char* s_szStageMaterial = "{ 1dd7dbfb-f712-0acc-d78b-cd7f36eddea1 }"; // PrototypeWhite.plMaterialAsset
+
+  /// A mesh of the stage, made once and shared by every particle preview.
+  plMeshResourceHandle CreateStageMesh(plStringView sName, const plGeometry& geom)
   {
-    const char* szMeshBufferName = "ParticlePreviewBackgroundMeshBuffer";
+    const plStringBuilder sBufferName(sName, "Buffer");
 
-    plMeshBufferResourceHandle hMeshBuffer = plResourceManager::GetExistingResource<plMeshBufferResource>(szMeshBufferName);
-
+    plMeshBufferResourceHandle hMeshBuffer = plResourceManager::GetExistingResource<plMeshBufferResource>(sBufferName);
     if (!hMeshBuffer.IsValid())
     {
-      // Build geometry
-      plGeometry geom;
-
-      geom.AddBox(plVec3(4, 4, 4), true);
-      geom.ComputeTangents();
-
       plMeshBufferResourceDescriptor desc;
       desc.AddCommonStreams();
       desc.AllocateStreamsFromGeometry(geom, plGALPrimitiveTopology::Triangles);
 
-      hMeshBuffer = plResourceManager::GetOrCreateResource<plMeshBufferResource>(szMeshBufferName, std::move(desc), szMeshBufferName);
+      hMeshBuffer = plResourceManager::GetOrCreateResource<plMeshBufferResource>(sBufferName, std::move(desc), sBufferName);
     }
-    {
-      plResourceLock<plMeshBufferResource> pMeshBuffer(hMeshBuffer, plResourceAcquireMode::AllowLoadingFallback);
 
-      plMeshResourceDescriptor md;
-      md.UseExistingMeshBuffer(hMeshBuffer);
-      md.AddSubMesh(pMeshBuffer->GetPrimitiveCount(), 0, 0);
-      md.SetMaterial(0, "{ 6bd5e7e6-b7be-9801-e032-14226cba1e96 }"); // PrototypeGrey.plMaterialAsset
-      md.ComputeBounds();
+    plResourceLock<plMeshBufferResource> pMeshBuffer(hMeshBuffer, plResourceAcquireMode::AllowLoadingFallback);
 
-      m_hPreviewMeshResource = plResourceManager::GetOrCreateResource<plMeshResource>(szMeshName, std::move(md), pMeshBuffer->GetResourceDescription());
-    }
+    plMeshResourceDescriptor md;
+    md.UseExistingMeshBuffer(hMeshBuffer);
+    md.AddSubMesh(pMeshBuffer->GetPrimitiveCount(), 0, 0);
+    md.SetMaterial(0, s_szStageMaterial);
+    md.ComputeBounds();
+
+    return plResourceManager::GetOrCreateResource<plMeshResource>(sName, std::move(md), pMeshBuffer->GetResourceDescription());
   }
 
-  plPhysicsWorldModuleInterface* pPhysicsInterface = GetWorld()->GetOrCreateModule<plPhysicsWorldModuleInterface>();
+  plMeshResourceHandle GetStageBox(const plVec3& vSize)
+  {
+    plStringBuilder sName;
+    sName.SetFormat("ParticlePreviewStageBox_{}x{}x{}", vSize.x, vSize.y, vSize.z);
 
-  // Background Mesh
+    plMeshResourceHandle hMesh = plResourceManager::GetExistingResource<plMeshResource>(sName);
+    if (hMesh.IsValid())
+      return hMesh;
+
+    plGeometry geom;
+    geom.AddBox(vSize, true);
+    geom.ComputeTangents();
+    return CreateStageMesh(sName, geom);
+  }
+
+  /// A 1.8 m figure standing on its origin: a body and a head, for judging an effect's size.
+  plMeshResourceHandle GetStageFigure()
+  {
+    const char* szName = "ParticlePreviewStageFigure";
+
+    plMeshResourceHandle hMesh = plResourceManager::GetExistingResource<plMeshResource>(szName);
+    if (hMesh.IsValid())
+      return hMesh;
+
+    plGeometry geom;
+
+    // the body reaches 1.5 m: 1.06 m of cylinder between two 0.22 m caps
+    plGeometry::GeoOptions body;
+    body.m_Transform = plMat4::MakeTranslation(plVec3(0, 0, 0.75f));
+    geom.AddCapsule(0.22f, 1.06f, 24, 6, body);
+
+    // the head's top is at 1.8 m
+    plGeometry::GeoOptions head;
+    head.m_Transform = plMat4::MakeTranslation(plVec3(0, 0, 1.65f));
+    geom.AddStackedSphere(0.15f, 24, 12, head);
+
+    geom.ComputeTangents();
+    return CreateStageMesh(szName, geom);
+  }
+} // namespace
+
+void plParticleContext::CreateStage()
+{
+  plWorld* pWorld = m_pWorld;
+  plPhysicsWorldModuleInterface* pPhysicsInterface = pWorld->GetOrCreateModule<plPhysicsWorldModuleInterface>();
+
+  // The effect plays at the origin, 1 m above the floor, and the editor camera looks at it along +X. The
+  // collision matches the meshes, for effects whose particles collide.
+  auto AddPart = [&](const plGameObjectHandle& hParent, const char* szName, const plMeshResourceHandle& hMesh, const plColor& color, const plVec3& vPosition, const plQuat& qRotation, const plVec3& vCollisionSize, const plVec3& vCollisionOffset = plVec3::MakeZero())
   {
     plGameObjectDesc obj;
-    obj.m_sName.Assign("ParticleBackground");
+    obj.m_sName.Assign(szName);
+    obj.m_hParent = hParent;
+    obj.m_LocalPosition = vPosition;
+    obj.m_LocalRotation = qRotation;
 
-    const plColor bgColor(0.3f, 0.3f, 0.3f);
+    plGameObject* pObj = nullptr;
+    pWorld->CreateObject(obj, pObj);
 
-    for (int y = -1; y <= 5; ++y)
+    plMeshComponent* pMesh = nullptr;
+    plMeshComponent::CreateComponent(pObj, pMesh);
+    pMesh->SetMesh(hMesh);
+    pMesh->SetColor(color);
+
+    if (pPhysicsInterface == nullptr)
+      return;
+
+    if (vCollisionOffset.IsZero())
     {
-      for (int x = -5; x <= 5; ++x)
-      {
-        plGameObject* pObj;
-        obj.m_LocalPosition.Set(6, (float)x * 4, 1 + (float)y * 4);
-        pWorld->CreateObject(obj, pObj);
-
-        plMeshComponent* pMesh;
-        plMeshComponent::CreateComponent(pObj, pMesh);
-        pMesh->SetMesh(m_hPreviewMeshResource);
-        pMesh->SetColor(bgColor);
-
-        if (pPhysicsInterface)
-          pPhysicsInterface->AddStaticCollisionBox(pObj, plVec3(4, 4, 4));
-      }
+      pPhysicsInterface->AddStaticCollisionBox(pObj, vCollisionSize);
+      return;
     }
 
-    for (int y = -5; y <= 5; ++y)
-    {
-      for (int x = -5; x <= 1; ++x)
-      {
-        plGameObject* pObj;
-        obj.m_LocalPosition.Set((float)x * 4, (float)y * 4, -3);
-        pWorld->CreateObject(obj, pObj);
+    // a box whose centre is not the mesh's origin, such as the figure's, which stands on its origin
+    plGameObjectDesc shape;
+    shape.m_sName.Assign("Collision");
+    shape.m_hParent = pObj->GetHandle();
+    shape.m_LocalPosition = vCollisionOffset;
 
-        plMeshComponent* pMesh;
-        plMeshComponent::CreateComponent(pObj, pMesh);
-        pMesh->SetMesh(m_hPreviewMeshResource);
-        pMesh->SetColor(bgColor);
+    plGameObject* pShape = nullptr;
+    pWorld->CreateObject(shape, pShape);
+    pPhysicsInterface->AddStaticCollisionBox(pShape, vCollisionSize);
+  };
 
-        if (pPhysicsInterface)
-          pPhysicsInterface->AddStaticCollisionBox(pObj, plVec3(4, 4, 4));
-      }
-    }
+  auto AddGroup = [&](const char* szName) -> plGameObjectHandle
+  {
+    plGameObjectDesc obj;
+    obj.m_sName.Assign(szName);
 
-    for (int x = -5; x <= 5; ++x)
-    {
-      plGameObject* pObj;
-      obj.m_LocalPosition.Set(4, (float)x * 4, -2);
-      obj.m_LocalRotation = plQuat::MakeFromAxisAndAngle(plVec3(0, 1, 0), plAngle::MakeFromDegree(45));
-      pWorld->CreateObject(obj, pObj);
+    plGameObject* pObj = nullptr;
+    return pWorld->CreateObject(obj, pObj);
+  };
 
-      plMeshComponent* pMesh;
-      plMeshComponent::CreateComponent(pObj, pMesh);
-      pMesh->SetMesh(m_hPreviewMeshResource);
-      pMesh->SetColor(bgColor);
+  const plVec3 vFloorSize(60, 60, 1);
+  const plVec3 vWallSize(1, 30, 16);
+  const plVec3 vRampSize(4, 5, 0.5f);
 
-      if (pPhysicsInterface)
-        pPhysicsInterface->AddStaticCollisionBox(pObj, plVec3(4, 4, 4));
-    }
-  }
+  m_StageMeshes.Clear();
+  m_StageMeshes.PushBack(GetStageBox(vFloorSize));
+  m_StageMeshes.PushBack(GetStageBox(vWallSize));
+  m_StageMeshes.PushBack(GetStageBox(vRampSize));
+  m_StageMeshes.PushBack(GetStageFigure());
+
+  // a mid grey floor, its top 1 m below the effect, reaching to the back wall
+  m_hStageFloor = AddGroup("ParticlePreviewFloor");
+  AddPart(m_hStageFloor, "Floor", m_StageMeshes[0], plColor(0.3f, 0.3f, 0.3f), plVec3(-26, 0, -1.5f), plQuat::MakeIdentity(), vFloorSize);
+
+  m_hStageSet = AddGroup("ParticlePreviewSet");
+
+  // The back wall is light on the left of the view (+Y) and dark on the right, split behind the effect, so
+  // dark smoke and additive glow can both be judged; its grid shows what a distortion bends.
+  AddPart(m_hStageSet, "WallLight", m_StageMeshes[1], plColor(0.7f, 0.7f, 0.7f), plVec3(4.5f, 15, 7), plQuat::MakeIdentity(), vWallSize);
+  AddPart(m_hStageSet, "WallDark", m_StageMeshes[1], plColor(0.015f, 0.015f, 0.015f), plVec3(4.5f, -15, 7), plQuat::MakeIdentity(), vWallSize);
+
+  // a ramp rising at 30 degrees towards the dark half of the wall, for particles that bounce
+  AddPart(m_hStageSet, "Ramp", m_StageMeshes[2], plColor(0.3f, 0.3f, 0.3f), plVec3(2.3f, -5.5f, -0.22f), plQuat::MakeFromAxisAndAngle(plVec3(0, 1, 0), plAngle::MakeFromDegree(-30)), vRampSize);
+
+  // a 1.8 m figure standing in front of the light half of the wall
+  AddPart(m_hStageSet, "Figure", m_StageMeshes[3], plColor(0.55f, 0.25f, 0.1f), plVec3(2, 4, -1), plQuat::MakeIdentity(), plVec3(0.45f, 0.45f, 1.8f), plVec3(0, 0, 0.9f));
+}
+
+void plParticleContext::ApplyBackdrop()
+{
+  if (m_pWorld == nullptr)
+    return;
+
+  plGameObject* pObj = nullptr;
+
+  if (m_pWorld->TryGetObject(m_hStageFloor, pObj))
+    pObj->SetActiveFlag(m_Backdrop != plParticlePreviewBackdrop::None);
+
+  if (m_pWorld->TryGetObject(m_hStageSet, pObj))
+    pObj->SetActiveFlag(m_Backdrop == plParticlePreviewBackdrop::Stage);
 }
 
 plEngineProcessViewContext* plParticleContext::CreateViewContext()

@@ -1,10 +1,12 @@
 #include <EditorPluginParticle/EditorPluginParticlePCH.h>
 
 #include <EditorFramework/GUI/ExposedParameters.h>
+#include <EditorFramework/Preferences/EditorPreferences.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAsset.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectNodeManager.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectNodes.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleGraphCompiler.h>
+#include <EditorPluginParticle/ParticleEffectAsset/ParticleGraphEditing.h>
 #include <Foundation/IO/FileSystem/DeferredFileWriter.h>
 #include <Foundation/IO/FileSystem/FileReader.h>
 #include <Foundation/IO/FileSystem/FileSystem.h>
@@ -44,14 +46,18 @@
 // v9: blocks moved from root-level graph nodes into the system's ordered context arrays, so the
 // authored block order now reaches the descriptor. Forces a re-transform of existing effects.
 // v11: plasma.particles 1.6 events (On Event per event, inherit, Event inputs, Blackboard nodes).
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectAssetDocument, 11, plRTTINoAllocator)
+// v12: graph programs of format 3 (inline curve and gradient tables, multi-output nodes, adaptive maths).
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectAssetDocument, 12, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 
 plParticleEffectAssetDocument::plParticleEffectAssetDocument(plStringView sDocumentPath)
   : plAssetDocument(sDocumentPath, PL_DEFAULT_NEW(plParticleEffectNodeManager), plAssetDocEngineConnection::Simple)
-  , m_LightSettings(false)
+  , m_LightSettings(true)
 {
+  // the preview starts with the editor's preview lights (sky, sky light, sun), like the other asset previews
+  plPreferences::QueryPreferences<plEditorPreferencesUser>()->ApplyDefaultValues(m_LightSettings);
+
   plVisualizerManager::GetSingleton()->SetVisualizersActive(this, m_bRenderVisualizers);
 
   // Safe here: construction is never inside a document broadcast, unlike node creation.
@@ -151,9 +157,10 @@ void plParticleEffectAssetDocument::ParameterPropertyEventHandler(const plDocume
     UpdateParameterNameEnum();
 }
 
-/// The emissive and depth-blending properties of the quad, trail and ribbon types. Custom materials and distortion bring
-/// no emissive map; the colour, intensity and parameter only matter once a map is set.
-static void SetLookPropertyStates(plPropertyMetaStateEvent& e, bool bNoEmissive)
+/// The emissive, depth-blending and masking properties of the quad, trail and ribbon types. Custom materials and
+/// distortion bring no emissive map; the colour, intensity and parameter only matter once a map is set. Masked and
+/// opaque particles do not blend, so the soft edge does nothing for them; only they can cast shadows.
+static void SetLookPropertyStates(plPropertyMetaStateEvent& e, bool bNoEmissive, plInt64 iRenderMode)
 {
   auto& props = *e.m_pPropertyStates;
 
@@ -162,6 +169,13 @@ static void SetLookPropertyStates(plPropertyMetaStateEvent& e, bool bNoEmissive)
   props["EmissiveMap"].m_Visibility = bNoEmissive ? plPropertyUiState::Invisible : plPropertyUiState::Default;
   for (const char* szProperty : {"EmissiveColor", "EmissiveIntensity", "EmissiveColorParam"})
     props[szProperty].m_Visibility = (bNoEmissive || !bHasMap) ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+
+  const bool bMasked = iRenderMode == plParticleTypeRenderMode::Masked;
+  const bool bOpaque = bMasked || iRenderMode == plParticleTypeRenderMode::Opaque;
+
+  props["AlphaCutoff"].m_Visibility = bMasked ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+  props["CastShadows"].m_Visibility = bOpaque ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+  props["SoftEdgeDistance"].m_Visibility = bOpaque ? plPropertyUiState::Invisible : plPropertyUiState::Default;
 }
 
 void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMetaStateEvent& e)
@@ -205,6 +219,47 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
     props["CustomType"].m_Visibility = bCustom ? plPropertyUiState::Default : plPropertyUiState::Invisible;
   }
 
+  // only the nodes of type version 1 work in radians, and only they show the switch back to degrees
+  if (pShownType->IsDerivedFrom<plParticleFunctionNode>())
+  {
+    auto& props = *e.m_pPropertyStates;
+    const bool bRadians = e.m_pObject->GetTypeAccessor().GetValue("Radians").ConvertTo<bool>();
+    props["Radians"].m_Visibility = bRadians ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+  }
+
+  if (pShownType->IsDerivedFrom<plParticleRandomVectorNode>())
+  {
+    auto& props = *e.m_pPropertyStates;
+    const bool bCone = e.m_pObject->GetTypeAccessor().GetValue("Shape").ConvertTo<plInt64>() == plParticleRandomVectorShape::InCone;
+    props["ConeAngle"].m_Visibility = bCone ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+  }
+
+  // the Over Life nodes: a wire into T replaces the Input choice, an asset replaces the inline curve or stops
+  const bool bCurveOverLife = pShownType->IsDerivedFrom<plParticleCurveOverLifeNode>();
+  if (bCurveOverLife || pShownType->IsDerivedFrom<plParticleGradientOverLifeNode>())
+  {
+    auto& props = *e.m_pPropertyStates;
+    const auto& accessor = e.m_pObject->GetTypeAccessor();
+
+    bool bWiredT = false;
+    if (plDynamicCast<const plParticleEffectAssetDocument*>(e.m_pObject->GetDocumentObjectManager()->GetDocument()) != nullptr)
+    {
+      const auto* pManager = static_cast<const plVisualGraphObjectManager*>(e.m_pObject->GetDocumentObjectManager());
+      const plVisualGraphPin* pT = pManager->GetInputPinByName(e.m_pObject, "T");
+      bWiredT = pT != nullptr && pManager->HasConnections(*pT);
+    }
+
+    const plInt64 iInput = accessor.GetValue("Input").ConvertTo<plInt64>();
+    const bool bScaled = iInput == plParticleCurveInput::Age || iInput == plParticleCurveInput::Speed;
+    props["Input"].m_Visibility = bWiredT ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+    props["InputMax"].m_Visibility = (!bWiredT && bScaled) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+
+    const char* szAsset = bCurveOverLife ? "CurveAsset" : "GradientAsset";
+    const char* szInline = bCurveOverLife ? "Curve" : "Gradient";
+    const bool bAsset = !accessor.GetValue(szAsset).ConvertTo<plString>().IsEmpty();
+    props[szInline].m_Visibility = bAsset ? plPropertyUiState::Invisible : plPropertyUiState::Default;
+  }
+
   if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plParticleEffectNode>())
   {
     auto& props = *e.m_pPropertyStates;
@@ -229,15 +284,13 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
     props["Deviation"].m_Visibility = plPropertyUiState::Invisible;
     props["DistortionTexture"].m_Visibility = (bDistortion && !useMaterial) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
     props["DistortionStrength"].m_Visibility = bDistortion ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    SetLookPropertyStates(e, bDistortion || useMaterial);
+    SetLookPropertyStates(e, bDistortion || useMaterial, renderMode);
     props["ParticleStretch"].m_Visibility =
       (orientation == plQuadParticleOrientation::FixedAxis_EmitterDir || orientation == plQuadParticleOrientation::FixedAxis_ParticleDir)
         ? plPropertyUiState::Default
         : plPropertyUiState::Invisible;
     props["NumSpritesX"].m_Visibility = (textureAtlas == (int)plParticleTextureAtlasType::None) ? plPropertyUiState::Invisible : plPropertyUiState::Default;
     props["NumSpritesY"].m_Visibility = (textureAtlas == (int)plParticleTextureAtlasType::None) ? plPropertyUiState::Invisible : plPropertyUiState::Default;
-    props["NormalCurvature"].m_Visibility = plPropertyUiState::Invisible;
-    props["LightDirectionality"].m_Visibility = plPropertyUiState::Invisible;
     props["Texture"].m_Visibility = useMaterial ? plPropertyUiState::Invisible : plPropertyUiState::Default;
     props["CustomMaterial"].m_Visibility = useMaterial ? plPropertyUiState::Default : plPropertyUiState::Invisible;
 
@@ -246,11 +299,29 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
       props["Deviation"].m_Visibility = plPropertyUiState::Default;
     }
 
-    if (lightingMode == plParticleLightingMode::VertexLit)
-    {
-      props["NormalCurvature"].m_Visibility = plPropertyUiState::Default;
-      props["LightDirectionality"].m_Visibility = plPropertyUiState::Default;
-    }
+    // the orientations that follow the emitter direction, and the one that follows the particle's movement
+    const bool bEmitterDirMode = orientation == plQuadParticleOrientation::FixedAxis_EmitterDir || orientation == plQuadParticleOrientation::Rotating_EmitterDir || orientation == plQuadParticleOrientation::Rotating_OrthoEmitterDir;
+    const bool bParticleDirMode = orientation == plQuadParticleOrientation::FixedAxis_ParticleDir;
+    props["EmitterDirSampling"].m_Visibility = bEmitterDirMode ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["MinSpeed"].m_Visibility = bParticleDirMode ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["TurnSmoothing"].m_Visibility = bParticleDirMode ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+
+    // each lighting mode shows the inputs it reads; distortion and custom materials read none of them
+    const bool bLit = !bDistortion && !useMaterial;
+    const bool bVertexLit = bLit && lightingMode == plParticleLightingMode::VertexLit;
+    const bool bSixWay = bLit && lightingMode == plParticleLightingMode::SixWay;
+    const bool bPerPixel = bLit && lightingMode == plParticleLightingMode::PerPixel;
+    const bool bSurface = bLit && lightingMode == plParticleLightingMode::Surface;
+
+    props["LightingMode"].m_Visibility = bDistortion ? plPropertyUiState::Invisible : plPropertyUiState::Default; // custom materials read it too
+    props["NormalCurvature"].m_Visibility = (bVertexLit || bPerPixel || bSurface) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["LightDirectionality"].m_Visibility = (bVertexLit || bPerPixel) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["NormalMap"].m_Visibility = (bPerPixel || bSurface) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["NormalMapStrength"].m_Visibility = (bPerPixel || bSurface) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    for (const char* szProperty : {"SixWayMapA", "SixWayMapB", "SixWayAbsorption"})
+      props[szProperty].m_Visibility = bSixWay ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    for (const char* szProperty : {"OrmMap", "Roughness", "Metallic", "Specular"})
+      props[szProperty].m_Visibility = bSurface ? plPropertyUiState::Default : plPropertyUiState::Invisible;
   }
   else if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plParticleTypeTrailFactory>())
   {
@@ -265,7 +336,7 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
 
     props["DistortionTexture"].m_Visibility = (bDistortion && !useMaterial) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
     props["DistortionStrength"].m_Visibility = bDistortion ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    SetLookPropertyStates(e, bDistortion || useMaterial);
+    SetLookPropertyStates(e, bDistortion || useMaterial, renderMode);
     props["NumSpritesX"].m_Visibility =
       (textureAtlas == (int)plParticleTextureAtlasType::None) ? plPropertyUiState::Invisible : plPropertyUiState::Default;
     props["NumSpritesY"].m_Visibility =
@@ -286,15 +357,20 @@ void plParticleEffectAssetDocument::PropertyMetaStateEventHandler(plPropertyMeta
     auto& props = *e.m_pPropertyStates;
 
     bool useMaterial = e.m_pObject->GetTypeAccessor().GetValue("UseCustomMaterial").ConvertTo<bool>();
+    plInt64 renderMode = e.m_pObject->GetTypeAccessor().GetValue("RenderMode").ConvertTo<plInt64>();
     plInt64 lightingMode = e.m_pObject->GetTypeAccessor().GetValue("LightingMode").ConvertTo<plInt64>();
     plInt64 uvMode = e.m_pObject->GetTypeAccessor().GetValue("UvMode").ConvertTo<plInt64>();
+
+    const bool bDistortion = renderMode == plParticleTypeRenderMode::Distortion;
 
     props["TileLength"].m_Visibility = (uvMode == plParticleRibbonUvMode::Tiled) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
     props["NormalCurvature"].m_Visibility = (lightingMode == plParticleLightingMode::VertexLit) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
     props["LightDirectionality"].m_Visibility = (lightingMode == plParticleLightingMode::VertexLit) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
     props["Texture"].m_Visibility = useMaterial ? plPropertyUiState::Invisible : plPropertyUiState::Default;
     props["CustomMaterial"].m_Visibility = useMaterial ? plPropertyUiState::Default : plPropertyUiState::Invisible;
-    SetLookPropertyStates(e, useMaterial);
+    props["DistortionTexture"].m_Visibility = (bDistortion && !useMaterial) ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    props["DistortionStrength"].m_Visibility = bDistortion ? plPropertyUiState::Default : plPropertyUiState::Invisible;
+    SetLookPropertyStates(e, bDistortion || useMaterial, renderMode);
   }
   else if (e.m_pObject->GetTypeAccessor().GetType() == plGetStaticRTTI<plParticleInitializerFactory_RandomSize>())
   {
@@ -446,6 +522,7 @@ struct plParticleFrameWire
   const plDocumentObject* m_pBlock = nullptr;
   plString m_sProperty;
   const plDocumentObject* m_pSource = nullptr;
+  plUInt32 m_uiSourceOutput = 0; ///< which output of the source node the wire leaves from
   plParticleValueKind::Enum m_TargetKind = plParticleValueKind::None;
   plParticleTier m_Tier = plParticleTier::Frame;
 };
@@ -468,8 +545,9 @@ static void CollectWiredValues(const plDocumentObject* pSystemNode, const plVisu
     for (const plVisualGraphConnection* pConnection : pManager->GetConnections(pin))
     {
       const plDocumentObject* pSource = pConnection->GetSourcePin().GetParent();
+      const plUInt32 uiSourceOutput = plParticleGraphCompiler::GetOutputIndex(pConnection->GetSourcePin());
 
-      const plVariant value = ref_compiler.Fold(pSource);
+      const plVariant value = ref_compiler.Fold(pSource, uiSourceOutput);
       if (value.IsValid())
       {
         out_values[pin.GetName()] = value;
@@ -492,6 +570,7 @@ static void CollectWiredValues(const plDocumentObject* pSystemNode, const plVisu
             wire.m_pBlock = pBlock;
             wire.m_sProperty = sProperty;
             wire.m_pSource = pSource;
+            wire.m_uiSourceOutput = uiSourceOutput;
             wire.m_TargetKind = plParticleValueKind::FromProperty(pProp);
             wire.m_Tier = ref_compiler.GetTier(pSource);
           }
@@ -511,8 +590,9 @@ static plVariant ConvertWiredValue(const plVariant& value, const plVariant& curr
   plVec4 v(0.0f);
   bool bNumeric = true;
 
+  // a vector into a colour is opaque
   if (value.IsA<plVec3>())
-    v = value.Get<plVec3>().GetAsVec4(0.0f);
+    v = value.Get<plVec3>().GetAsVec4(current.IsA<plColor>() || current.IsA<plColorGammaUB>() ? 1.0f : 0.0f);
   else if (value.IsA<plColor>())
   {
     const plColor c = value.Get<plColor>();
@@ -634,7 +714,7 @@ static void BuildParticlePrograms(const plVisualGraphObjectManager* pManager, co
         continue;
       }
 
-      const plUInt32 uiOutput = compiler.AddOutput(pWire->m_pSource, pWire->m_TargetKind);
+      const plUInt32 uiOutput = compiler.AddOutput(pWire->m_pSource, pWire->m_TargetKind, pWire->m_uiSourceOutput);
       if (uiOutput == plInvalidIndex)
       {
         plLog::Warning("The per-particle wire into '{}' cannot be evaluated; the block uses its own value.", pWire->m_sProperty);
@@ -885,7 +965,7 @@ void plParticleEffectAssetDocument::BuildDescriptorFromGraph(plParticleEffectDes
       if (pSlot == nullptr) // a disabled block never reaches the runtime
         continue;
 
-      const plUInt32 uiOutput = compiler.AddOutput(wire.m_pSource, wire.m_TargetKind);
+      const plUInt32 uiOutput = compiler.AddOutput(wire.m_pSource, wire.m_TargetKind, wire.m_uiSourceOutput);
       if (uiOutput == plInvalidIndex)
       {
         plLog::Warning("The wire into '{}' cannot be evaluated per frame; it keeps its start value.", wire.m_sProperty);
@@ -1478,6 +1558,132 @@ plStatus plParticleEffectAssetDocument::AddSystemOnDeaths(const plDocumentObject
 
   GetSelectionManager()->SetSelection(pManager->GetObject(systemGuid));
   return plStatus(PL_SUCCESS);
+}
+
+void plParticleEffectAssetDocument::ApplyCurvePreset(const plUuid& node)
+{
+  auto* pManager = static_cast<plParticleEffectNodeManager*>(GetObjectManager());
+  plCommandHistory* pHistory = GetCommandHistory();
+
+  const plDocumentObject* pNode = pManager->GetObject(node);
+  if (pNode == nullptr || !pNode->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleCurveOverLifeNode>() || pHistory->IsInTransaction() || pHistory->IsInUndoRedo())
+    return;
+
+  const plInt64 iPreset = pNode->GetTypeAccessor().GetValue("Preset").ConvertTo<plInt64>();
+  if (iPreset == plParticleCurvePreset::None)
+    return;
+
+  struct Key
+  {
+    double m_fT;
+    double m_fValue;
+  };
+
+  // sizes pop in and shrink out; opacity and glow fade out
+  static const Key s_PopIn[] = {{0.0, 0.0}, {0.15, 1.0}, {1.0, 0.0}};
+  static const Key s_FadeOut[] = {{0.0, 1.0}, {1.0, 0.0}};
+
+  plArrayPtr<const Key> keys = plMakeArrayPtr(s_FadeOut);
+  plParticleSinkTarget::Enum target = plParticleSinkTarget::Opacity;
+
+  if (iPreset == plParticleCurvePreset::SizeOverLife)
+  {
+    keys = plMakeArrayPtr(s_PopIn);
+    target = plParticleSinkTarget::Size;
+  }
+  else if (iPreset == plParticleCurvePreset::EmissiveOverLife)
+  {
+    target = plParticleSinkTarget::Emissive;
+  }
+
+  pHistory->StartTransaction("Curve Over Life Preset");
+
+  auto setProperty = [&](const plUuid& object, const char* szProperty, const plVariant& value)
+  {
+    plSetObjectPropertyCommand cmd;
+    cmd.m_Object = object;
+    cmd.m_sProperty = szProperty;
+    cmd.m_NewValue = value;
+    pHistory->AddCommand(cmd).LogFailure();
+  };
+
+  setProperty(node, "Preset", (plInt64)plParticleCurvePreset::None);
+
+  if (const plDocumentObject* pCurve = plParticleGraphCompiler::GetInlineCurveObject(pNode))
+  {
+    for (const Key& key : keys)
+    {
+      plAddObjectCommand add;
+      add.m_pType = plGetStaticRTTI<plCurveControlPointData>();
+      add.m_Parent = pCurve->GetGuid();
+      add.m_sParentProperty = "ControlPoints";
+      add.m_Index = -1;
+      add.m_NewObjectGuid = plUuid::MakeUuid();
+      pHistory->AddCommand(add).LogFailure();
+
+      setProperty(add.m_NewObjectGuid, "Tick", (plInt64)(key.m_fT * 4800.0));
+      setProperty(add.m_NewObjectGuid, "Value", key.m_fValue);
+      setProperty(add.m_NewObjectGuid, "LeftTangentMode", (plInt64)plCurveTangentMode::Auto);
+      setProperty(add.m_NewObjectGuid, "RightTangentMode", (plInt64)plCurveTangentMode::Auto);
+    }
+  }
+
+  // the system to drive: the selected one or the one of a selected block, else the only one, else the nearest
+  const plDocumentObject* pSystem = nullptr;
+  for (const plDocumentObject* pSelected : GetSelectionManager()->GetSelection())
+  {
+    const plDocumentObject* pCandidate = plParticleGraphEditing::IsBlock(pSelected) ? pSelected->GetParent() : pSelected;
+    if (pCandidate != nullptr && pCandidate->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleSystemNode>())
+    {
+      pSystem = pCandidate;
+      break;
+    }
+  }
+
+  if (pSystem == nullptr)
+  {
+    float fNearest = plMath::MaxValue<float>();
+    for (const plDocumentObject* pChild : pManager->GetRootObject()->GetChildren())
+    {
+      if (!pChild->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleSystemNode>())
+        continue;
+
+      const float fDistance = (pManager->GetNodePos(pChild) - pManager->GetNodePos(pNode)).GetLengthSquared();
+      if (fDistance < fNearest)
+      {
+        fNearest = fDistance;
+        pSystem = pChild;
+      }
+    }
+  }
+
+  if (pSystem != nullptr)
+  {
+    // at the end of Update, where Set Attribute also runs on the GPU
+    plAddObjectCommand add;
+    add.m_pType = plGetStaticRTTI<plParticleBehaviorFactory_Attribute>();
+    add.m_Parent = pSystem->GetGuid();
+    add.m_sParentProperty = plParticleContextInfo::Get(plParticleContext::Update).m_szProperty;
+    add.m_Index = -1;
+    add.m_NewObjectGuid = plUuid::MakeUuid();
+    pHistory->AddCommand(add).LogFailure();
+
+    setProperty(add.m_NewObjectGuid, "Target", (plInt64)target);
+
+    // the block's pins exist from its add on; a new block is keyed by its guid
+    const plDocumentObject* pBlock = pManager->GetObject(add.m_NewObjectGuid);
+    const plVisualGraphPin* pSourcePin = pManager->GetOutputPinByName(pNode, "Value");
+    const plVisualGraphPin* pTargetPin = pBlock != nullptr ? pManager->GetInputPinByName(pSystem, plParticlePropertyPin::Make(pBlock, "Number")) : nullptr;
+
+    if (pSourcePin != nullptr && pTargetPin != nullptr)
+      plNodeCommands::AddAndConnectCommand(pHistory, pManager->GetConnectionType(), *pSourcePin, *pTargetPin).LogFailure();
+  }
+
+  pHistory->FinishTransaction();
+
+  // one undo step with the node's creation
+  if (pHistory->GetUndoStackSize() >= 2)
+    pHistory->MergeLastTwoTransactions();
 }
 
 static bool IsGraphNode(const plDocumentObject* pObject)

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Foundation/Math/Color16f.h>
+#include <ParticlePlugin/Declarations.h>
 #include <ParticlePlugin/ParticlePluginDLL.h>
 #include <RendererCore/Meshes/MeshRenderer.h>
 #include <RendererCore/Shader/ConstantBufferStorage.h>
@@ -14,6 +15,23 @@
 
 class plGALBufferPool;
 class plRenderContext;
+struct plMsgExtractRenderData;
+
+/// The category a render mode draws in: distortion in the distortion pass, masked and opaque with the
+/// forward-lit opaque geometry (and its depth passes), the rest as transparent.
+PL_PARTICLEPLUGIN_DLL plRenderData::Category plParticleGetRenderDataCategory(plParticleTypeRenderMode::Enum renderMode);
+
+/// Adds a particle type's render data to the category of its render mode (see plParticleGetRenderDataCategory).
+PL_PARTICLEPLUGIN_DLL void plParticleAddRenderData(plMsgExtractRenderData& ref_msg, plRenderData* pRenderData, plParticleTypeRenderMode::Enum renderMode);
+
+/// Whether a render mode draws with the opaque geometry.
+inline bool plParticleIsOpaqueRenderMode(plParticleTypeRenderMode::Enum renderMode)
+{
+  return renderMode == plParticleTypeRenderMode::Masked || renderMode == plParticleTypeRenderMode::Opaque;
+}
+
+/// Whether a type extracts nothing in this view: shadow views only take types that cast shadows.
+PL_PARTICLEPLUGIN_DLL bool plParticleSkipView(const plMsgExtractRenderData& msg, bool bCastsShadows);
 
 /// \brief Implements rendering of particle systems
 class PL_PARTICLEPLUGIN_DLL plParticleRenderer : public plRenderer

@@ -60,6 +60,7 @@ public:
   virtual void CreateRequiredStreams() override;
   virtual void QueryOptionalStreams() override;
   virtual bool HasActiveGPUElements() const override;
+  virtual bool CastsShadows() const override { return m_bRenderAsQuad && m_Look.m_bCastShadows && plParticleIsOpaqueRenderMode(m_RenderMode); }
   virtual float GetMaxParticleRadius(float fParticleSize) const override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
 
@@ -155,6 +156,9 @@ public:
   // per-particle structs the simulate dispatch writes, so it keeps the full quad feature set ----
   bool m_bRenderAsQuad = false;
   plEnum<plQuadParticleOrientation> m_QuadOrientation;
+  plEnum<plQuadParticleEmitterDirSampling> m_EmitterDirSampling = plQuadParticleEmitterDirSampling::Live;
+  plAngle m_MaxDeviation;
+  float m_fFacingMinSpeed = 0.1f; ///< Axis: Particle Dir
   plEnum<plParticleTextureAtlasType> m_TextureAtlasType;
   plUInt8 m_uiNumSpritesX = 1;
   plUInt8 m_uiNumSpritesY = 1;
@@ -301,6 +305,8 @@ protected:
 
   mutable bool m_bGPUBuffersCreated = false;
   mutable plUInt32 m_uiTrailWriteIndex = 0;
+  mutable plTime m_TrailLastSnapshot;
+  mutable float m_fTrailSnapshotFraction = 1.0f;
 
   void PackSpawnedParticles(plUInt64 uiStartIndex, plUInt64 uiNumElements);
 

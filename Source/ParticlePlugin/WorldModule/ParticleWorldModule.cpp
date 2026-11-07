@@ -9,6 +9,7 @@
 #include <ParticlePlugin/Components/ParticleComponent.h>
 #include <ParticlePlugin/Components/ParticleFinisherComponent.h>
 #include <ParticlePlugin/Components/ParticleForceFieldComponent.h>
+#include <ParticlePlugin/System/ParticleFrameProgram.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
 #include <ParticlePlugin/Module/ParticleModule.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
@@ -103,6 +104,7 @@ void plParticleWorldModule::Deinitialize()
   PL_LOCK(m_Mutex);
 
   plResourceManager::GetResourceEvents().RemoveEventHandler(plMakeDelegate(&plParticleWorldModule::ResourceEventHandler, this));
+  plParticleClearMainCameraAxes(GetWorld());
 
   WorldClear();
 }

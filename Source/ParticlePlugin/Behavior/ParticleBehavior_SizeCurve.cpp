@@ -3,6 +3,8 @@
 #include <Foundation/DataProcessing/Stream/ProcessingStreamIterator.h>
 #include <Foundation/Math/Float16.h>
 #include <Foundation/Profiling/Profiling.h>
+#include <Foundation/Threading/Lock.h>
+#include <Foundation/Threading/Mutex.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_SizeCurve.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
 
@@ -36,12 +38,38 @@ void plParticleBehaviorFactory_SizeCurve::CopyBehaviorProperties(plParticleBehav
   plParticleBehavior_SizeCurve* pBehavior = static_cast<plParticleBehavior_SizeCurve*>(pObject);
 
   pBehavior->m_Mode = m_Mode;
-  pBehavior->m_hCurve = m_hCurve;
-  pBehavior->m_hCurveY = m_hCurveY;
-  pBehavior->m_hCurveZ = m_hCurveZ;
   pBehavior->m_fBaseSize = m_fBaseSize;
   pBehavior->m_fCurveScale = m_fCurveScale;
+  pBehavior->m_pFactory = this;
   pBehavior->m_pProgram = &m_Program;
+  pBehavior->m_pTables = GetTables();
+}
+
+namespace
+{
+  /// Guards the lazy bake of the shared curve tables, which several update tasks may ask for at once.
+  plMutex& GetSizeCurveTablesMutex()
+  {
+    static plMutex s_Mutex;
+    return s_Mutex;
+  }
+} // namespace
+
+plSharedPtr<plParticleSizeCurveTables> plParticleBehaviorFactory_SizeCurve::GetTables() const
+{
+  PL_LOCK(GetSizeCurveTablesMutex());
+
+  if (m_pTables == nullptr || m_pTables->IsOutdated())
+  {
+    plSharedPtr<plParticleSizeCurveTables> pTables = PL_DEFAULT_NEW(plParticleSizeCurveTables);
+
+    // the uniform mode only reads the first curve
+    const bool bPerAxis = m_Mode == plParticleSizeMode::PerAxis;
+    pTables->Bake(m_hCurve, bPerAxis ? m_hCurveY : plCurve1DResourceHandle(), bPerAxis ? m_hCurveZ : plCurve1DResourceHandle());
+    m_pTables = pTables;
+  }
+
+  return m_pTables;
 }
 
 void plParticleBehaviorFactory_SizeCurve::Save(plStreamWriter& inout_stream) const
@@ -80,47 +108,70 @@ void plParticleBehaviorFactory_SizeCurve::Load(plStreamReader& inout_stream)
     inout_stream >> m_hCurveY;
     inout_stream >> m_hCurveZ;
   }
+
+  m_pTables.Clear();
+
+  // queued now, so baking the tables rarely waits for them when the first system starts
+  const plCurve1DResourceHandle* curves[] = {&m_hCurve, &m_hCurveY, &m_hCurveZ};
+  for (const plCurve1DResourceHandle* pCurve : curves)
+  {
+    if (pCurve->IsValid())
+      plResourceManager::PreloadResource(*pCurve);
+  }
 }
 
-namespace
+//////////////////////////////////////////////////////////////////////////
+
+void plParticleSizeCurveTables::Bake(const plCurve1DResourceHandle& hCurveX, const plCurve1DResourceHandle& hCurveY, const plCurve1DResourceHandle& hCurveZ)
 {
-  /// Holds one curve acquired for the duration of a Process call; an invalid or empty curve samples 0.
-  class plSizeCurveSampler
+  const plCurve1DResourceHandle* curves[3] = {&hCurveX, &hCurveY, &hCurveZ};
+
+  for (plUInt32 uiAxis = 0; uiAxis < 3; ++uiAxis)
   {
-  public:
-    explicit plSizeCurveSampler(const plCurve1DResourceHandle& hCurve)
-    {
-      if (!hCurve.IsValid())
-        return;
+    m_hCurves[uiAxis] = *curves[uiAxis];
+    m_bValid[uiAxis] = false;
+    m_uiChangeCounters[uiAxis] = 0;
 
-      plResourceAcquireResult result = plResourceAcquireResult::None;
-      m_pResource = plResourceManager::BeginAcquireResource(hCurve, plResourceAcquireMode::BlockTillLoaded, plCurve1DResourceHandle(), &result);
+    if (!m_hCurves[uiAxis].IsValid())
+      continue;
 
-      if (result != plResourceAcquireResult::MissingFallback && !m_pResource->GetDescriptor().m_Curves.IsEmpty())
-        m_pCurve = &m_pResource->GetDescriptor().m_Curves[0];
-    }
+    plResourceLock<plCurve1DResource> pCurve(m_hCurves[uiAxis], plResourceAcquireMode::BlockTillLoaded);
 
-    ~plSizeCurveSampler()
-    {
-      if (m_pResource != nullptr)
-        plResourceManager::EndAcquireResource(m_pResource);
-    }
+    // the counter of the resource itself, not of a fallback that stands in for a missing one
+    m_uiChangeCounters[uiAxis] = plResourceLock<plCurve1DResource>(m_hCurves[uiAxis], plResourceAcquireMode::PointerOnly)->GetCurrentResourceChangeCounter();
 
-    bool IsValid() const { return m_pCurve != nullptr; }
+    if (pCurve.GetAcquireResult() == plResourceAcquireResult::MissingFallback || pCurve->GetDescriptor().m_Curves.IsEmpty())
+      continue;
 
-    float Sample(float fLifeTimeFraction) const
-    {
-      if (m_pCurve == nullptr)
-        return 0.0f;
+    plParticleProgramTables::BakeCurve(pCurve->GetDescriptor().m_Curves[0], true, plArrayPtr<float>(m_Values[uiAxis], s_uiTableSize));
+    m_bValid[uiAxis] = true;
+  }
+}
 
-      return (float)m_pCurve->NormalizeValue(m_pCurve->Evaluate(m_pCurve->ConvertNormalizedPos(fLifeTimeFraction)));
-    }
+bool plParticleSizeCurveTables::IsOutdated() const
+{
+  for (plUInt32 uiAxis = 0; uiAxis < 3; ++uiAxis)
+  {
+    if (!m_hCurves[uiAxis].IsValid())
+      continue;
 
-  private:
-    plCurve1DResource* m_pResource = nullptr;
-    const plCurve1D* m_pCurve = nullptr;
-  };
-} // namespace
+    plResourceLock<plCurve1DResource> pCurve(m_hCurves[uiAxis], plResourceAcquireMode::PointerOnly);
+    if (pCurve->GetCurrentResourceChangeCounter() != m_uiChangeCounters[uiAxis])
+      return true;
+  }
+
+  return false;
+}
+
+float plParticleSizeCurveTables::Sample(plUInt32 uiAxis, float t) const
+{
+  if (!m_bValid[uiAxis])
+    return 0.0f;
+
+  const float fPos = plMath::Saturate(t) * (s_uiTableSize - 1);
+  const plUInt32 i0 = plMath::Min((plUInt32)fPos, s_uiTableSize - 2);
+  return plMath::Lerp(m_Values[uiAxis][i0], m_Values[uiAxis][i0 + 1], fPos - (float)i0);
+}
 
 void plParticleBehavior_SizeCurve::CreateRequiredStreams()
 {
@@ -164,30 +215,23 @@ void plParticleBehavior_SizeCurve::InitializeElements(plUInt64 uiStartIndex, plU
 
 void plParticleBehavior_SizeCurve::Process(plUInt64 uiNumElements)
 {
-  if (!GetOwnerEffect()->IsVisible())
-  {
-    // reduce the update interval when the effect is not visible
-    m_uiCurrentUpdateInterval = 32;
-  }
-  else
-  {
-    m_uiCurrentUpdateInterval = 2;
-  }
+  // every particle while the effect is seen; an invisible one only keeps a slice of them current per step
+  m_uiCurrentUpdateInterval = GetOwnerEffect()->IsVisible() ? 1 : 32;
 
-  const bool bPerAxis = m_pStreamSizeScale != nullptr;
+  if (m_pFactory == nullptr)
+    return;
 
-  if (!m_hCurve.IsValid() && (!bPerAxis || (!m_hCurveY.IsValid() && !m_hCurveZ.IsValid())))
+  // a reloaded curve is baked again, once for every system that shares it
+  if (m_pTables == nullptr || m_pTables->IsOutdated())
+    m_pTables = m_pFactory->GetTables();
+
+  const plParticleSizeCurveTables& tables = *m_pTables;
+  if (!tables.HasCurve(0) && !tables.HasCurve(1) && !tables.HasCurve(2))
     return;
 
   PL_PROFILE_SCOPE("PFX: Size Curve");
 
-  const plSizeCurveSampler curveX(m_hCurve);
-  const plSizeCurveSampler curveY(bPerAxis ? m_hCurveY : plCurve1DResourceHandle());
-  const plSizeCurveSampler curveZ(bPerAxis ? m_hCurveZ : plCurve1DResourceHandle());
-
-  if (!curveX.IsValid() && !curveY.IsValid() && !curveZ.IsValid())
-    return;
-
+  const bool bPerAxis = m_pStreamSizeScale != nullptr;
   const plVec2* pLifeTime = m_pStreamLifeTime->GetData<plVec2>();
   plFloat16* pSize = bPerAxis ? nullptr : m_pStreamSize->GetWritableData<plFloat16>();
   plFloat16Vec3* pSizeScale = bPerAxis ? m_pStreamSizeScale->GetWritableData<plFloat16Vec3>() : nullptr;
@@ -196,11 +240,8 @@ void plParticleBehavior_SizeCurve::Process(plUInt64 uiNumElements)
   plUInt32 uiScaleComponents = 0;
   const float* pScale = m_Runner.RunProperty(GetOwnerSystem(), uiNumElements, m_TimeDiff, "CurveScale", uiScaleComponents);
 
-  // only every n-th particle is evaluated per step, since sampling the curve is expensive
-  const plUInt64 uiFirst = m_uiFirstToUpdate;
-  ++m_uiFirstToUpdate;
-  if (m_uiFirstToUpdate >= m_uiCurrentUpdateInterval)
-    m_uiFirstToUpdate = 0;
+  const plUInt64 uiFirst = m_uiFirstToUpdate % m_uiCurrentUpdateInterval;
+  m_uiFirstToUpdate = (plUInt8)((uiFirst + 1) % m_uiCurrentUpdateInterval);
 
   for (plUInt64 uiParticle = uiFirst; uiParticle < uiNumElements; uiParticle += m_uiCurrentUpdateInterval)
   {
@@ -209,12 +250,12 @@ void plParticleBehavior_SizeCurve::Process(plUInt64 uiNumElements)
 
     if (bPerAxis)
     {
-      const plVec3 vCurve(curveX.Sample(fLifeTimeFraction), curveY.Sample(fLifeTimeFraction), curveZ.Sample(fLifeTimeFraction));
+      const plVec3 vCurve(tables.Sample(0, fLifeTimeFraction), tables.Sample(1, fLifeTimeFraction), tables.Sample(2, fLifeTimeFraction));
       pSizeScale[uiParticle] = plVec3(m_fBaseSize) + vCurve * fScale;
     }
     else
     {
-      pSize[uiParticle] = m_fBaseSize + curveX.Sample(fLifeTimeFraction) * fScale;
+      pSize[uiParticle] = m_fBaseSize + tables.Sample(0, fLifeTimeFraction) * fScale;
     }
   }
 }

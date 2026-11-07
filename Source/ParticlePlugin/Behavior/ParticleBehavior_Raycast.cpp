@@ -157,6 +157,11 @@ void plParticleBehavior_Raycast::Process(plUInt64 uiNumElements)
 
   plPhysicsCastResult hitResult;
 
+  // the physics scene is in world space; a local-space effect's particles are in its own frame
+  const bool bLocalSpace = GetOwnerEffect()->NeedsToApplyTransform();
+  const plTransform simToWorld = bLocalSpace ? GetOwnerEffect()->GetTransform() : plTransform::MakeIdentity();
+  const plTransform worldToSim = simToWorld.GetInverse();
+
   plUInt32 i = 0;
   while (!itPosition.HasReachedEnd())
   {
@@ -177,7 +182,31 @@ void plParticleBehavior_Raycast::Process(plUInt64 uiNumElements)
         plPhysicsQueryParameters query(m_uiCollisionLayer);
         query.m_ShapeTypes = plPhysicsShapeType::Static | plPhysicsShapeType::Dynamic;
 
-        if (m_pPhysicsModule != nullptr && m_pPhysicsModule->Raycast(hitResult, vLastPos, vDirection, fMaxLen + fSize, query))
+        bool bHit = false;
+        if (m_pPhysicsModule != nullptr)
+        {
+          if (bLocalSpace)
+          {
+            const plVec3 vWorldStart = simToWorld.TransformPosition(vLastPos);
+            plVec3 vWorldDir = simToWorld.TransformPosition(vCurPos) - vWorldStart;
+            const float fWorldLen = vWorldDir.GetLengthAndNormalize();
+            const float fWorldSize = fSize * (fMaxLen > 0.0f ? fWorldLen / fMaxLen : 1.0f);
+
+            bHit = m_pPhysicsModule->Raycast(hitResult, vWorldStart, vWorldDir, fWorldLen + fWorldSize, query);
+
+            if (bHit)
+            {
+              hitResult.m_vPosition = worldToSim.TransformPosition(hitResult.m_vPosition);
+              hitResult.m_vNormal = worldToSim.m_qRotation * hitResult.m_vNormal;
+            }
+          }
+          else
+          {
+            bHit = m_pPhysicsModule->Raycast(hitResult, vLastPos, vDirection, fMaxLen + fSize, query);
+          }
+        }
+
+        if (bHit)
         {
           hitResult.m_vPosition -= vDirection * fSize;
           const plVec3 vHitVelocity = itVelocity.Current();

@@ -88,14 +88,26 @@ namespace
       const plParticleAttributeSinkSettings& settings = pAttribute->m_Settings;
       if (settings.m_Target == plParticleSinkTarget::Custom)
         return "Set Attribute writes a custom attribute, which the GPU does not keep";
-      if (settings.m_Target > plParticleSinkTarget::RotationSpeed)
-        return "Set Attribute writes Rotation, Facing, Size Per Axis or Emissive, which GPU systems do not keep";
 
       program.m_uiKind = GPU_PROGRAM_KIND_SET_ATTRIBUTE;
-      program.m_uiTarget = settings.m_Target.GetValue();
-      program.m_uiComponent = settings.m_Component.GetValue();
       program.m_uiMode = settings.m_Mode.GetValue();
       program.m_sOutput = settings.GetValuePropertyName();
+
+      if (settings.m_Target == plParticleSinkTarget::Opacity)
+      {
+        // the colour's alpha: a Color record that writes component A
+        program.m_uiTarget = GPU_PROGRAM_TARGET_COLOR;
+        program.m_uiComponent = plParticleSinkComponent::W;
+      }
+      else if (settings.m_Target > plParticleSinkTarget::RotationSpeed)
+      {
+        return "Set Attribute writes Rotation, Facing, Size Per Axis or Emissive, which GPU systems do not keep";
+      }
+      else
+      {
+        program.m_uiTarget = settings.m_Target.GetValue();
+        program.m_uiComponent = settings.m_Component.GetValue();
+      }
 
       const plUInt32 uiComponents = settings.GetValueComponents();
       if (uiComponents == 3)
@@ -538,15 +550,14 @@ plString plParticleGPUProgramSet::Build(plArrayPtr<const plParticleBehaviorFacto
       m_uiMaxRegisters = plMath::Max(m_uiMaxRegisters, byteCode.GetNumTempRegisters());
     }
 
-    // baked gradient and curve tables, as the CPU runner samples them
+    // baked gradient and curve tables, the same ones the CPU runner samples
     if (!data.m_Assets.IsEmpty())
     {
-      plParticleProgramTables tables;
-      tables.Bake(data.m_Assets);
+      const plSharedPtr<plParticleProgramTables> pTables = data.m_Assets.GetTables();
 
       m_Words[uiRecord + GPU_PROGRAM_RECORD_GRADIENTS] = m_Data.GetCount();
-      m_Words[uiRecord + GPU_PROGRAM_RECORD_NUM_GRADIENTS] = tables.GetGradientTables().GetCount() / GPU_PROGRAM_TABLE_SIZE;
-      for (const plVec4& v : tables.GetGradientTables())
+      m_Words[uiRecord + GPU_PROGRAM_RECORD_NUM_GRADIENTS] = pTables->GetGradientTables().GetCount() / GPU_PROGRAM_TABLE_SIZE;
+      for (const plVec4& v : pTables->GetGradientTables())
       {
         m_Data.PushBack(v.x);
         m_Data.PushBack(v.y);
@@ -555,8 +566,8 @@ plString plParticleGPUProgramSet::Build(plArrayPtr<const plParticleBehaviorFacto
       }
 
       m_Words[uiRecord + GPU_PROGRAM_RECORD_CURVES] = m_Data.GetCount();
-      m_Words[uiRecord + GPU_PROGRAM_RECORD_NUM_CURVES] = tables.GetCurveTables().GetCount() / GPU_PROGRAM_TABLE_SIZE;
-      for (float f : tables.GetCurveTables())
+      m_Words[uiRecord + GPU_PROGRAM_RECORD_NUM_CURVES] = pTables->GetCurveTables().GetCount() / GPU_PROGRAM_TABLE_SIZE;
+      for (float f : pTables->GetCurveTables())
         m_Data.PushBack(f);
     }
 

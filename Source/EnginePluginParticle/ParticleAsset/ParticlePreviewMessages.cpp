@@ -9,6 +9,12 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticlePreviewMotion, 1)
   PL_ENUM_CONSTANT(plParticlePreviewMotion::Line),
 PL_END_STATIC_REFLECTED_ENUM;
 
+PL_BEGIN_STATIC_REFLECTED_ENUM(plParticlePreviewBackdrop, 1)
+  PL_ENUM_CONSTANT(plParticlePreviewBackdrop::Stage),
+  PL_ENUM_CONSTANT(plParticlePreviewBackdrop::Floor),
+  PL_ENUM_CONSTANT(plParticlePreviewBackdrop::None),
+PL_END_STATIC_REFLECTED_ENUM;
+
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticlePreviewSettingsMsgToEngine, 1, plRTTIDefaultAllocator<plParticlePreviewSettingsMsgToEngine>)
 {
   PL_BEGIN_PROPERTIES
@@ -16,6 +22,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticlePreviewSettingsMsgToEngine, 1, plRTTID
     PL_MEMBER_PROPERTY("ShowStats", m_bShowStats),
     PL_MEMBER_PROPERTY("ShowEvents", m_bShowEvents),
     PL_ENUM_MEMBER_PROPERTY("Motion", plParticlePreviewMotion, m_Motion),
+    PL_ENUM_MEMBER_PROPERTY("Backdrop", plParticlePreviewBackdrop, m_Backdrop),
     PL_ARRAY_MEMBER_PROPERTY("SystemNames", m_SystemNames),
     PL_ARRAY_MEMBER_PROPERTY("BlackboardEntries", m_BlackboardEntries),
   }

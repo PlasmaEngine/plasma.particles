@@ -216,6 +216,10 @@ void plParticleGraphEditing::GetOperatorProperties(const plDocumentObject* pNode
 {
   out_properties.Clear();
 
+  // the property grid's visibility rules hold here too, so a node only shows what its mode uses
+  plMap<plString, plPropertyUiState> uiStates;
+  plPropertyMetaState::GetSingleton()->GetTypePropertiesState(pNode, uiStates);
+
   plHybridArray<const plAbstractProperty*, 16> properties;
   pNode->GetTypeAccessor().GetType()->GetAllProperties(properties);
 
@@ -224,8 +228,15 @@ void plParticleGraphEditing::GetOperatorProperties(const plDocumentObject* pNode
     if (pProp->GetCategory() != plPropertyCategory::Member || pProp->GetFlags().IsSet(plPropertyFlags::ReadOnly))
       continue;
 
-    // the name is the node's header, not a row
-    if (plStringUtils::IsEqual(pProp->GetPropertyName(), "Name"))
+    // the name is the node's header, not a row; inline curves are drawn by the node itself
+    if (plStringUtils::IsEqual(pProp->GetPropertyName(), "Name") || pProp->GetFlags().IsSet(plPropertyFlags::Class))
+      continue;
+
+    if (pProp->GetAttributeByType<plHiddenAttribute>() != nullptr)
+      continue;
+
+    auto itState = uiStates.Find(pProp->GetPropertyName());
+    if (itState.IsValid() && itState.Value().m_Visibility == plPropertyUiState::Invisible)
       continue;
 
     out_properties.PushBack(pProp);
@@ -777,6 +788,8 @@ plColorGammaUB plParticleGraphEditing::GetValueKindColor(plParticleValueKind::En
       return plColorGammaUB(217, 96, 92);
     case plParticleValueKind::Color:
       return plColorGammaUB(224, 179, 58);
+    case plParticleValueKind::Vector:
+      return plColorGammaUB(46, 196, 182);
     case plParticleValueKind::Texture:
       return plColorGammaUB(168, 116, 201);
     case plParticleValueKind::Gradient:
@@ -798,7 +811,8 @@ plString plParticleGraphEditing::GetOperatorTitle(const plDocumentObject* pNode)
 
   // a node that reads one of several inputs is titled after the one it reads, as its palette entry is ("Event Normal")
   const plRTTI* pType = pNode->GetTypeAccessor().GetType();
-  if (const plTitleAttribute* pTitle = pType->GetAttributeByType<plTitleAttribute>(); pTitle != nullptr && plStringView(pTitle->GetTitle()) == "{Input}")
+  const plTitleAttribute* pTitle = pType->GetAttributeByType<plTitleAttribute>();
+  if (pTitle != nullptr && plStringView(pTitle->GetTitle()) == "{Input}")
   {
     if (const plAbstractProperty* pInput = pType->FindPropertyByName("Input"); pInput != nullptr && pInput->GetSpecificType()->IsDerivedFrom<plEnumBase>())
     {
@@ -806,6 +820,40 @@ plString plParticleGraphEditing::GetOperatorTitle(const plDocumentObject* pNode)
       plReflectionUtils::EnumerationToString(pInput->GetSpecificType(), pNode->GetTypeAccessor().GetValue("Input").ConvertTo<plInt64>(), sValue);
       return plTranslate(sValue);
     }
+  }
+
+  // a node titled by its choice ("{Operation}", "Transform {Kind}") reads as its palette entry does: "Multiply", "Sin", "Pi"
+  if (pTitle != nullptr && plStringView(pTitle->GetTitle()).FindSubString("{") != nullptr)
+  {
+    plStringBuilder sTitle = pTitle->GetTitle();
+
+    plHybridArray<const plAbstractProperty*, 16> properties;
+    pType->GetAllProperties(properties);
+
+    for (const plAbstractProperty* pProp : properties)
+    {
+      if (pProp->GetCategory() != plPropertyCategory::Member || !pProp->GetSpecificType()->IsDerivedFrom<plEnumBase>())
+        continue;
+
+      plStringBuilder sToken("{", pProp->GetPropertyName(), "}");
+      if (sTitle.FindSubString(sToken) == nullptr)
+        continue;
+
+      const plInt64 iValue = pNode->GetTypeAccessor().GetValue(pProp->GetPropertyName()).ConvertTo<plInt64>();
+
+      plStringBuilder sValue;
+      plReflectionUtils::EnumerationToString(pProp->GetSpecificType(), iValue, sValue, plReflectionUtils::EnumConversionMode::ValueNameOnly);
+
+      // the trigonometric names are written short, as everywhere else
+      plString sName = plParticleEffectNodeManager::SplitWords(sValue);
+      if (pProp->GetSpecificType() == plGetStaticRTTI<plParticleFunctionOp>() && (iValue == plParticleFunctionOp::Sine || iValue == plParticleFunctionOp::Cosine))
+        sName = iValue == plParticleFunctionOp::Sine ? "Sin" : "Cos";
+
+      sTitle.ReplaceAll(sToken, sName);
+    }
+
+    if (sTitle.FindSubString("{") == nullptr)
+      return sTitle;
   }
 
   return plParticleEffectNodeManager::FriendlyTypeName(pType);

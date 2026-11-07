@@ -6,6 +6,7 @@
 #include <GameEngine/Animation/Skeletal/AnimatedMeshComponent.h>
 #include <ParticlePlugin/Components/ParticleForceFieldComponent.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
+#include <ParticlePlugin/System/ParticleFrameProgram.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <RendererCore/Pipeline/View.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
@@ -170,8 +171,12 @@ void plParticleWorldModule::UpdateEffects(const plWorldModule::UpdateContext& co
     plView* pView = nullptr;
     if (plRenderWorld::TryGetView(hView, pView) && pView->GetWorld() == GetWorld())
     {
-      vMainCameraPos = pView->GetCullingCamera()->GetCenterPosition();
+      const plCamera* pCamera = pView->GetCullingCamera();
+      vMainCameraPos = pCamera->GetCenterPosition();
       bHasMainCamera = true;
+
+      // the Camera Forward / Right / Up inputs of the per-frame graph programs
+      plParticleStoreMainCameraAxes(GetWorld(), pCamera->GetCenterDirForwards(), pCamera->GetCenterDirRight(), pCamera->GetCenterDirUp());
       break;
     }
   }

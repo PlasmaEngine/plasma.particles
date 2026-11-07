@@ -10,6 +10,8 @@
 #  include <Shaders/Common/Lighting.h>
 #elif SHADING_QUALITY == SHADING_QUALITY_SIMPLIFIED
 #  include <Shaders/Common/LightingSimplified.h>
+#elif SHADING_QUALITY == SHADING_QUALITY_MOBILE
+#  include <Shaders/Common/LightingMobile.h>
 #else
 #  error "Unknown shading quality configuration."
 #endif
@@ -95,8 +97,13 @@ Quad CalcQuadOutputPositionWithAlignedAxis(uint vertexIndex, float3 inPosition, 
 
   float3 inTangentXws = mul((float3x3)ObjectToWorldMatrix, inTangentX);
 
-  float3 axisDir = normalize(inTangentXws);
-  float3 orthoDir = normalize(cross(inTangentXws, GetCameraDirForwards()));
+  // a zero axis, or one pointing along the view, has no defined width direction: fall back to the camera's
+  float axisLength = length(inTangentXws);
+  float3 axisDir = axisLength > 1.0e-8 ? inTangentXws / axisLength : GetCameraDirUp();
+
+  float3 ortho = cross(axisDir, GetCameraDirForwards());
+  float orthoLength = length(ortho);
+  float3 orthoDir = orthoLength > 1.0e-4 ? ortho / orthoLength : GetCameraDirRight();
 
   float3 offsetRight = orthoDir * ((QuadPosOffsets[vertexIndex].x - 0.5) * inSize * widthScale);
   float3 offsetUp = axisDir * (QuadPosOffsets[vertexIndex].y * inSize * -stretch);
@@ -168,10 +175,18 @@ float2 ComputeAtlasTexCoordRandomAnimated(float2 baseTexCoord, uint numVarsX, ui
   return texCoordOffsetAndSize.xy + baseTexCoord * texCoordOffsetAndSize.zw;
 }
 
+// Pixel coordinates and linear depth (what a pixel shader's SV_Position.xyw holds) of a clip-space position.
+float3 ClipToPixelPosition(float4 clipPosition)
+{
+  float2 normalizedScreenPos = (clipPosition.xy / clipPosition.w) * float2(0.5, -0.5) + 0.5;
+  return float3(normalizedScreenPos * ViewportSize.xy, clipPosition.w);
+}
+
 // Six-way lighting needs the key light separately from the summed irradiance: the baked response
 // maps are indexed by a direction, so they can only be driven by one light. The brightest
 // shadowed contributor wins; everything else folds into the ambient term.
-float3 CalculateParticleLightingEx(float4 screenPosition, float3 worldPosition, float3 worldNormal, out float3 dominantLightDir, out float3 dominantLightColor)
+// pixelPosition is in pixels with linear depth in z: the light clusters are looked up with it.
+float3 CalculateParticleLightingAtPixel(float3 pixelPosition, float3 worldPosition, float3 worldNormal, out float3 dominantLightDir, out float3 dominantLightColor)
 {
   dominantLightDir = float3(0, 0, 1);
   dominantLightColor = 0.0f;
@@ -181,9 +196,7 @@ float3 CalculateParticleLightingEx(float4 screenPosition, float3 worldPosition, 
   float3 indirectLightModulation = 1.0f;
 
 #if SHADING_QUALITY == SHADING_QUALITY_NORMAL
-  float2 normalizedScreenPos = (screenPosition.xy / screenPosition.w) * float2(0.5, -0.5) + 0.5;
-  float3 screenPos = float3(normalizedScreenPos * ViewportSize.xy, screenPosition.w);
-  plPerClusterData clusterData = GetClusterData(screenPos);
+  plPerClusterData clusterData = GetClusterData(pixelPosition);
 
   float3 viewVector = normalize(GetCameraPosition() - worldPosition);
 
@@ -249,6 +262,11 @@ float3 CalculateParticleLightingEx(float4 screenPosition, float3 worldPosition, 
 
   // normalize brdf
   totalLight *= (1.0f / PI);
+#elif SHADING_QUALITY == SHADING_QUALITY_MOBILE
+  totalLight = CalculateMobileParticleDirectLight(worldPosition, worldNormal, LightDirectionality, dominantLightDir, dominantLightColor);
+
+  // normalize brdf
+  totalLight *= (1.0f / PI);
 #endif
 
   // sky light in ambient cube basis
@@ -258,10 +276,25 @@ float3 CalculateParticleLightingEx(float4 screenPosition, float3 worldPosition, 
   return totalLight;
 }
 
+// For vertex shaders: screenPosition is the clip-space position.
+float3 CalculateParticleLightingEx(float4 screenPosition, float3 worldPosition, float3 worldNormal, out float3 dominantLightDir, out float3 dominantLightColor)
+{
+  return CalculateParticleLightingAtPixel(ClipToPixelPosition(screenPosition), worldPosition, worldNormal, dominantLightDir, dominantLightColor);
+}
+
+// For vertex shaders: screenPosition is the clip-space position.
 float3 CalculateParticleLighting(float4 screenPosition, float3 worldPosition, float3 worldNormal)
 {
   float3 unusedDir;
   float3 unusedColor;
   return CalculateParticleLightingEx(screenPosition, worldPosition, worldNormal, unusedDir, unusedColor);
+}
+
+// For pixel shaders: pixelPosition is SV_Position.xyw.
+float3 CalculateParticleLightingPS(float3 pixelPosition, float3 worldPosition, float3 worldNormal)
+{
+  float3 unusedDir;
+  float3 unusedColor;
+  return CalculateParticleLightingAtPixel(pixelPosition, worldPosition, worldNormal, unusedDir, unusedColor);
 }
 

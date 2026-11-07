@@ -23,6 +23,9 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializer, 1, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEmitterSpaceDirectionAttribute, 1, plRTTIDefaultAllocator<plParticleEmitterSpaceDirectionAttribute>)
+PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 
 plParticleInitializer* plParticleInitializerFactory::CreateInitializer(plParticleSystemInstance* pOwner) const

@@ -185,6 +185,12 @@ void plGameEngineTestParticleRuntime::SetupSubTests()
   AddSubTest("LookSettings", SubTests::LookSettings);
   AddSubTest("GPULoweringNewFeatures", SubTests::GPULoweringNewFeatures);
   AddSubTest("DistortionPipeline", SubTests::DistortionPipeline);
+  AddSubTest("ParticleDirAtRest", SubTests::ParticleDirAtRest);
+  AddSubTest("VelocityConeAxisRotated", SubTests::VelocityConeAxisRotated);
+  AddSubTest("EmitterDirAtSpawn", SubTests::EmitterDirAtSpawn);
+  AddSubTest("LocalSpaceAttractor", SubTests::LocalSpaceAttractor);
+  AddSubTest("GPUSpawnAxis", SubTests::GPUSpawnAxis);
+  AddSubTest("Round2Serialization", SubTests::Round2Serialization);
   AddSubTest("BenchMassDeaths", SubTests::BenchMassDeaths);
   AddSubTest("BenchRaycast", SubTests::BenchRaycast);
   AddSubTest("BenchFarLod", SubTests::BenchFarLod);
@@ -384,6 +390,21 @@ plResult plGameEngineTestParticleRuntime::InitializeSubTest(plInt32 iIdentifier)
     case SubTests::LookSettings:
     case SubTests::GPULoweringNewFeatures:
     case SubTests::DistortionPipeline:
+      // checked directly in RunSubTest, no effect needed
+      break;
+
+    case SubTests::ParticleDirAtRest:
+    case SubTests::VelocityConeAxisRotated:
+    case SubTests::EmitterDirAtSpawn:
+    case SubTests::LocalSpaceAttractor:
+    case SubTests::GPUSpawnAxis:
+      m_Round2Axes.Clear();
+      SetupRound2Test(iIdentifier, desc);
+      StartEffect(desc, {});
+      PlaceRound2Owner(iIdentifier);
+      break;
+
+    case SubTests::Round2Serialization:
       // checked directly in RunSubTest, no effect needed
       break;
 
@@ -844,6 +865,10 @@ plTestAppRun plGameEngineTestParticleRuntime::RunSubTest(plInt32 iIdentifier, pl
 
   if (iIdentifier >= SubTests::BenchMassDeaths && iIdentifier <= SubTests::BenchTestingChambers)
     return RunBenchmark(iIdentifier);
+
+  // turns the effect's owner between checks, so it takes its own locks
+  if (iIdentifier >= SubTests::ParticleDirAtRest && iIdentifier <= SubTests::Round2Serialization)
+    return RunRound2Test(iIdentifier);
 
   if (iIdentifier >= SubTests::SizePerAxis && iIdentifier <= SubTests::DistortionPipeline)
   {

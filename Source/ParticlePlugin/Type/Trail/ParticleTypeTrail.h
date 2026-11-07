@@ -66,6 +66,7 @@ public:
 
   virtual void CreateRequiredStreams() override;
   virtual void ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const override;
+  virtual bool CastsShadows() const override { return m_Look.m_bCastShadows && plParticleIsOpaqueRenderMode(m_RenderMode); }
   /// \todo This is a hacky guess, one would actually need to inspect the trail positions
   virtual float GetMaxParticleRadius(float fParticleSize) const override { return fParticleSize + m_uiMaxPoints * 0.05f; }
 

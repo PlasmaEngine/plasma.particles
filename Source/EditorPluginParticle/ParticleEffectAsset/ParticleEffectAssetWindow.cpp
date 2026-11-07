@@ -18,7 +18,6 @@ plParticleEffectAssetDocumentWindow::plParticleEffectAssetDocumentWindow(plAsset
   GetDocument()->GetObjectManager()->m_StructureEvents.AddEventHandler(plMakeDelegate(&plParticleEffectAssetDocumentWindow::StructureEventHandler, this));
 
   plEditorPreferencesUser* pPreferences = plPreferences::QueryPreferences<plEditorPreferencesUser>();
-  pPreferences->ApplyDefaultValues(m_LightSettings);
 
   SetMenuBarActions("ParticleEffectAssetMenuBar");
   SetToolBarActions("ParticleEffectAssetToolBar");

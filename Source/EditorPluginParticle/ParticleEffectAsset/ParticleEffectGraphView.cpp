@@ -3,7 +3,9 @@
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAsset.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectGraphView.h>
 #include <EditorUi/Surface.h>
+#include <GuiFoundation/EngineUi/EngineCurveWindow.h>
 #include <GuiFoundation/UIServices/ImageCache.h>
+#include <ToolsFoundation/CommandHistory/CommandHistory.h>
 #include <ToolsFoundation/Document/Document.h>
 #include <ToolsFoundation/Selection/SelectionManager.h>
 
@@ -22,6 +24,7 @@ plParticleEffectGraphController::~plParticleEffectGraphController()
   {
     auto* pManager = const_cast<plVisualGraphObjectManager*>(m_pManager);
     pManager->m_StructureEvents.RemoveEventHandler(plMakeDelegate(&plParticleEffectGraphController::StructureEventHandler, this));
+    pManager->m_PropertyEvents.RemoveEventHandler(plMakeDelegate(&plParticleEffectGraphController::PropertyEventHandler, this));
     m_pManager->GetDocument()->GetSelectionManager()->m_Events.RemoveEventHandler(plMakeDelegate(&plParticleEffectGraphController::SelectionEventHandler, this));
 
     if (auto* pDocument = GetEffectDocument())
@@ -42,6 +45,7 @@ void plParticleEffectGraphController::Init(const plVisualGraphObjectManager* pMa
   // block rows show the selection. Structure events are only published on the mutable manager.
   auto* pMutableManager = const_cast<plVisualGraphObjectManager*>(pManager);
   pMutableManager->m_StructureEvents.AddEventHandler(plMakeDelegate(&plParticleEffectGraphController::StructureEventHandler, this));
+  pMutableManager->m_PropertyEvents.AddEventHandler(plMakeDelegate(&plParticleEffectGraphController::PropertyEventHandler, this));
   pManager->GetDocument()->GetSelectionManager()->m_Events.AddEventHandler(plMakeDelegate(&plParticleEffectGraphController::SelectionEventHandler, this));
 
   if (auto* pDocument = GetEffectDocument())
@@ -104,11 +108,46 @@ void plParticleEffectGraphController::GetPinLook(const plVisualGraphPin& pin, pl
     out_look.m_sTooltip = plTranslate(pin.GetName());
   }
 
+  if (GetNodeType(pin.GetParent()) != NodeType::Operator)
+    return;
+
+  plParticleGraphCompiler compiler(m_pManager, FindEffectNode());
+
   // an operator's output shows when its value is computed, like the wires leaving it
-  if (pin.GetType() == plVisualGraphPin::Type::Output && GetNodeType(pin.GetParent()) == NodeType::Operator)
+  if (pin.GetType() == plVisualGraphPin::Type::Output)
   {
-    plParticleGraphCompiler compiler(m_pManager, FindEffectNode());
     out_look.m_Color = GetTierColor(compiler.GetTier(pin.GetParent()));
+    return;
+  }
+
+  // an adaptive input takes the colour of what the node computes in, which follows what is wired into it
+  if (plParticleValueKind::FromNodeInput(pin.GetParent()->GetTypeAccessor().GetType(), pin.GetName()) == plParticleValueKind::Adaptive)
+  {
+    out_look.m_Color = plParticleGraphEditing::GetValueKindColor(compiler.GetOutputKind(pin.GetParent()));
+
+    plStringBuilder sTooltip;
+    sTooltip.SetFormat("{}: a number, vector or colour; the node computes in the widest one wired", plTranslate(pin.GetName()));
+    out_look.m_sTooltip = sTooltip;
+  }
+}
+
+void plParticleEffectGraphController::GetNodeTemplates(plDynamicArray<plVisualGraphNodeDesc>& out_templates, plDeque<plVisualGraphNodeProperty>& ref_storage, const plVisualGraphPin* pFromPin) const
+{
+  plVisualGraphController::GetNodeTemplates(out_templates, ref_storage, pFromPin);
+
+  if (pFromPin == nullptr)
+    return;
+
+  for (plUInt32 i = out_templates.GetCount(); i > 0; --i)
+  {
+    for (const plVisualGraphNodeProperty& property : out_templates[i - 1].m_PropertyValues)
+    {
+      if (property.m_sPropertyName == plTempHashedString("Preset"))
+      {
+        out_templates.RemoveAtAndCopy(i - 1);
+        break;
+      }
+    }
   }
 }
 
@@ -468,6 +507,13 @@ bool plParticleEffectGraphController::HitOperator(const plDocumentObject* pNode,
 {
   ref_press.m_Object = pNode->GetGuid();
 
+  // a Curve Over Life's own curve opens the curve editor
+  if (layout.m_CurveObject.IsValid() && layout.m_CurveRect.Contains(vLocal))
+  {
+    ref_press.m_Target = Press::Target::Curve;
+    return true;
+  }
+
   if (layout.m_bHasPreview && layout.m_PreviewRect.Contains(vLocal))
   {
     ref_press.m_Target = Press::Target::Preview;
@@ -647,6 +693,33 @@ void plParticleEffectGraphController::OnClick(const plVec2& vLocal)
       OnValueClick(vGraph);
       break;
 
+    case Press::Target::Curve:
+    {
+      const NodeLayout* pLayout = FindLayout(m_Press.m_pNode);
+      if (pLayout == nullptr || !pLayout->m_CurveObject.IsValid())
+        break;
+
+      const plUuid curve = pLayout->m_CurveObject;
+      RunDeferred([this, curve]()
+        {
+          const plDocumentObject* pCurve = m_pManager->GetObject(curve);
+          if (pCurve == nullptr)
+            return;
+
+          // drawn from 0 to 1 in both directions, as the node maps it into its output range
+          plEngineCurveWindow::Options options;
+          options.m_fLowerExtent = 0.0;
+          options.m_fUpperExtent = 1.0;
+          options.m_bLowerExtentFixed = true;
+          options.m_bUpperExtentFixed = true;
+          options.m_fLowerRange = 0.0;
+          options.m_fUpperRange = 1.0;
+          plEngineCurveWindow::Edit(m_pManager->GetDocument()->GetObjectAccessor(), pCurve, options);
+          InvalidateLook();
+        });
+      break;
+    }
+
     case Press::Target::None:
       break;
   }
@@ -733,6 +806,26 @@ void plParticleEffectGraphController::OnValueClick(const plVec2& vGraph)
 
 //////////////////////////////////////////////////////////////////////////
 // Document events
+
+void plParticleEffectGraphController::PropertyEventHandler(const plDocumentObjectPropertyEvent& e)
+{
+  if (e.m_pObject == nullptr || e.m_EventType != plDocumentObjectPropertyEvent::Type::PropertySet || e.m_sProperty != "Preset")
+    return;
+
+  if (!e.m_pObject->GetTypeAccessor().GetType()->IsDerivedFrom<plParticleCurveOverLifeNode>() || e.m_NewValue.ConvertTo<plInt64>() == plParticleCurvePreset::None)
+    return;
+
+  // undo and redo replay the preset's own edits; only a new node gets them
+  if (m_pManager->GetDocument()->GetCommandHistory()->IsInUndoRedo())
+    return;
+
+  const plUuid node = e.m_pObject->GetGuid();
+  RunDeferred([this, node]()
+    {
+      if (auto* pDocument = GetEffectDocument())
+        pDocument->ApplyCurvePreset(node);
+    });
+}
 
 void plParticleEffectGraphController::StructureEventHandler(const plDocumentObjectStructureEvent& e)
 {

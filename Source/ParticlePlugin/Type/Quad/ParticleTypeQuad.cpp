@@ -8,7 +8,6 @@
 #include <Foundation/Profiling/Profiling.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
 #include <ParticlePlugin/Finalizer/ParticleFinalizer_LastPosition.h>
-#include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <RendererCore/Material/MaterialResource.h>
 #include <RendererCore/Pipeline/View.h>
@@ -25,11 +24,18 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plQuadParticleOrientation, 2)
   PL_ENUM_CONSTANTS(plQuadParticleOrientation::Custom_Facing)
 PL_END_STATIC_REFLECTED_ENUM;
 
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeQuadFactory, 3, plRTTIDefaultAllocator<plParticleTypeQuadFactory>)
+PL_BEGIN_STATIC_REFLECTED_ENUM(plQuadParticleEmitterDirSampling, 1)
+  PL_ENUM_CONSTANTS(plQuadParticleEmitterDirSampling::Live, plQuadParticleEmitterDirSampling::AtSpawn)
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeQuadFactory, 4, plRTTIDefaultAllocator<plParticleTypeQuadFactory>)
 {
   PL_BEGIN_PROPERTIES
   {
     PL_ENUM_MEMBER_PROPERTY("Orientation", plQuadParticleOrientation, m_Orientation),
+    PL_ENUM_MEMBER_PROPERTY("EmitterDirSampling", plQuadParticleEmitterDirSampling, m_EmitterDirSampling),
+    PL_MEMBER_PROPERTY("MinSpeed", m_fMinSpeed)->AddAttributes(new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.0f, 100.0f), new plSuffixAttribute(" m/s")),
+    PL_MEMBER_PROPERTY("TurnSmoothing", m_fTurnSmoothing)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 0.95f)),
     PL_MEMBER_PROPERTY("Deviation", m_MaxDeviation)->AddAttributes(new plClampValueAttribute(plAngle::MakeFromDegree(0), plAngle::MakeFromDegree(90))),
     PL_ENUM_MEMBER_PROPERTY("RenderMode", plParticleTypeRenderMode, m_RenderMode),
     PL_ENUM_MEMBER_PROPERTY("LightingMode", plParticleLightingMode, m_LightingMode),
@@ -48,6 +54,10 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeQuadFactory, 3, plRTTIDefaultAlloc
     PL_MEMBER_PROPERTY("SixWayAbsorption", m_fSixWayAbsorption)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.05f, 8.0f)),
     PL_MEMBER_PROPERTY("NormalMap", m_sNormalMap)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
     PL_MEMBER_PROPERTY("NormalMapStrength", m_fNormalMapStrength)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("OrmMap", m_sOrmMap)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("Roughness", m_fRoughness)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("Metallic", m_fMetallic)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("Specular", m_fSpecular)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("DistortionStrength", m_fDistortionStrength)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.0f, 500.0f)),
     PL_MEMBER_PROPERTY("ParticleStretch", m_fStretch)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(-100.0f, 100.0f)),
     PL_PARTICLE_LOOK_PROPERTIES,
@@ -70,6 +80,9 @@ void plParticleTypeQuadFactory::CopyTypeProperties(plParticleType* pObject, bool
   plParticleTypeQuad* pType = static_cast<plParticleTypeQuad*>(pObject);
 
   pType->m_Orientation = m_Orientation;
+  pType->m_EmitterDirSampling = m_EmitterDirSampling;
+  pType->m_fMinSpeed = plMath::Max(m_fMinSpeed, 0.0f);
+  pType->m_fTurnSmoothing = plMath::Clamp(m_fTurnSmoothing, 0.0f, 0.95f);
   pType->m_MaxDeviation = m_MaxDeviation;
   pType->m_hTexture.Invalidate();
   pType->m_RenderMode = m_RenderMode;
@@ -108,8 +121,17 @@ void plParticleTypeQuadFactory::CopyTypeProperties(plParticleType* pObject, bool
     pType->m_fSixWayAbsorption = m_fSixWayAbsorption;
     pType->m_fNormalMapStrength = m_fNormalMapStrength;
 
+    pType->m_hNormalMap.Invalidate();
     if (!m_sNormalMap.IsEmpty())
       pType->m_hNormalMap = plResourceManager::LoadResource<plTexture2DResource>(m_sNormalMap);
+
+    pType->m_hOrmMap.Invalidate();
+    if (!m_sOrmMap.IsEmpty())
+      pType->m_hOrmMap = plResourceManager::LoadResource<plTexture2DResource>(m_sOrmMap);
+
+    pType->m_fRoughness = m_fRoughness;
+    pType->m_fMetallic = m_fMetallic;
+    pType->m_fSpecular = m_fSpecular;
   }
 }
 
@@ -127,6 +149,7 @@ enum class TypeQuadVersion
   Version_9, // added six-way absorption
   Version_10, // added per-pixel normal map
   Version_11, // added emissive map and depth blending; six-way reads its emissive from the emissive map
+  Version_12, // added emitter direction sampling, particle direction min speed / smoothing, surface lighting inputs
 
   // insert new version numbers above
   Version_Count,
@@ -174,6 +197,15 @@ void plParticleTypeQuadFactory::Save(plStreamWriter& inout_stream) const
 
   // Version 11
   m_Look.Save(inout_stream);
+
+  // Version 12
+  inout_stream << m_EmitterDirSampling;
+  inout_stream << m_fMinSpeed;
+  inout_stream << m_fTurnSmoothing;
+  inout_stream << m_sOrmMap;
+  inout_stream << m_fRoughness;
+  inout_stream << m_fMetallic;
+  inout_stream << m_fSpecular;
 }
 
 void plParticleTypeQuadFactory::Load(plStreamReader& inout_stream)
@@ -259,6 +291,28 @@ void plParticleTypeQuadFactory::Load(plStreamReader& inout_stream)
     if (m_LightingMode == plParticleLightingMode::SixWay)
       m_Look.m_sEmissiveMap = m_sTexture;
   }
+
+  if (uiVersion >= 12)
+  {
+    inout_stream >> m_EmitterDirSampling;
+    inout_stream >> m_fMinSpeed;
+    inout_stream >> m_fTurnSmoothing;
+    inout_stream >> m_sOrmMap;
+    inout_stream >> m_fRoughness;
+    inout_stream >> m_fMetallic;
+    inout_stream >> m_fSpecular;
+  }
+  else
+  {
+    // older effects keep reading the emitter direction every frame
+    m_EmitterDirSampling = plQuadParticleEmitterDirSampling::Live;
+    m_fMinSpeed = 0.1f;
+    m_fTurnSmoothing = 0.0f;
+    m_sOrmMap.Clear();
+    m_fRoughness = 0.5f;
+    m_fMetallic = 0.0f;
+    m_fSpecular = 0.5f;
+  }
 }
 
 void plParticleTypeQuadFactory::QueryFinalizerDependencies(plSet<const plRTTI*>& inout_finalizerDeps) const
@@ -297,6 +351,12 @@ void plParticleTypeQuad::CreateRequiredStreams()
     CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, false);
   }
 
+  if (m_Orientation == plQuadParticleOrientation::FixedAxis_ParticleDir || UsesSpawnEmitterDir())
+  {
+    // Axis: Particle Dir keeps its facing here; the emitter modes keep the direction captured at spawn
+    CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, true);
+  }
+
   if (m_TextureAtlasType == plParticleTextureAtlasType::RandomVariations || m_TextureAtlasType == plParticleTextureAtlasType::RandomYAnimatedX)
   {
     CreateStream("Variation", plProcessingStream::DataType::Int, &m_pStreamVariation, false);
@@ -315,6 +375,68 @@ void plParticleTypeQuad::QueryOptionalStreams()
 
   // created by Set Attribute's Emissive target
   m_pStreamEmissive = GetOwnerSystem()->QueryStream("Emissive", plProcessingStream::DataType::Half);
+
+  // created by the velocity initializers
+  m_pStreamVelocity = m_Orientation == plQuadParticleOrientation::FixedAxis_ParticleDir ? GetOwnerSystem()->QueryStream("Velocity", plProcessingStream::DataType::Float3) : nullptr;
+}
+
+bool plParticleTypeQuad::UsesSpawnEmitterDir() const
+{
+  if (m_EmitterDirSampling != plQuadParticleEmitterDirSampling::AtSpawn)
+    return false;
+
+  return m_Orientation == plQuadParticleOrientation::FixedAxis_EmitterDir || m_Orientation == plQuadParticleOrientation::Rotating_EmitterDir || m_Orientation == plQuadParticleOrientation::Rotating_OrthoEmitterDir;
+}
+
+void plParticleTypeQuad::Process(plUInt64 uiNumElements)
+{
+  if (m_Orientation == plQuadParticleOrientation::FixedAxis_ParticleDir)
+  {
+    UpdateParticleDirFacing(uiNumElements);
+  }
+}
+
+void plParticleTypeQuad::UpdateParticleDirFacing(plUInt64 uiNumElements)
+{
+  if (m_pStreamAxis == nullptr || m_pStreamLastPosition == nullptr)
+    return;
+
+  const float fDeltaSeconds = m_TimeDiff.AsFloatInSeconds();
+  if (fDeltaSeconds <= 0.0f)
+    return;
+
+  PL_PROFILE_SCOPE("PFX: Quad Particle Dir");
+
+  const plVec4* pPosition = m_pStreamPosition->GetData<plVec4>();
+  const plVec3* pLastPosition = m_pStreamLastPosition->GetData<plVec3>();
+  plVec3* pAxis = m_pStreamAxis->GetWritableData<plVec3>();
+
+  // a particle that moved less than this in the step keeps the facing it has, e.g. when it comes to rest
+  const float fMinDistance = plMath::Max(m_fMinSpeed * fDeltaSeconds, 1.0e-5f);
+
+  // the share of the old facing kept per step, normalized to 30 steps per second
+  const float fKeep = m_fTurnSmoothing > 0.0f ? plMath::Pow(m_fTurnSmoothing, fDeltaSeconds * 30.0f) : 0.0f;
+
+  for (plUInt64 i = 0; i < uiNumElements; ++i)
+  {
+    const plVec3 vDelta = pPosition[i].GetAsVec3() - pLastPosition[i];
+    const float fDistance = vDelta.GetLength();
+
+    if (fDistance < fMinDistance)
+      continue;
+
+    const plVec3 vTarget = vDelta / fDistance;
+
+    if (fKeep <= 0.0f || pAxis[i].IsZero(1.0e-6f))
+    {
+      pAxis[i] = vTarget;
+      continue;
+    }
+
+    plVec3 vFacing = plMath::Lerp(vTarget, pAxis[i], fKeep);
+    vFacing.NormalizeIfNotZero(vTarget).IgnoreResult();
+    pAxis[i] = vFacing;
+  }
 }
 
 struct sodComparer
@@ -326,7 +448,11 @@ struct sodComparer
 
 void plParticleTypeQuad::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
 {
-  if ((!m_hTexture.IsValid() && !m_hCustomMaterial))
+  // distortion works without a texture: the shader masks the quad with a soft disc
+  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid() && m_RenderMode != plParticleTypeRenderMode::Distortion)
+    return;
+
+  if (plParticleSkipView(ref_msg, CastsShadows()))
     return;
 
   const plUInt32 numParticles = (plUInt32)GetOwnerSystem()->GetNumActiveParticles();
@@ -463,27 +589,38 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
     }
   };
 
+  // the emitter direction at spawn (captured per particle) or now
+  const bool bSpawnEmitterDir = UsesSpawnEmitterDir() && pAxis != nullptr;
+  auto GetEmitterDir = [&](plUInt32 uiSrcIdx) -> plVec3
+  {
+    return bSpawnEmitterDir ? pAxis[uiSrcIdx] : vEmitterDir;
+  };
+
   auto SetTangentDataEmitterDir = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
   {
-    plMat3 mRotation = plMat3::MakeAxisRotation(vEmitterDir, plAngle::MakeFromRadian((float)(tCur.GetSeconds() * pRotationSpeed[uiSrcIdx]) + pRotationOffset[uiSrcIdx]));
+    const plVec3 vDir = GetEmitterDir(uiSrcIdx);
+    const plVec3 vDirOrtho = bSpawnEmitterDir ? vDir.GetOrthogonalVector() : vEmitterDirOrtho;
+
+    plMat3 mRotation = plMat3::MakeAxisRotation(vDir, plAngle::MakeFromRadian((float)(tCur.GetSeconds() * pRotationSpeed[uiSrcIdx]) + pRotationOffset[uiSrcIdx]));
 
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
-    m_TangentParticleData[uiDstIdx].TangentX = mRotation * vEmitterDirOrtho;
-    m_TangentParticleData[uiDstIdx].TangentZ = vEmitterDir;
+    m_TangentParticleData[uiDstIdx].TangentX = mRotation * vDirOrtho;
+    m_TangentParticleData[uiDstIdx].TangentZ = vDir;
     ApplyAxisScale(uiDstIdx, uiSrcIdx);
   };
 
   auto SetTangentDataEmitterDirOrtho = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
   {
+    const plVec3 vDir = GetEmitterDir(uiSrcIdx);
     const plVec3 vDirToParticle = (pPosition[uiSrcIdx].GetAsVec3() - vEmitterPos);
-    plVec3 vOrthoDir = vEmitterDir.CrossRH(vDirToParticle);
+    plVec3 vOrthoDir = vDir.CrossRH(vDirToParticle);
     vOrthoDir.NormalizeIfNotZero(plVec3(1, 0, 0)).IgnoreResult();
 
     plMat3 mRotation = plMat3::MakeAxisRotation(vOrthoDir, plAngle::MakeFromRadian((float)(tCur.GetSeconds() * pRotationSpeed[uiSrcIdx]) + pRotationOffset[uiSrcIdx]));
 
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
     m_TangentParticleData[uiDstIdx].TangentX = vOrthoDir;
-    m_TangentParticleData[uiDstIdx].TangentZ = mRotation * vEmitterDir;
+    m_TangentParticleData[uiDstIdx].TangentZ = mRotation * vDir;
     ApplyAxisScale(uiDstIdx, uiSrcIdx);
   };
 
@@ -508,7 +645,7 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
   auto SetTangentDataAligned_Emitter = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
   {
     m_TangentParticleData[uiDstIdx].Position = pPosition[uiSrcIdx].GetAsVec3();
-    m_TangentParticleData[uiDstIdx].TangentX = vEmitterDir;
+    m_TangentParticleData[uiDstIdx].TangentX = GetEmitterDir(uiSrcIdx);
     m_TangentParticleData[uiDstIdx].TangentZ.x = m_fStretch;
     ApplyAlignedScale(uiDstIdx, uiSrcIdx);
   };
@@ -516,8 +653,14 @@ void plParticleTypeQuad::CreateExtractedData(const plHybridArray<sod, 64>* pSort
   auto SetTangentDataAligned_ParticleDir = [&](plUInt32 uiDstIdx, plUInt32 uiSrcIdx)
   {
     const plVec3 vCurPos = pPosition[uiSrcIdx].GetAsVec3();
-    const plVec3 vLastPos = pLastPosition[uiSrcIdx];
-    const plVec3 vDir = vCurPos - vLastPos;
+
+    // the facing is kept while the particle rests; a particle that has not been stepped yet has none
+    plVec3 vDir = pAxis != nullptr ? pAxis[uiSrcIdx] : plVec3::MakeZero();
+    if (vDir.IsZero(1.0e-6f))
+      vDir = vCurPos - pLastPosition[uiSrcIdx];
+    if (vDir.IsZero(1.0e-6f))
+      vDir = vEmitterDir;
+
     m_TangentParticleData[uiDstIdx].Position = vCurPos;
     m_TangentParticleData[uiDstIdx].TangentX = vDir;
     m_TangentParticleData[uiDstIdx].TangentZ.x = m_fStretch;
@@ -613,7 +756,7 @@ void plParticleTypeQuad::AddParticleRenderData(plMsgExtractRenderData& msg, cons
   pRenderData->m_hSixWayMapB = m_hSixWayMapB;
   pRenderData->m_fSixWayAbsorption = m_fSixWayAbsorption;
   pRenderData->m_hNormalMap = m_hNormalMap;
-  pRenderData->m_fNormalMapStrength = m_fNormalMapStrength;
+  pRenderData->m_fNormalMapStrength = m_hNormalMap.IsValid() ? m_fNormalMapStrength : 0.0f; // a strength without a map samples nothing useful
   pRenderData->m_fDistortionStrength = m_fDistortionStrength;
   pRenderData->m_LightingMode = m_LightingMode;
   pRenderData->m_fNormalCurvature = m_fNormalCurvature;
@@ -621,6 +764,12 @@ void plParticleTypeQuad::AddParticleRenderData(plMsgExtractRenderData& msg, cons
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
   pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), m_pStreamEmissive != nullptr);
   pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
+
+  pRenderData->m_hOrmMap = m_hOrmMap;
+  pRenderData->m_Look.m_bOrmMap = m_hOrmMap.IsValid();
+  pRenderData->m_Look.m_fSurfaceRoughness = m_fRoughness;
+  pRenderData->m_Look.m_fSurfaceMetallic = m_fMetallic;
+  pRenderData->m_Look.m_fSurfaceSpecular = m_fSpecular;
 
   switch (m_Orientation)
   {
@@ -663,74 +812,104 @@ void plParticleTypeQuad::AddParticleRenderData(plMsgExtractRenderData& msg, cons
       break;
   }
 
-  if (m_RenderMode == plParticleTypeRenderMode::Distortion)
-  {
-    msg.AddRenderData(pRenderData, plParticleRenderDataCategories::Distortion, plRenderData::Caching::Never);
-    msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
-  }
-  else
-  {
-    msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
-  }
+  plParticleAddRenderData(msg, pRenderData, m_RenderMode);
 }
 
 void plParticleTypeQuad::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
 {
-  if (m_pStreamAxis != nullptr)
+  if (m_pStreamAxis == nullptr)
+    return;
+
+  const plVec3* pVelocity = m_pStreamVelocity != nullptr ? m_pStreamVelocity->GetData<plVec3>() : nullptr;
+  plParticleInitializeQuadAxis(GetOwnerSystem(), m_Orientation, m_EmitterDirSampling, m_MaxDeviation, GetRNG(), pVelocity, m_pStreamAxis->GetWritableData<plVec3>(), uiStartIndex, uiNumElements);
+}
+
+bool plParticleQuadOrientationNeedsSpawnAxis(plQuadParticleOrientation::Enum orientation, plQuadParticleEmitterDirSampling::Enum sampling)
+{
+  switch (orientation)
   {
-    plVec3* pAxis = m_pStreamAxis->GetWritableData<plVec3>();
-    plRandom& rng = GetRNG();
+    case plQuadParticleOrientation::Fixed_RandomDir:
+    case plQuadParticleOrientation::Fixed_EmitterDir:
+    case plQuadParticleOrientation::Fixed_WorldUp:
+    case plQuadParticleOrientation::FixedAxis_ParticleDir:
+      return true;
 
-    if (m_Orientation == plQuadParticleOrientation::Fixed_RandomDir)
+    case plQuadParticleOrientation::FixedAxis_EmitterDir:
+    case plQuadParticleOrientation::Rotating_EmitterDir:
+    case plQuadParticleOrientation::Rotating_OrthoEmitterDir:
+      return sampling == plQuadParticleEmitterDirSampling::AtSpawn;
+
+    default:
+      return false;
+  }
+}
+
+void plParticleInitializeQuadAxis(plParticleSystemInstance* pSystem, plQuadParticleOrientation::Enum orientation, plQuadParticleEmitterDirSampling::Enum sampling, plAngle maxDeviation, plRandom& ref_rng, const plVec3* pVelocity, plVec3* pAxis, plUInt64 uiStartIndex, plUInt64 uiNumElements)
+{
+  if (!plParticleQuadOrientationNeedsSpawnAxis(orientation, sampling))
+    return;
+
+  PL_PROFILE_SCOPE("PFX: Init Quad Axis");
+
+  const plUInt64 uiEnd = uiStartIndex + uiNumElements;
+  const plVec3 vEmitterDir = pSystem->GetTransform().m_qRotation * plVec3(0, 0, 1); // Z axis
+
+  if (orientation == plQuadParticleOrientation::FixedAxis_ParticleDir)
+  {
+    // the first facing is the start velocity; the initializers run before the types
+    for (plUInt64 i = uiStartIndex; i < uiEnd; ++i)
     {
-      PL_PROFILE_SCOPE("PFX: Init Quad Axis Random");
-
-      for (plUInt32 i = 0; i < uiNumElements; ++i)
-      {
-        const plUInt64 uiElementIdx = uiStartIndex + i;
-
-        pAxis[uiElementIdx] = plVec3::MakeRandomDirection(rng);
-      }
+      plVec3 vFacing = pVelocity != nullptr ? pVelocity[i] : vEmitterDir;
+      vFacing.NormalizeIfNotZero(vEmitterDir).IgnoreResult();
+      pAxis[i] = vFacing;
     }
-    else if (m_Orientation == plQuadParticleOrientation::Fixed_EmitterDir || m_Orientation == plQuadParticleOrientation::Fixed_WorldUp)
+
+    return;
+  }
+
+  if (orientation == plQuadParticleOrientation::Fixed_RandomDir)
+  {
+    for (plUInt64 i = uiStartIndex; i < uiEnd; ++i)
     {
-      PL_PROFILE_SCOPE("PFX: Init Quad Axis");
+      pAxis[i] = plVec3::MakeRandomDirection(ref_rng);
+    }
 
-      plVec3 vNormal;
+    return;
+  }
 
-      if (m_Orientation == plQuadParticleOrientation::Fixed_EmitterDir)
-      {
-        vNormal = GetOwnerSystem()->GetTransform().m_qRotation * plVec3(0, 0, 1); // Z axis
-      }
-      else if (m_Orientation == plQuadParticleOrientation::Fixed_WorldUp)
-      {
-        plCoordinateSystem coord;
-        GetOwnerSystem()->GetWorld()->GetCoordinateSystem(GetOwnerSystem()->GetTransform().m_vPosition, coord);
+  // the emitter direction modes capture the direction; Fixed Emitter Dir and World Up may deviate from it
+  plVec3 vNormal = vEmitterDir;
+  plAngle deviation = plAngle::MakeFromDegree(0.0f);
 
-        vNormal = coord.m_vUpDir;
-      }
+  if (orientation == plQuadParticleOrientation::Fixed_EmitterDir || orientation == plQuadParticleOrientation::Fixed_WorldUp)
+  {
+    deviation = maxDeviation;
+  }
 
-      if (m_MaxDeviation > plAngle::MakeFromDegree(1.0f))
-      {
-        // how to get from the X axis to the desired normal
-        plQuat qRotToDir = plQuat::MakeShortestRotation(plVec3(1, 0, 0), vNormal);
+  if (orientation == plQuadParticleOrientation::Fixed_WorldUp)
+  {
+    plCoordinateSystem coord;
+    pSystem->GetWorld()->GetCoordinateSystem(pSystem->GetOwnerEffect()->GetTransform().m_vPosition, coord);
 
-        for (plUInt32 i = 0; i < uiNumElements; ++i)
-        {
-          const plUInt64 uiElementIdx = uiStartIndex + i;
-          const plVec3 vRandomX = plVec3::MakeRandomDeviationX(rng, m_MaxDeviation);
+    // the world's up, in the simulation's space
+    vNormal = pSystem->GetOwnerEffect()->NeedsToApplyTransform() ? pSystem->GetOwnerEffect()->GetTransform().m_qRotation.GetInverse() * coord.m_vUpDir : coord.m_vUpDir;
+  }
 
-          pAxis[uiElementIdx] = qRotToDir * vRandomX;
-        }
-      }
-      else
-      {
-        for (plUInt32 i = 0; i < uiNumElements; ++i)
-        {
-          const plUInt64 uiElementIdx = uiStartIndex + i;
-          pAxis[uiElementIdx] = vNormal;
-        }
-      }
+  if (deviation > plAngle::MakeFromDegree(1.0f))
+  {
+    // how to get from the X axis to the desired normal
+    const plQuat qRotToDir = plQuat::MakeShortestRotation(plVec3(1, 0, 0), vNormal);
+
+    for (plUInt64 i = uiStartIndex; i < uiEnd; ++i)
+    {
+      pAxis[i] = qRotToDir * plVec3::MakeRandomDeviationX(ref_rng, deviation);
+    }
+  }
+  else
+  {
+    for (plUInt64 i = uiStartIndex; i < uiEnd; ++i)
+    {
+      pAxis[i] = vNormal;
     }
   }
 }
@@ -823,6 +1002,26 @@ public:
 };
 
 plParticleTypeQuadFactory_2_3 g_plParticleTypeQuadFactory_2_3;
+
+// Effects authored before the emitter direction could be captured at spawn keep reading it every frame.
+class plParticleTypeQuadFactory_3_4 final : public plGraphPatch
+{
+public:
+  plParticleTypeQuadFactory_3_4()
+    : plGraphPatch("plParticleTypeQuadFactory", 4)
+  {
+  }
+
+  virtual void Patch(plGraphPatchContext& ref_context, plAbstractObjectGraph* pGraph, plAbstractObjectNode* pNode) const override
+  {
+    if (pNode->FindProperty("EmitterDirSampling") == nullptr)
+    {
+      pNode->AddProperty("EmitterDirSampling", plString("plQuadParticleEmitterDirSampling::Live"));
+    }
+  }
+};
+
+plParticleTypeQuadFactory_3_4 g_plParticleTypeQuadFactory_3_4;
 
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_Type_Quad_ParticleTypeQuad);

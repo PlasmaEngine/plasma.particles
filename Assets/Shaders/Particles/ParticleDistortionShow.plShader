@@ -1,0 +1,44 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+
+[RENDERSTATE]
+
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+
+[VERTEXSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleInterpolator.h>
+#include <Shaders/Common/Common.h>
+
+// Particles.ShowDistortion: draws the offsets the distortion particles added up, over the undistorted image.
+// Red and green are the X and Y offsets (mid grey = none, full = 32 pixels).
+Texture2DArray DistortionSceneColor;
+Texture2DArray DistortionOffsets;
+
+float4 main(PS_IN input) : SV_Target
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint slice = input.RenderTargetArrayIndex;
+#else
+  uint slice = 0;
+#endif
+
+  float2 offset = DistortionOffsets.Load(int4((int2)input.Position.xy, slice, 0)).xy;
+
+  if (all(abs(offset) < 0.01))
+  {
+    discard;
+  }
+
+  return float4(saturate(0.5 + offset / 64.0), 0.5, 1.0);
+}

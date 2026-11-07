@@ -137,14 +137,16 @@ void plParticleBehavior_AttractToPosition::Process(plUInt64 uiNumElements)
   if (tDiff <= 0.0f)
     return;
 
-  // Determine attractor world position and axis
+  // attractor position and axis in the simulation's space, like the particle positions;
+  // the system transform is the effect's in world space and identity in local space
   plVec3 vTarget;
   plVec3 vAxis = m_vAxis;
 
   if (m_Target == plParticleAttractorTarget::EffectOrigin)
   {
-    vTarget = GetOwnerEffect()->GetTransform().m_vPosition;
-    vAxis = GetOwnerEffect()->GetTransform().m_qRotation * m_vAxis;
+    const plTransform& simTransform = GetOwnerSystem()->GetTransform();
+    vTarget = simTransform.m_vPosition;
+    vAxis = simTransform.m_qRotation * m_vAxis;
   }
   else
   {

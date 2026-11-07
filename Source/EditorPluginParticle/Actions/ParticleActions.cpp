@@ -11,6 +11,9 @@ PL_END_DYNAMIC_REFLECTED_TYPE;
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTemplatesMenuAction, 1, plRTTINoAllocator)
 PL_END_DYNAMIC_REFLECTED_TYPE;
 
+PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleBackdropAction, 1, plRTTINoAllocator)
+PL_END_DYNAMIC_REFLECTED_TYPE;
+
 plActionDescriptorHandle plParticleActions::s_hCategory;
 plActionDescriptorHandle plParticleActions::s_hPauseEffect;
 plActionDescriptorHandle plParticleActions::s_hRestartEffect;
@@ -24,6 +27,7 @@ plActionDescriptorHandle plParticleActions::s_hShowEvents;
 plActionDescriptorHandle plParticleActions::s_hPreviewStatic;
 plActionDescriptorHandle plParticleActions::s_hPreviewOrbit;
 plActionDescriptorHandle plParticleActions::s_hPreviewLine;
+plActionDescriptorHandle plParticleActions::s_hBackdropMenu;
 
 
 void plParticleActions::RegisterActions()
@@ -65,6 +69,7 @@ void plParticleActions::RegisterActions()
   s_hPreviewStatic = PL_REGISTER_ACTION_1("PFX.Preview.Static", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewStatic);
   s_hPreviewOrbit = PL_REGISTER_ACTION_1("PFX.Preview.Orbit", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewOrbit);
   s_hPreviewLine = PL_REGISTER_ACTION_1("PFX.Preview.Line", plActionScope::Document, "Particles", "", plParticleAction, plParticleAction::ActionType::PreviewLine);
+  s_hBackdropMenu = PL_REGISTER_DYNAMIC_MENU("PFX.Backdrop", plParticleBackdropAction, ":/EditorFramework/Icons/Grid.svg");
 }
 
 void plParticleActions::UnregisterActions()
@@ -81,6 +86,7 @@ void plParticleActions::UnregisterActions()
   plActionManager::UnregisterAction(s_hPreviewStatic);
   plActionManager::UnregisterAction(s_hPreviewOrbit);
   plActionManager::UnregisterAction(s_hPreviewLine);
+  plActionManager::UnregisterAction(s_hBackdropMenu);
 
   for (int i = 0; i < PL_ARRAY_SIZE(s_hSimulationSpeed); ++i)
     plActionManager::UnregisterAction(s_hSimulationSpeed[i]);
@@ -109,10 +115,11 @@ void plParticleActions::MapActions(plStringView sMapping)
   pMap->MapAction(s_hRenderVisualizers, szSubPath, 4.0f);
   pMap->MapAction(s_hTemplatesMenu, szSubPath, 5.0f);
 
-  // the preview: how it moves, and its stats overlay
+  // the preview: how it moves, what stands around it, and its stats overlay
   pMap->MapAction(s_hPreviewStatic, szSubPath, 6.0f);
   pMap->MapAction(s_hPreviewOrbit, szSubPath, 6.1f);
   pMap->MapAction(s_hPreviewLine, szSubPath, 6.2f);
+  pMap->MapAction(s_hBackdropMenu, szSubPath, 6.3f);
   pMap->MapAction(s_hShowStats, szSubPath, 7.0f);
   pMap->MapAction(s_hShowEvents, szSubPath, 7.1f);
 }
@@ -219,6 +226,23 @@ void plParticleAction::EffectEventHandler(const plParticleEffectAssetEvent& e)
     default:
       break;
   }
+}
+
+plParticleBackdropAction::plParticleBackdropAction(const plActionContext& context, const char* szName, const char* szIconPath)
+  : plEnumerationMenuAction(context, szName, szIconPath)
+{
+  InitEnumerationType(plGetStaticRTTI<plParticlePreviewBackdrop>());
+}
+
+plInt64 plParticleBackdropAction::GetValue() const
+{
+  return static_cast<const plParticleEffectAssetDocument*>(m_Context.m_pDocument)->GetPreviewBackdrop();
+}
+
+void plParticleBackdropAction::Execute(const plVariant& value)
+{
+  auto* pDocument = const_cast<plParticleEffectAssetDocument*>(static_cast<const plParticleEffectAssetDocument*>(m_Context.m_pDocument));
+  pDocument->SetPreviewBackdrop(static_cast<plParticlePreviewBackdrop::Enum>(value.ConvertTo<plInt32>()));
 }
 
 void plParticleTemplatesMenuAction::GetEntries(plDynamicArray<Item>& out_entries)

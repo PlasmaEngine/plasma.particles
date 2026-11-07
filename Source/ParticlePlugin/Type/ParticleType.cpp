@@ -66,7 +66,9 @@ plUInt32 plParticleType::ComputeSortingKey(plParticleTypeRenderMode::Enum mode, 
       key = plParticleTypeSortingKey::BlendedBackground;
       break;
 
+    // both are drawn with the opaque geometry
     case plParticleTypeRenderMode::Opaque:
+    case plParticleTypeRenderMode::Masked:
       key = plParticleTypeSortingKey::Opaque;
       break;
 

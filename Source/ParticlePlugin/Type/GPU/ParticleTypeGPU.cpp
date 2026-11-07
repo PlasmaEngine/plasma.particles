@@ -7,7 +7,6 @@
 #include <Core/World/World.h>
 #include <ParticlePlugin/Behavior/ParticleBehavior_Raycast.h>
 #include <ParticlePlugin/Effect/ParticleEffectInstance.h>
-#include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <ParticlePlugin/Type/GPU/GPUParticleRenderer.h>
@@ -183,6 +182,11 @@ void plParticleTypeGPU::CreateRequiredStreams()
   m_pStreamRandomSeed = nullptr;
   if (m_Programs.ReadsRandomSeed())
     CreateStream("RandomSeed", plProcessingStream::DataType::Int, &m_pStreamRandomSeed, false);
+
+  // a lowered quad fills the spawn axis itself, as the quad type it replaces would
+  m_pStreamAxis = nullptr;
+  if (m_bRenderAsQuad && plParticleQuadOrientationNeedsSpawnAxis(m_QuadOrientation, m_EmitterDirSampling))
+    CreateStream("Axis", plProcessingStream::DataType::Float3, &m_pStreamAxis, true);
 }
 
 bool plParticleTypeGPU::HasActiveGPUElements() const
@@ -270,6 +274,11 @@ void plParticleTypeGPU::QueryOptionalStreams()
 void plParticleTypeGPU::InitializeElements(plUInt64 uiStartIndex, plUInt64 uiNumElements)
 {
   // types run after every initializer and default initializer, so the streams are complete here
+  if (m_pStreamAxis != nullptr && m_bRenderAsQuad && plParticleQuadOrientationNeedsSpawnAxis(m_QuadOrientation, m_EmitterDirSampling))
+  {
+    plParticleInitializeQuadAxis(GetOwnerSystem(), m_QuadOrientation, m_EmitterDirSampling, m_MaxDeviation, GetRNG(), m_pStreamVelocity->GetData<plVec3>(), m_pStreamAxis->GetWritableData<plVec3>(), uiStartIndex, uiNumElements);
+  }
+
   PackSpawnedParticles(uiStartIndex, uiNumElements);
 }
 
@@ -513,6 +522,8 @@ void plParticleTypeGPU::EnsureGPUBuffers() const
 
   m_bGPUBuffersCreated = true;
   m_uiTrailWriteIndex = 0;
+  m_TrailLastSnapshot = GetOwnerEffect()->GetTotalEffectLifeTime();
+  m_fTrailSnapshotFraction = 1.0f;
   m_uiActiveSlotCount = 0;
 }
 
@@ -653,18 +664,28 @@ void plParticleTypeGPU::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg, c
 
   m_uiLastQueuedFrame = plRenderWorld::GetFrameCounter();
 
+  // Trails keep a point per snapshot at the CPU trail's fixed rate, so their length does not depend on the
+  // frame rate. Every step writes the current position into the newest point; a snapshot moves on first.
+  if (m_GPURenderType == plGPUParticleRenderType::Trail)
+  {
+    const plTime tSnapshotInterval = plTime::MakeFromSeconds(1.0 / 25.0);
+    const plTime tNow = GetOwnerEffect()->GetTotalEffectLifeTime();
+
+    if (tNow - m_TrailLastSnapshot >= tSnapshotInterval || tNow < m_TrailLastSnapshot)
+    {
+      m_TrailLastSnapshot = tNow;
+      m_uiTrailWriteIndex++;
+    }
+
+    m_fTrailSnapshotFraction = plMath::Clamp(1.0f - (float)((tNow - m_TrailLastSnapshot).GetSeconds() / tSnapshotInterval.GetSeconds()), 0.0f, 1.0f);
+  }
+
   QueueSimulation(instanceTransform, uiActiveSlotCount, newParticles, newSeeds);
 
   m_uiActiveSlotCount = uiActiveSlotCount;
   m_PendingSimulationTime = plTime::MakeZero();
   m_vPendingPull.SetZero();
   m_bPendingFliesChangeDir = false;
-
-  // Advance trail write index for trail types
-  if (m_GPURenderType == plGPUParticleRenderType::Trail)
-  {
-    m_uiTrailWriteIndex++;
-  }
 }
 
 void plParticleTypeGPU::AddQuadRenderData(plMsgExtractRenderData& ref_msg, const plTransform& instanceTransform) const
@@ -739,12 +760,8 @@ void plParticleTypeGPU::AddQuadRenderData(plMsgExtractRenderData& ref_msg, const
   pRenderData->m_hGpuTangentDataBuffer = m_hQuadTangentBuffer;
   pRenderData->m_hGpuDrawArgsBuffer = m_hDrawArgsBuffer;
 
-  // distortion is drawn by the particle distortion pass, everything else by the transparent pass
-  const plRenderData::Category category = (m_RenderMode == plParticleTypeRenderMode::Distortion) ? plParticleRenderDataCategories::Distortion : plDefaultRenderDataCategories::LitTransparent;
-  if (category == plParticleRenderDataCategories::Distortion)
-    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
-
-  ref_msg.AddRenderData(pRenderData, category, plRenderData::Caching::Never);
+  const plRenderData::Category category = plParticleGetRenderDataCategory(m_RenderMode);
+  plParticleAddRenderData(ref_msg, pRenderData, m_RenderMode);
 
   // the drawing pass reads what the simulate dispatch wrote
   ref_msg.AddDependency(m_hDrawArgsBuffer, category, plGALResourceState::IndirectArgument);
@@ -801,8 +818,8 @@ void plParticleTypeGPU::AddTrailRenderData(plMsgExtractRenderData& ref_msg, cons
   pRenderData->m_fLightDirectionality = m_fLightDirectionality;
   pRenderData->m_uiMaxTrailPoints = (plUInt16)m_uiMaxTrailPoints;
 
-  // the GPU keeps every trail slot filled, so there is no partial snapshot to blend towards
-  pRenderData->m_fSnapshotFraction = 1.0f;
+  // how far the newest point is from the next snapshot, so the texture glides like on the CPU trail
+  pRenderData->m_fSnapshotFraction = m_fTrailSnapshotFraction;
 
   pRenderData->m_uiNumVariationsX = 1;
   pRenderData->m_uiNumVariationsY = 1;
@@ -832,11 +849,8 @@ void plParticleTypeGPU::AddTrailRenderData(plMsgExtractRenderData& ref_msg, cons
   pRenderData->m_hGpuTrailPointsBuffer = m_hTrailPointsPackedBuffer;
   pRenderData->m_hGpuDrawArgsBuffer = m_hDrawArgsBuffer;
 
-  const plRenderData::Category category = (m_RenderMode == plParticleTypeRenderMode::Distortion) ? plParticleRenderDataCategories::Distortion : plDefaultRenderDataCategories::LitTransparent;
-  if (category == plParticleRenderDataCategories::Distortion)
-    ref_msg.AddContentFlags(PL_PARTICLE_CONTENT_FLAG_DISTORTION);
-
-  ref_msg.AddRenderData(pRenderData, category, plRenderData::Caching::Never);
+  const plRenderData::Category category = plParticleGetRenderDataCategory(m_RenderMode);
+  plParticleAddRenderData(ref_msg, pRenderData, m_RenderMode);
 
   ref_msg.AddDependency(m_hDrawArgsBuffer, category, plGALResourceState::IndirectArgument);
   ref_msg.AddDependency(m_hQuadBaseBuffer, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
@@ -1199,6 +1213,13 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_fStretchDeltaTime = (float)m_LastStepDuration.GetSeconds();
 
     sysInfo.m_uiFeatureFlags = m_uiFeatureFlags;
+    sysInfo.m_fFacingMinSpeed = m_fFacingMinSpeed;
+
+    // Local-space and shared effects simulate in the effect's own frame: everything placed relative to the
+    // effect uses the identity there, and world directions are turned into that frame.
+    const bool bLocalSimulation = GetOwnerEffect()->NeedsToApplyTransform();
+    const plTransform simTransform = bLocalSimulation ? plTransform::MakeIdentity() : instanceTransform;
+    const plQuat qWorldToSim = bLocalSimulation ? instanceTransform.m_qRotation.GetInverse() : plQuat::MakeIdentity();
 
     // Gravity: lowered systems use the physics module's gravity scaled by the module factor;
     // the authored GPU type's scalar means "downwards at this strength" (Z-up)
@@ -1210,11 +1231,11 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
         vGravity = pPhysics->GetGravity();
       }
 
-      sysInfo.m_vGravity = vGravity * m_fGravityFactor;
+      sysInfo.m_vGravity = qWorldToSim * (vGravity * m_fGravityFactor);
     }
     else
     {
-      sysInfo.m_vGravity = plVec3(0, 0, -m_fGravity);
+      sysInfo.m_vGravity = qWorldToSim * plVec3(0, 0, -m_fGravity);
     }
 
     sysInfo.m_fRiseSpeed = m_fRiseSpeed;
@@ -1226,7 +1247,7 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     // Sample wind at the effect's position
     if (const plWindWorldModuleInterface* pWind = GetOwnerEffect()->GetWorld()->GetModuleReadOnly<plWindWorldModuleInterface>())
     {
-      sysInfo.m_vWindDirection = pWind->GetWindAt(instanceTransform.m_vPosition);
+      sysInfo.m_vWindDirection = qWorldToSim * pWind->GetWindAt(instanceTransform.m_vPosition);
     }
 
     sysInfo.m_fFadeStartAlpha = m_fFadeStartAlpha;
@@ -1241,17 +1262,17 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_uiTurbOctaves = m_uiTurbOctaves;
 
     // the vector field box is anchored at the effect
-    sysInfo.m_vVectorFieldCenter = instanceTransform * m_vVectorFieldOffset;
+    sysInfo.m_vVectorFieldCenter = simTransform * m_vVectorFieldOffset;
     sysInfo.m_vVectorFieldInvSize = plVec3(1.0f / m_vVectorFieldSize.x, 1.0f / m_vVectorFieldSize.y, 1.0f / m_vVectorFieldSize.z);
-    sysInfo.m_qVectorFieldRotation = instanceTransform.m_qRotation;
+    sysInfo.m_qVectorFieldRotation = simTransform.m_qRotation;
     sysInfo.m_fVectorFieldStrength = m_fVectorFieldStrength;
 
-    sysInfo.m_vBoundsCenter = instanceTransform * m_vBoundsOffset;
+    sysInfo.m_vBoundsCenter = simTransform * m_vBoundsOffset;
     sysInfo.m_vBoundsExtents = m_vBoundsExtents;
 
-    // an effect-origin attractor rides along with the effect; a custom position is already world-space
-    sysInfo.m_vAttractorPos = m_bAttractorAtEffectOrigin ? instanceTransform.m_vPosition : m_vAttractorPos;
-    sysInfo.m_vAttractorAxis = m_bAttractorAtEffectOrigin ? (instanceTransform.m_qRotation * m_vAttractorAxis) : m_vAttractorAxis;
+    // an effect-origin attractor rides along with the effect; a custom position is in the simulation's space
+    sysInfo.m_vAttractorPos = m_bAttractorAtEffectOrigin ? simTransform.m_vPosition : m_vAttractorPos;
+    sysInfo.m_vAttractorAxis = m_bAttractorAtEffectOrigin ? (simTransform.m_qRotation * m_vAttractorAxis) : m_vAttractorAxis;
     sysInfo.m_fAttractorForce = m_fAttractorForce;
     sysInfo.m_fAttractorMaxDist = m_fAttractorMaxDist;
     sysInfo.m_fAttractorMinDist = m_fAttractorMinDist;
@@ -1259,7 +1280,7 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
 
     sysInfo.m_vPullAlong = m_vPendingPull;
 
-    sysInfo.m_vSphereCenter = instanceTransform * m_vSphereOffset;
+    sysInfo.m_vSphereCenter = simTransform * m_vSphereOffset;
     sysInfo.m_fSphereRadius = m_fSphereRadius;
 
     sysInfo.m_hGradientLUT = m_hGradientLUT;
@@ -1295,8 +1316,8 @@ void plParticleTypeGPU::QueueSimulation(const plTransform& instanceTransform, pl
     sysInfo.m_bNeedsSorting = m_RenderMode == plParticleTypeRenderMode::Blended || m_RenderMode == plParticleTypeRenderMode::BlendedBackground || m_RenderMode == plParticleTypeRenderMode::BlendedForeground || m_RenderMode == plParticleTypeRenderMode::BlendAdd;
     sysInfo.m_uiQuadOrientation = m_QuadOrientation.GetValue();
     sysInfo.m_fQuadStretch = m_fStretch;
-    sysInfo.m_vEmitterPosition = instanceTransform.m_vPosition;
-    sysInfo.m_vEmitterDirection = instanceTransform.m_qRotation * plVec3(0, 0, 1);
+    sysInfo.m_vEmitterPosition = simTransform.m_vPosition;
+    sysInfo.m_vEmitterDirection = simTransform.m_qRotation * plVec3(0, 0, 1);
     sysInfo.m_vEmitterDirOrtho = sysInfo.m_vEmitterDirection.GetOrthogonalVector();
     sysInfo.m_TintColor = GetOwnerEffect()->GetColorParameter(m_sTintColorParameter, plColor::White);
 

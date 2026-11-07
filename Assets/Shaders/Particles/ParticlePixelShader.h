@@ -8,6 +8,9 @@ float3 GetParticleColor();
 // optional, for shaders that define the matching PARTICLE_HAS_* macro
 float3 GetParticleEmissive();
 float2 GetParticleDistortionOffset();
+float3 GetParticleShadingNormal(); // valid after GetParticleColor
+float GetParticleTextureAlpha();   // the texture's alpha without the particle colour's, which Masked erodes it by
+
 
 #if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_NONE
 struct TMP_PS_IN
@@ -42,8 +45,50 @@ struct PS_GLOBALS
 };
 static PS_GLOBALS G;
 
-float4 main(PS_IN Input)
-  : SV_Target
+#  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_MASKED || PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_OPAQUE
+// drawn with the opaque geometry: by the depth passes too, and into the forward pass's extra target
+#    define PARTICLE_OPAQUE_OUTPUT
+#  endif
+
+#  if defined(PARTICLE_OPAQUE_OUTPUT) && (RENDER_PASS == RENDER_PASS_DEPTH_NORMAL || RENDER_PASS == RENDER_PASS_DEPTH_NORMAL_MATERIAL)
+#    define PARTICLE_PREPASS_OUTPUT
+#    include <Shaders/Common/GBufferEncoding.h>
+#  endif
+
+struct PARTICLE_PS_OUT
+{
+#  if defined(PARTICLE_PREPASS_OUTPUT)
+  // the same planes the thin prepass writes for materials (see plDepthOnlyPass)
+  float4 NormalRoughness : SV_Target0;
+#    if RENDER_PASS == RENDER_PASS_DEPTH_NORMAL_MATERIAL
+  float4 BaseColor : SV_Target1;
+#      ifdef GBUFFER_HAS_VELOCITY_TARGET
+  float2 Velocity : SV_Target2;
+#      endif
+#    else
+#      ifdef GBUFFER_HAS_VELOCITY_TARGET
+  float2 Velocity : SV_Target1;
+#      endif
+#    endif
+#  elif RENDER_PASS != RENDER_PASS_DEPTH_ONLY
+  float4 Color : SV_Target0;
+#    if defined(PARTICLE_OPAQUE_OUTPUT)
+  float4 Subsurface : SV_Target1; // the forward opaque pass may bind the subsurface split; particles add none
+#    endif
+#  endif
+};
+
+// 4x4 ordered dither threshold in [0, 1), for fades that cannot blend
+float ParticleDitherThreshold(float2 pixel)
+{
+  const float bayer[16] = {0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5};
+  const uint2 p = uint2(pixel) & 3;
+  return (bayer[p.y * 4 + p.x] + 0.5) / 16.0;
+}
+
+float4 ShadeParticle(PS_IN Input, float opacity, float proximityFade);
+
+PARTICLE_PS_OUT main(PS_IN Input)
 {
   G.Input = Input;
   FillCustomGlobals();
@@ -52,21 +97,67 @@ float4 main(PS_IN Input)
   s_ActiveCameraEyeIndex = Input.RenderTargetArrayIndex;
 #  endif
 
+  PARTICLE_PS_OUT Output;
+
+#  if defined(PARTICLE_OPAQUE_OUTPUT)
+#    if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_MASKED
+  // particle alpha erodes the texture's mask from its thin edges inwards, so fading out reads as dissolving;
+  // a custom material's opacity is clipped as it computes it
+#      if defined(PARTICLE_HAS_TEXTURE_ALPHA)
+  clip(GetParticleTextureAlpha() - (1.0 - Input.Color0.a) - AlphaCutoff);
+#      else
+  clip(GetParticleOpacity() - AlphaCutoff);
+#      endif
+#    endif
+
+  // nothing blends here: the camera fade dithers instead, the soft edge would move the clip edge and is off
+#    if CAMERA_MODE != CAMERA_MODE_ORTHO
+  clip(CalcCloseToCameraFadeOut(Input.Position) - ParticleDitherThreshold(Input.Position.xy));
+#    endif
+
+  const float opacity = 1.0;
+  const float proximityFade = 1.0;
+#  else
   float opacity = GetParticleOpacity();
   float proximityFade = 1.0;
-#  if !(defined(RENDER_PASS) && RENDER_PASS == RENDER_PASS_OVERDRAW) && CAMERA_MODE != CAMERA_MODE_ORTHO
+#    if !(defined(RENDER_PASS) && RENDER_PASS == RENDER_PASS_OVERDRAW) && CAMERA_MODE != CAMERA_MODE_ORTHO
   proximityFade = CalcProximityFadeOut(Input.Position);
   opacity *= proximityFade;
-#  endif
+#    endif
   if (opacity <= 1.0 / 255.0)
   {
     discard;
   }
+#  endif
 
+#  if RENDER_PASS == RENDER_PASS_DEPTH_ONLY
+  return Output;
+#  elif defined(PARTICLE_PREPASS_OUTPUT)
+  // a card has no surface the screen-space effects could use; it faces the camera
+  Output.NormalRoughness = float4(EncodeNormalOctahedral(-GetCameraDirForwards()), 1.0, float(GBUFFER_MATFLAG_DEFAULT) / 3.0);
+#    if RENDER_PASS == RENDER_PASS_DEPTH_NORMAL_MATERIAL
+  Output.BaseColor = float4(saturate(Input.Color0.rgb), 0.0);
+#    endif
+#    ifdef GBUFFER_HAS_VELOCITY_TARGET
+  Output.Velocity = float2(0.0, 0.0);
+#    endif
+  return Output;
+#  else
+  Output.Color = ShadeParticle(Input, opacity, proximityFade);
+#    if defined(PARTICLE_OPAQUE_OUTPUT)
+  Output.Subsurface = float4(0.0, 0.0, 0.0, 0.0);
+#    endif
+  return Output;
+#  endif
+}
+
+// The colour a forward pass writes, after the opacity tests in main.
+float4 ShadeParticle(PS_IN Input, float opacity, float proximityFade)
+{
 #  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
   // The distortion pass adds up screen offsets into an RG target; it has no depth target, so occluded pixels are
-  // rejected against the scene depth here.
-#    if CAMERA_MODE != CAMERA_MODE_ORTHO
+  // rejected against the scene depth here. Only the normal shading quality has the scene depth to test against.
+#    if CAMERA_MODE != CAMERA_MODE_ORTHO && SHADING_QUALITY == SHADING_QUALITY_NORMAL
   if (SampleSceneDepth(Input.Position.xy) < Input.Position.w)
   {
     discard;
@@ -96,10 +187,6 @@ float4 main(PS_IN Input)
   finalColor *= proximityFade;
 #  endif
 
-#  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_OPAQUE
-  opacity = 1.0;
-#  endif
-
 // fog behavior
 #  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_ADDITIVE
   // for additive blending, color shouldn't be adjusted, just fade out
@@ -123,7 +210,11 @@ float4 main(PS_IN Input)
   }
   else if (RenderPass == EDITOR_RENDER_PASS_PIXEL_NORMALS || RenderPass == EDITOR_RENDER_PASS_VERTEX_NORMALS)
   {
+#    if defined(PARTICLE_HAS_SHADING_NORMAL)
+    return float4(SrgbToLinear(GetParticleShadingNormal() * 0.5 + 0.5), 1);
+#    else
     return float4(SrgbToLinear(normalize(Input.Color0.rgb) * 0.5 + 0.5), 1);
+#    endif
   }
   else if (RenderPass == EDITOR_RENDER_PASS_OCCLUSION)
   {

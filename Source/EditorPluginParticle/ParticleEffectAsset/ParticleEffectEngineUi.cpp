@@ -11,7 +11,7 @@ namespace
 {
   constexpr float s_fPadding = 10.0f;
 
-  void Place(plUiElement* pElement, const plRectFloat& rect)
+  void PlaceTimelineElement(plUiElement* pElement, const plRectFloat& rect)
   {
     pElement->m_vAnchorMin = pElement->m_vAnchorMax = plVec2::MakeZero();
     pElement->m_vOffsets = plVec4(rect.x, rect.y, rect.width, rect.height);
@@ -102,11 +102,11 @@ void plEditorUiParticleTimeline::BuildDocument()
   Fill(pDraw);
 
   plUiButton* pBack = IconButton(pRoot, Icon::StepBack, "Timeline.Back");
-  Place(pBack, plRectFloat(s_fPadding, fButtonY, s_fStepWidth, ControlHeight));
+  PlaceTimelineElement(pBack, plRectFloat(s_fPadding, fButtonY, s_fStepWidth, ControlHeight));
   SetToolTip(board, "Timeline.Back", "Step back one frame (1/60 s)");
 
   plUiButton* pForward = IconButton(pRoot, Icon::StepForward, "Timeline.Forward");
-  Place(pForward, plRectFloat(s_fPadding + s_fStepWidth + 4.0f, fButtonY, s_fStepWidth, ControlHeight));
+  PlaceTimelineElement(pForward, plRectFloat(s_fPadding + s_fStepWidth + 4.0f, fButtonY, s_fStepWidth, ControlHeight));
   SetToolTip(board, "Timeline.Forward", "Step one frame (1/60 s)");
 
   // the track is a band of fixed height in the middle; a taller panel only pads it

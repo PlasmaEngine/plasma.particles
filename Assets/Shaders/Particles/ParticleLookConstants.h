@@ -6,6 +6,8 @@
 #define PARTICLE_LOOK_FLAG_EMISSIVE_MAP 1
 #define PARTICLE_LOOK_FLAG_PER_PARTICLE_EMISSIVE 2
 #define PARTICLE_LOOK_FLAG_DISTORTION_TEXTURE 4
+#define PARTICLE_LOOK_FLAG_ROUND_MASK 8 // no base texture: a soft disc stands in for its alpha
+#define PARTICLE_LOOK_FLAG_ORM_MAP 16   // Surface lighting: occlusion / roughness / metal come from the ORM map
 
 CONSTANT_BUFFER2(plParticleLookConstants, 3, BG_DRAW_CALL)
 {
@@ -13,6 +15,12 @@ CONSTANT_BUFFER2(plParticleLookConstants, 3, BG_DRAW_CALL)
   FLOAT1(SoftEdgeDistance);  // metres over which a particle fades into geometry, 0 = off
   FLOAT1(CameraFadeDistance); // metres in front of the camera over which it fades, 0 = off
   UINT1(LookFlags);          // PARTICLE_LOOK_FLAG_*
+  FLOAT1(AlphaCutoff);       // Masked: pixels whose eroded alpha is below this are clipped
+
+  // Surface lighting; the ORM map, when bound, multiplies roughness and metal and supplies occlusion
+  FLOAT1(SurfaceRoughness);
+  FLOAT1(SurfaceMetallic);
+  FLOAT1(SurfaceSpecular);   // reflectance at normal incidence, 0.5 = 4 %
   FLOAT1(LookPadding0);
 };
 

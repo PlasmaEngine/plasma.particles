@@ -109,7 +109,12 @@ void plParticleTrailRenderer::RenderBatch(const plRenderViewContext& renderViewC
 
     systemConstants.SetGenericData(pRenderData->m_GlobalTransform, pRenderData->m_TotalEffectLifeTime, pRenderData->m_uiNumVariationsX, pRenderData->m_uiNumVariationsY, pRenderData->m_uiNumFlipbookAnimationsX, pRenderData->m_uiNumFlipbookAnimationsY, pRenderData->m_fNormalCurvature, pRenderData->m_fLightDirectionality);
     systemConstants.SetTrailData(pRenderData->m_fSnapshotFraction, uiNumTrailPoints);
-    systemConstants.SetLookData(pRenderData->m_Look);
+
+    // CPU and GPU-simulated trails both hand over the strength next to the look
+    plParticleLookData look = pRenderData->m_Look;
+    look.m_fDistortionStrength = pRenderData->m_fDistortionStrength;
+    look.m_bRoundMask = !pRenderData->m_hTexture.IsValid();
+    systemConstants.SetLookData(look);
 
     // GPU-simulated: the data is already in device buffers and only the GPU knows the count
     if (!pRenderData->m_hGpuDrawArgsBuffer.IsInvalidated())
@@ -178,6 +183,9 @@ void plParticleTrailRenderer::ConfigureShader(const plParticleTrailRenderData* p
     case plParticleTypeRenderMode::BlendAdd:
       pRenderContext->SetShaderPermutationVariable("PARTICLE_RENDER_MODE", "PARTICLE_RENDER_MODE_BLENDADD");
       break;
+    case plParticleTypeRenderMode::Masked:
+      pRenderContext->SetShaderPermutationVariable("PARTICLE_RENDER_MODE", "PARTICLE_RENDER_MODE_MASKED");
+      break;
   }
 
   // distortion writes screen offsets in its own pass, which binds no lights
@@ -187,14 +195,14 @@ void plParticleTrailRenderer::ConfigureShader(const plParticleTrailRenderData* p
     return;
   }
 
-  switch (pRenderData->m_LightingMode)
+  // the trail shader has no six-way, per-pixel or surface path; every lit mode shades per vertex
+  if (pRenderData->m_LightingMode == plParticleLightingMode::Fullbright)
   {
-    case plParticleLightingMode::Fullbright:
-      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
-      break;
-    case plParticleLightingMode::VertexLit:
-      pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");
-      break;
+    pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_FULLBRIGHT");
+  }
+  else
+  {
+    pRenderContext->SetShaderPermutationVariable("PARTICLE_LIGHTING_MODE", "PARTICLE_LIGHTING_MODE_VERTEX_LIT");
   }
 }
 

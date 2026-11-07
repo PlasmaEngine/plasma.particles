@@ -24,6 +24,7 @@ struct PL_PARTICLEPLUGIN_DLL plParticleSinkTarget
     Facing,        ///< vector, the direction a Custom Facing quad faces (the Axis stream)
     SizeScale,     ///< vector, per-axis multipliers of Size (X/Y on quads, X/Y/Z on meshes)
     Emissive,      ///< number, per-particle multiplier of the type's emissive map
+    Opacity,       ///< number, the colour's alpha; the other channels stay as they are
 
     Default = Color
   };
@@ -108,6 +109,9 @@ struct PL_PARTICLEPLUGIN_DLL plParticleAttributeSinkSettings
 
   /// The one component written, or -1 when the whole target is.
   plInt32 GetWrittenComponent() const;
+
+  /// The component of a wider stream a number target lives in (Opacity: alpha of Color), or -1.
+  plInt32 GetStreamComponent() const;
 
   void Save(plStreamWriter& inout_stream) const;
   void Load(plStreamReader& inout_stream);

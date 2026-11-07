@@ -16,6 +16,7 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleSinkTarget, 1)
   PL_ENUM_CONSTANT(plParticleSinkTarget::Facing),
   PL_ENUM_CONSTANT(plParticleSinkTarget::SizeScale),
   PL_ENUM_CONSTANT(plParticleSinkTarget::Emissive),
+  PL_ENUM_CONSTANT(plParticleSinkTarget::Opacity),
 PL_END_STATIC_REFLECTED_ENUM;
 
 PL_BEGIN_STATIC_REFLECTED_ENUM(plParticleSinkComponent, 1)
@@ -107,6 +108,11 @@ plInt32 plParticleAttributeSinkSettings::GetWrittenComponent() const
   return iComponent;
 }
 
+plInt32 plParticleAttributeSinkSettings::GetStreamComponent() const
+{
+  return m_Target == plParticleSinkTarget::Opacity ? 3 : -1;
+}
+
 void plParticleAttributeSinkSettings::Save(plStreamWriter& inout_stream) const
 {
   const plUInt8 uiVersion = 2;
@@ -154,6 +160,7 @@ const char* plParticleAttributeSink::GetTargetStream(plStringBuilder& ref_sCusto
     case plParticleSinkTarget::Size:
       return "Size";
     case plParticleSinkTarget::Color:
+    case plParticleSinkTarget::Opacity:
       return "Color";
     case plParticleSinkTarget::RotationSpeed:
       return "RotationSpeed";
@@ -187,6 +194,7 @@ plProcessingStream::DataType plParticleAttributeSink::GetTargetType() const
     case plParticleSinkTarget::SizeScale:
       return plProcessingStream::DataType::Half3;
     case plParticleSinkTarget::Color:
+    case plParticleSinkTarget::Opacity:
       return plProcessingStream::DataType::Half4;
     case plParticleSinkTarget::Custom:
       return plParticleCustomAttributeType::GetStreamType(m_pSettings->m_CustomType);
@@ -226,8 +234,10 @@ void plParticleAttributeSink::Apply(const plParticleSystemInstance* pSystem, plU
   else if (type == plProcessingStream::DataType::Float4 || type == plProcessingStream::DataType::Half4)
     uiTargetComponents = (type == plProcessingStream::DataType::Float4) ? 3 : 4; // Position keeps its w
 
-  // a single component is the only one written; one the target does not have writes nothing
-  const plInt32 iWritten = settings.GetWrittenComponent();
+  // a single component is the only one written; one the target does not have writes nothing. A number target that
+  // lives inside a wider stream (Opacity) writes its one component of it.
+  const plInt32 iStream = settings.GetStreamComponent();
+  const plInt32 iWritten = iStream >= 0 ? iStream : settings.GetWrittenComponent();
   const plUInt32 uiFirst = iWritten >= 0 ? (plUInt32)iWritten : 0;
   const plUInt32 uiEnd = iWritten >= 0 ? plMath::Min((plUInt32)iWritten + 1, uiTargetComponents) : uiTargetComponents;
 

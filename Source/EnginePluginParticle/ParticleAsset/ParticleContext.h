@@ -89,6 +89,12 @@ protected:
   /// Moves the preview object along its path at the world clock's time.
   void MovePreview();
 
+  /// Builds the backdrop's objects: the floor, and the set (back wall, ramp, figure) that stands on it.
+  void CreateStage();
+
+  /// Shows the parts of the stage that the backdrop asks for. Needs the world's write lock.
+  void ApplyBackdrop();
+
   void UpdateSystemStats();
   void CollectRecentEvents();
   void GatherEventStats(plUInt32 uiSystem, const plParticleSystemDescriptor& desc, const plParticleSystemInstance& system, SystemStats& ref_stats);
@@ -112,7 +118,10 @@ protected:
 private:
   plBoundingBoxSphere m_ThumbnailBoundingVolume;
   plParticleEffectResourceHandle m_hParticle;
-  plMeshResourceHandle m_hPreviewMeshResource;
+  plHybridArray<plMeshResourceHandle, 4> m_StageMeshes; ///< kept alive while the stage shows them
+  plGameObjectHandle m_hStageFloor;                      ///< shown by Stage and Floor
+  plGameObjectHandle m_hStageSet;                        ///< the back wall, the ramp and the figure; shown by Stage
+  plParticlePreviewBackdrop::Enum m_Backdrop = plParticlePreviewBackdrop::Default;
   plParticleComponent* m_pComponent = nullptr;
   plParticlePreviewModule* m_pPreviewModule = nullptr;
 

@@ -10,6 +10,7 @@ PARTICLE_LIGHTING_MODE
 SHADING_QUALITY
 SHADOW_QUALITY
 CAMERA_MODE
+VELOCITY_OUTPUT
 
 [MATERIALPARAMETER]
 
@@ -24,7 +25,7 @@ CAMERA_MODE
 #if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SIX_WAY
   // the key light drives the baked directional response, the rest is summed into ambient
   #define CUSTOM_INTERPOLATOR float FogAmount : FOG; float Life : TEXCOORD1; float Variation : TEXCOORD2; float3 KeyLightDir : TEXCOORD3; float3 KeyLightColor : TEXCOORD4; float3 AmbientLight : TEXCOORD5; float Emissive : TEXCOORD6;
-#elif PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL
+#elif PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL || PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE
   // the pixel shader runs the whole clustered light loop, so it needs the surface it is shading
   #define CUSTOM_INTERPOLATOR float FogAmount : FOG; float Life : TEXCOORD1; float Variation : TEXCOORD2; float3 LitWorldPos : TEXCOORD3; float3 LitNormal : TEXCOORD4; float Emissive : TEXCOORD6;
 #else
@@ -33,9 +34,12 @@ CAMERA_MODE
 #define USE_TEXCOORD0
 #define USE_COLOR0
 
-// the vertex shader fills Emissive, the pixel shader defines GetParticleEmissive and GetParticleDistortionOffset
+// the vertex shader fills Emissive, the pixel shader defines GetParticleEmissive, GetParticleDistortionOffset
+// and GetParticleShadingNormal
 #define PARTICLE_HAS_EMISSIVE
 #define PARTICLE_HAS_DISTORTION_OFFSET
+#define PARTICLE_HAS_SHADING_NORMAL
+#define PARTICLE_HAS_TEXTURE_ALPHA
 
 [VERTEXSHADER]
 
@@ -66,13 +70,26 @@ SamplerState ParticleEmissiveMap_AutoSampler BIND_GROUP(BG_DRAW_CALL);
   SamplerState ParticleSixWayMapB_AutoSampler BIND_GROUP(BG_DRAW_CALL);
 #endif
 
-#if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL
+#if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL || PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE
   Texture2D ParticleNormalMap BIND_GROUP(BG_DRAW_CALL);
   SamplerState ParticleNormalMap_AutoSampler BIND_GROUP(BG_DRAW_CALL);
 #endif
 
+#if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE
+  // occlusion / roughness / metal in R / G / B, like a material's ORM texture
+  Texture2D ParticleOrmMap BIND_GROUP(BG_DRAW_CALL);
+  SamplerState ParticleOrmMap_AutoSampler BIND_GROUP(BG_DRAW_CALL);
+
+#  if SHADING_QUALITY == SHADING_QUALITY_NORMAL && defined(PARTICLE_OPAQUE_OUTPUT) && RENDER_PASS == RENDER_PASS_FORWARD
+  // masked and opaque particles are the opaque surface the screen-space GI was resolved for
+#    define PARTICLE_SURFACE_SCREEN_GI
+#    include <Shaders/Materials/MaterialGIForwardLighting.h>
+#  endif
+#endif
+
 // Global values use the 'static' keyword so that they can be shared between functions
 static float4 g_BaseColor = float4(1.0, 0.0, 1.0, 1.0);
+static float3 g_ShadingNormal = float3(0.0, 0.0, 1.0);
 
 /* === Available input data ===
 
@@ -130,6 +147,15 @@ void FillCustomGlobals()
 
 #else
   g_BaseColor = ParticleTexture.Sample(ParticleTexture_AutoSampler, G.Input.TexCoord0.xy);
+
+#  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  // a distortion quad without a Texture is masked by a soft disc instead of the texture's alpha
+  if ((LookFlags & PARTICLE_LOOK_FLAG_ROUND_MASK) != 0)
+  {
+    float radius = length(G.Input.TexCoord0.xy * 2.0 - 1.0);
+    g_BaseColor = float4(1.0, 1.0, 1.0, 1.0 - smoothstep(0.5, 1.0, radius));
+  }
+#  endif
 #endif
 }
 
@@ -138,42 +164,169 @@ float GetParticleOpacity()
   return g_BaseColor.a * G.Input.Color0.a;
 }
 
-float3 GetParticleColor()
+float GetParticleTextureAlpha()
 {
-  float3 particleColor = g_BaseColor.rgb;
+  return g_BaseColor.a;
+}
 
 // PARTICLE_RENDER_MODE_NONE shades against a stand-in input struct that carries none of the
-// custom interpolators, so the lit path has to be compiled out for it.
-#if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL && PARTICLE_RENDER_MODE != PARTICLE_RENDER_MODE_NONE
+// custom interpolators, so the lit paths have to be compiled out for it.
+#if (PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL || PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE) && PARTICLE_RENDER_MODE != PARTICLE_RENDER_MODE_NONE
+#  define PARTICLE_PIXEL_LIT
+#endif
+
+#if defined(PARTICLE_PIXEL_LIT)
+
+// The interpolated sprite normal, turned towards the viewer and perturbed by the normal map.
+float3 ComputeParticleShadingNormal()
+{
   // The spherical normal is interpolated across the sprite, so each pixel gets its own light and
   // shadow term instead of the four corner samples the vertex path settles for.
   float3 litNormal = normalize(G.Input.LitNormal);
 
-  if (NormalMapStrength > 0.0)
+  // cards are two-sided: the back face is lit as if it faced the viewer
+  if (dot(litNormal, GetCameraPosition() - G.Input.LitWorldPos) < 0.0)
   {
-    // The tangent frame comes from screen-space derivatives rather than an interpolant, so this
-    // works for every quad orientation without the vertex shader having to supply one.
-    float3 dPosX = ddx(G.Input.LitWorldPos);
-    float3 dPosY = ddy(G.Input.LitWorldPos);
-    float2 dUvX = ddx(G.Input.TexCoord0.xy);
-    float2 dUvY = ddy(G.Input.TexCoord0.xy);
-
-    float det = dUvX.x * dUvY.y - dUvY.x * dUvX.y;
-
-    if (abs(det) > 1e-12)
-    {
-      float3 tangent = normalize((dPosX * dUvY.y - dPosY * dUvX.y) / det);
-      float3 bitangent = normalize(cross(litNormal, tangent));
-      tangent = cross(bitangent, litNormal); // re-orthogonalise against the shading normal
-
-      float3 tangentNormal = ParticleNormalMap.Sample(ParticleNormalMap_AutoSampler, G.Input.TexCoord0.xy).xyz * 2.0 - 1.0;
-      float3 mappedNormal = normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y + litNormal * tangentNormal.z);
-
-      litNormal = normalize(lerp(litNormal, mappedNormal, NormalMapStrength));
-    }
+    litNormal = -litNormal;
   }
 
-  particleColor *= CalculateParticleLighting(G.Input.Position, G.Input.LitWorldPos, litNormal);
+  // the renderer passes 0 when no normal map is assigned
+  if (NormalMapStrength <= 0.0)
+    return litNormal;
+
+  // The tangent frame comes from screen-space derivatives rather than an interpolant, so this
+  // works for every quad orientation and atlas layout without the vertex shader supplying one.
+  const float3 dPosX = ddx(G.Input.LitWorldPos);
+  const float3 dPosY = ddy(G.Input.LitWorldPos);
+  const float2 dUvX = ddx(G.Input.TexCoord0.xy);
+  const float2 dUvY = ddy(G.Input.TexCoord0.xy);
+
+  const float det = dUvX.x * dUvY.y - dUvY.x * dUvX.y;
+  if (abs(det) <= 1e-12)
+    return litNormal;
+
+  // the tangent follows +u, made orthogonal to the shading normal
+  float3 tangent = (dPosX * dUvY.y - dPosY * dUvX.y) / det;
+  tangent -= litNormal * dot(tangent, litNormal);
+  if (dot(tangent, tangent) <= 1e-12)
+    return litNormal;
+  tangent = normalize(tangent);
+
+  // the bitangent follows +v, as mesh tangent frames do, so mirrored UVs flip it
+  const float3 uvBitangent = (dPosY * dUvX.x - dPosX * dUvY.x) / det;
+  float3 bitangent = cross(litNormal, tangent);
+  if (dot(bitangent, uvBitangent) < 0.0)
+    bitangent = -bitangent;
+
+  // normal maps are stored with two channels; z is reconstructed
+  const float3 tangentNormal = DecodeNormalTexture(ParticleNormalMap.Sample(ParticleNormalMap_AutoSampler, G.Input.TexCoord0.xy));
+  const float3 mappedNormal = normalize(tangent * tangentNormal.x + bitangent * tangentNormal.y + litNormal * tangentNormal.z);
+
+  return normalize(lerp(litNormal, mappedNormal, NormalMapStrength));
+}
+
+#endif
+
+#if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE && defined(PARTICLE_PIXEL_LIT)
+
+// Lit like a mesh material: every light type with its shadows, the sky light and reflection probes,
+// plus the screen-space GI for masked and opaque particles.
+float3 ShadeParticleSurface(float3 baseColor, float3 worldNormal)
+{
+#  if SHADING_QUALITY == SHADING_QUALITY_NORMAL
+  float roughness = SurfaceRoughness;
+  float metallic = SurfaceMetallic;
+  float occlusion = 1.0;
+
+  if ((LookFlags & PARTICLE_LOOK_FLAG_ORM_MAP) != 0)
+  {
+    const float3 orm = ParticleOrmMap.Sample(ParticleOrmMap_AutoSampler, G.Input.TexCoord0.xy).rgb;
+    occlusion = orm.r;
+    roughness *= orm.g;
+    metallic *= orm.b;
+  }
+
+  // the defaults FillMaterialData gives a material without subsurface, coat or transmission
+  plMaterialData matData = (plMaterialData)0;
+  matData.worldPosition = G.Input.LitWorldPos;
+  matData.shadowPosition = G.Input.LitWorldPos;
+  matData.worldNormal = worldNormal;
+  matData.vertexNormal = worldNormal;
+
+  const float f0 = 0.16 * SurfaceSpecular * SurfaceSpecular;
+  matData.diffuseColor = lerp(baseColor, 0.0, metallic);
+  matData.specularColor = lerp(float3(f0, f0, f0), baseColor, metallic);
+  matData.metalness = metallic;
+  matData.specularF0 = f0;
+  matData.perceptualRoughness = max(roughness, MIN_PERCEPTUAL_ROUGHNESS);
+  matData.roughness = RoughnessFromPerceptualRoughness(matData.perceptualRoughness);
+  matData.diffuseRoughness = matData.roughness;
+  matData.occlusion = occlusion;
+  matData.opacity = 1.0;
+  matData.subsurfaceScatterPower = 9.0;
+  matData.subsurfaceRadius = float3(0.5, 0.5, 0.5);
+  matData.subsurfaceWeight = 1.0;
+
+  const plPerClusterData clusterData = GetClusterData(G.Input.Position.xyw);
+
+#    if defined(PARTICLE_SURFACE_SCREEN_GI)
+  // with RTGI sky occlusion the screen GI below already carries the (occluded) sky
+  const bool bApplySkyAmbient = GISkyAmbientDisabled == 0 || GIForwardEnabled == 0;
+  AccumulatedLight light = CalculateLightingReSTIRSky(matData, clusterData, G.Input.Position.xyw, true, bApplySkyAmbient, RDI_MODE_OFF);
+#    elif defined(PARTICLE_OPAQUE_OUTPUT)
+  AccumulatedLight light = CalculateLighting(matData, clusterData, G.Input.Position.xyw, true);
+#    else
+  // the screen-space ambient occlusion belongs to the surface behind a blended particle
+  AccumulatedLight light = CalculateLighting(matData, clusterData, G.Input.Position.xyw, false);
+#    endif
+
+  float3 litColor = light.diffuseLight + light.specularLight;
+
+#    if defined(PARTICLE_SURFACE_SCREEN_GI)
+  {
+    const float3 viewVector = normalize(GetCameraPosition() - matData.worldPosition);
+    const float NdotV = saturate(dot(matData.worldNormal, viewVector));
+    const float indirectOcclusion = matData.occlusion * SampleSSAO(G.Input.Position.xyw);
+
+    const float3 giDiffuse = SampleGIForwardDiffuse(G.Input.Position.xyw, matData.worldPosition);
+    const float3 diffuseFresnel = F_SchlickRoughness(matData.specularColor, NdotV, matData.roughness);
+    litColor += giDiffuse * matData.diffuseColor * MaterialAmbientDiffuseScale(matData, viewVector) * (1.0 - diffuseFresnel) * GIDiffuseStrength * indirectOcclusion;
+
+    // the resolved GI reflection replaces the probe's wherever it has a result
+    const float4 giSpecular = SampleGIForwardSpecularResult(G.Input.Position.xyw, matData.worldPosition);
+    if (giSpecular.a > 0.0)
+    {
+      const float3 probeSpecular = MaterialProbeSpecular(matData, viewVector, clusterData, G.Input.Position.xyw, IndirectSpecularClamp());
+      litColor += (giSpecular.rgb * GISpecularStrength * MaterialEnvironmentBRDF(matData, NdotV) - probeSpecular) * indirectOcclusion;
+    }
+  }
+#    endif
+
+  return litColor;
+#  else
+  // the simplified and mobile shading qualities have no material lighting: diffuse only
+  return baseColor * CalculateParticleLightingPS(G.Input.Position.xyw, G.Input.LitWorldPos, worldNormal);
+#  endif
+}
+
+#endif
+
+float3 GetParticleColor()
+{
+  float3 particleColor = g_BaseColor.rgb;
+
+#if defined(PARTICLE_PIXEL_LIT)
+  const float3 litNormal = ComputeParticleShadingNormal();
+  g_ShadingNormal = litNormal;
+
+#  if PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE
+  return ShadeParticleSurface(particleColor * G.Input.Color0.rgb, litNormal);
+#  else
+  // the light clusters are looked up by pixel position, which is what SV_Position holds here
+  particleColor *= CalculateParticleLightingPS(G.Input.Position.xyw, G.Input.LitWorldPos, litNormal);
+#  endif
+#else
+  g_ShadingNormal = -GetCameraDirForwards();
 #endif
 
   return particleColor.rgb * G.Input.Color0.rgb;
@@ -185,6 +338,11 @@ float3 GetParticleColor()
 float3 GetParticleEmissive()
 {
   return SampleParticleEmissive(ParticleEmissiveMap, ParticleEmissiveMap_AutoSampler, G.Input.TexCoord0.xy, G.Input.Emissive);
+}
+
+float3 GetParticleShadingNormal()
+{
+  return g_ShadingNormal;
 }
 
 float2 GetParticleDistortionOffset()

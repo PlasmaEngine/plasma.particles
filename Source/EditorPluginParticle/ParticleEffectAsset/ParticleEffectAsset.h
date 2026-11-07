@@ -39,6 +39,7 @@ public:
   bool m_bShowStats = true;
   bool m_bShowEvents = true;
   plEnum<plParticlePreviewMotion> m_PreviewMotion;
+  plEnum<plParticlePreviewBackdrop> m_PreviewBackdrop;
 };
 
 class plParticleEffectAssetDocument : public plAssetDocument
@@ -133,6 +134,12 @@ public:
   /// after it when it has none), and the new system's On Event spawns per event on it.
   plStatus AddSystemOnDeaths(const plDocumentObject* pSource);
 
+  /// Finishes a Curve Over Life node a palette preset added (plParticleCurvePreset): it gets the preset's
+  /// curve, and a Set Attribute block of the preset's target in the selected system (else the only one, else
+  /// the nearest) is wired to it. The edits join the transaction that added the node; a node without a
+  /// preset is left alone.
+  void ApplyCurvePreset(const plUuid& node);
+
   /// What opening the document converted from the 1.3 logic blocks (If, Switch, Remap, Conditional
   /// Kill, Expression, the old Set Attribute). Only known in the session that converted them.
   struct ConversionReport
@@ -162,6 +169,10 @@ public:
 
   plParticlePreviewMotion::Enum GetPreviewMotion() const;
   void SetPreviewMotion(plParticlePreviewMotion::Enum motion);
+
+  /// What the preview shows around the effect.
+  plParticlePreviewBackdrop::Enum GetPreviewBackdrop() const;
+  void SetPreviewBackdrop(plParticlePreviewBackdrop::Enum backdrop);
 
   /// The settings message the window sends with every redraw.
   void FillPreviewSettings(plParticlePreviewSettingsMsgToEngine& out_msg) const;

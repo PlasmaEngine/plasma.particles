@@ -10,6 +10,7 @@
 #include <ParticlePlugin/System/ParticleProgram.h>
 
 class plAbstractMemberProperty;
+class plWorld;
 class plParticleModule;
 class plParticleSystemDescriptor;
 class plParticleSystemInstance;
@@ -31,6 +32,11 @@ namespace plParticleFrameInput
   constexpr const char* CameraDistance = "CameraDistance";   ///< effect origin to the main camera
   constexpr const char* ParticleCount = "ParticleCount";     ///< alive particles at the start of the step
   constexpr const char* SpawnScale = "SpawnScale";           ///< LOD x budget x Particles.SpawnCountScale
+  constexpr const char* EffectRight = "EffectRight";         ///< Float3, the effect's +Y
+  constexpr const char* EffectScale = "EffectScale";         ///< Float3, the effect's scale per axis
+  constexpr const char* CameraForward = "CameraForward";     ///< Float3, the main camera's view direction
+  constexpr const char* CameraRight = "CameraRight";         ///< Float3, the main camera's right
+  constexpr const char* CameraUp = "CameraUp";               ///< Float3, the main camera's up
   constexpr const char* FloatParameterPrefix = "Param.";     ///< + name: an effect float parameter
   constexpr const char* ColorParameterPrefix = "ColorParam."; ///< + name: an effect colour parameter, Float4
   constexpr const char* BlackboardPrefix = "Blackboard.";     ///< + "<blackboard>|<entry>": a global blackboard entry, Float4
@@ -47,6 +53,13 @@ PL_PARTICLEPLUGIN_DLL bool plParticleHasBlackboardEntry(plStringView sPath);
 /// \brief Particle systems update on task threads and plBlackboard has no locking of its own, so the
 /// particle code reads and writes blackboards under this mutex.
 PL_PARTICLEPLUGIN_DLL plMutex& plParticleGetBlackboardMutex();
+
+/// \brief Stores the main camera's directions of a world, which the CameraForward, CameraRight and CameraUp inputs read.
+/// A world nothing stored them for reads +X, +Y and +Z.
+PL_PARTICLEPLUGIN_DLL void plParticleStoreMainCameraAxes(const plWorld* pWorld, const plVec3& vForward, const plVec3& vRight, const plVec3& vUp);
+
+/// \brief Forgets what plParticleStoreMainCameraAxes stored for a world.
+PL_PARTICLEPLUGIN_DLL void plParticleClearMainCameraAxes(const plWorld* pWorld);
 
 /// \brief One block property whose value comes from a per-frame program output.
 struct PL_PARTICLEPLUGIN_DLL plParticleDrivenProperty
@@ -139,6 +152,7 @@ private:
     plUInt32 m_uiOutputOffsets[4] = {}; ///< the float in m_OutputData of each component
     plUInt32 m_uiComponents = 1;
     plVec4 m_vLastValue = plVec4(plMath::NaN<float>());
+    bool m_bEmitterSpaceDirection = false; ///< plParticleEmitterSpaceDirectionAttribute: rotated into emitter space
   };
 
   void FillInputs(const plTime& diff);
@@ -149,7 +163,7 @@ private:
   plParticleSystemInstance* m_pSystem = nullptr;
 
   plExpressionVM m_VM;
-  plParticleProgramTables m_Tables;
+  plSharedPtr<plParticleProgramTables> m_pTables; ///< shared with every runner of the same program
 
   // four floats per component, so the VM may run a whole SIMD lane on one instance
   plDynamicArray<float> m_InputData;

@@ -131,6 +131,9 @@ public:
   /// \brief Returns the number of currently active particles across all systems.
   plUInt64 GetNumActiveParticles() const;
 
+  /// Whether any system has a type that draws into shadow maps (masked or opaque, with Cast Shadows).
+  bool CastsShadows() const;
+
   /// @name Transform Related
   /// @{
 public:

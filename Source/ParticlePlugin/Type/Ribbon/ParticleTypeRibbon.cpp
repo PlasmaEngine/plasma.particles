@@ -30,6 +30,8 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleTypeRibbonFactory, 1, plRTTIDefaultAll
     PL_MEMBER_PROPERTY("CustomMaterial", m_sCustomMaterial)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Material", "QuadParticle")),
     PL_MEMBER_PROPERTY("Texture", m_sTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D"), new plDefaultValueAttribute(plStringView("{ e00262e8-58f5-42f5-880d-569257047201 }"))), // wrap in plStringView to prevent a memory leak report
     PL_MEMBER_PROPERTY("TintColorParam", m_sTintColorParameter),
+    PL_MEMBER_PROPERTY("DistortionTexture", m_sDistortionTexture)->AddAttributes(new plAssetBrowserAttribute("CompatibleAsset_Texture_2D")),
+    PL_MEMBER_PROPERTY("DistortionStrength", m_fDistortionStrength)->AddAttributes(new plDefaultValueAttribute(100.0f), new plClampValueAttribute(0.0f, 500.0f)),
     PL_PARTICLE_LOOK_PROPERTIES,
   }
   PL_END_PROPERTIES;
@@ -69,6 +71,14 @@ void plParticleTypeRibbonFactory::CopyTypeProperties(plParticleType* pObject, bo
   {
     pType->m_hTexture = plResourceManager::LoadResource<plTexture2DResource>(m_sTexture);
   }
+
+  pType->m_hDistortionTexture.Invalidate();
+  if (!m_sDistortionTexture.IsEmpty())
+  {
+    pType->m_hDistortionTexture = plResourceManager::LoadResource<plTexture2DResource>(m_sDistortionTexture);
+  }
+
+  pType->m_fDistortionStrength = m_fDistortionStrength;
 }
 
 enum class TypeRibbonVersion
@@ -76,6 +86,7 @@ enum class TypeRibbonVersion
   Version_0 = 0,
   Version_1,
   Version_2, // added emissive map and depth blending
+  Version_3, // added distortion
 
   // insert new version numbers above
   Version_Count,
@@ -100,6 +111,10 @@ void plParticleTypeRibbonFactory::Save(plStreamWriter& inout_stream) const
 
   // Version 2
   m_Look.Save(inout_stream);
+
+  // Version 3
+  inout_stream << m_sDistortionTexture;
+  inout_stream << m_fDistortionStrength;
 }
 
 void plParticleTypeRibbonFactory::Load(plStreamReader& inout_stream)
@@ -124,6 +139,14 @@ void plParticleTypeRibbonFactory::Load(plStreamReader& inout_stream)
   if (uiVersion >= 2)
   {
     m_Look.Load(inout_stream);
+  }
+
+  m_sDistortionTexture.Clear();
+  m_fDistortionStrength = 100.0f;
+  if (uiVersion >= 3)
+  {
+    inout_stream >> m_sDistortionTexture;
+    inout_stream >> m_fDistortionStrength;
   }
 }
 
@@ -165,7 +188,11 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
 {
   PL_PROFILE_SCOPE("PFX: Ribbon");
 
-  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid())
+  // distortion works without a texture: the shader masks the band with a soft edge
+  if (!m_hTexture.IsValid() && !m_hCustomMaterial.IsValid() && m_RenderMode != plParticleTypeRenderMode::Distortion)
+    return;
+
+  if (plParticleSkipView(ref_msg, CastsShadows()))
     return;
 
   const plUInt32 numParticles = (plUInt32)GetOwnerSystem()->GetNumActiveParticles();
@@ -272,9 +299,13 @@ void plParticleTypeRibbon::ExtractTypeRenderData(plMsgExtractRenderData& ref_msg
   pRenderData->m_hTexture = m_hTexture;
   pRenderData->m_hCustomMaterial = m_hCustomMaterial;
   pRenderData->m_Look = m_Look.GetRenderData(GetOwnerEffect(), false);
+  pRenderData->m_Look.m_bDistortionTexture = m_hDistortionTexture.IsValid();
+  pRenderData->m_Look.m_bRoundMask = !m_hTexture.IsValid();
+  pRenderData->m_Look.m_fDistortionStrength = m_fDistortionStrength;
+  pRenderData->m_hDistortionTexture = m_hDistortionTexture;
   pRenderData->m_Points = m_PointData;
 
-  ref_msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::LitTransparent, plRenderData::Caching::Never);
+  plParticleAddRenderData(ref_msg, pRenderData, m_RenderMode);
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_Type_Ribbon_ParticleTypeRibbon);

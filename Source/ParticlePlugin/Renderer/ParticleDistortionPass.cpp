@@ -1,5 +1,6 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
+#include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <RendererCore/Pipeline/Passes/TransparentForwardRenderPass.h>
 #include <RendererCore/Pipeline/RenderPipeline.h>
@@ -12,6 +13,8 @@
 #include <RendererFoundation/CommandEncoder/CommandEncoder.h>
 
 plRenderData::Category plParticleRenderDataCategories::Distortion = plRenderData::RegisterCategory("ParticleDistortion", &plRenderSortingFunctions::BackToFrontThenByRenderData);
+
+plCVarBool cvar_ParticlesShowDistortion("Particles.ShowDistortion", false, plCVarFlags::Default, "Draws the screen offsets of distortion particles instead of applying them (red = X, green = Y).");
 
 // clang-format off
 PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleDistortionPass, 1, plRTTIDefaultAllocator<plParticleDistortionPass>)
@@ -32,6 +35,7 @@ plParticleDistortionPass::plParticleDistortionPass()
   : plForwardRenderPass("ParticleDistortionPass")
 {
   m_hApplyShader = plResourceManager::LoadResource<plShaderResource>("Shaders/Particles/ParticleDistortionApply.plShader");
+  m_hShowShader = plResourceManager::LoadResource<plShaderResource>("Shaders/Particles/ParticleDistortionShow.plShader");
 }
 
 plParticleDistortionPass::~plParticleDistortionPass() = default;
@@ -98,26 +102,34 @@ plStatus plParticleDistortionPass::AddRenderPasses(const plViewData& viewData, c
     auto transferPass = ref_graph.AddTransferPass("Particle Distortion Copy");
     transferPass.ReadTexture(hColor, {}, bMsaa ? plGALResourceState::ResolveSource : plGALResourceState::CopySource);
     transferPass.WriteTexture(hColorCopy, {}, bMsaa ? plGALResourceState::ResolveDestination : plGALResourceState::CopyDestination);
+    const plUInt32 uiNumSlices = plMath::Max<plUInt32>(colorDesc.m_uiArraySize, 1);
     transferPass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
       {
-      plGALTextureSubresource subresource;
-      subresource.m_uiMipLevel = 0;
-      subresource.m_uiArraySlice = 0;
-      ctx.GetCommandEncoder()->ResolveTexture(ctx.ResolveTexture(hColorCopy), subresource, ctx.ResolveTexture(hColor), subresource); });
+      // every eye of a stereo target
+      for (plUInt32 uiSlice = 0; uiSlice < uiNumSlices; ++uiSlice)
+      {
+        plGALTextureSubresource subresource;
+        subresource.m_uiMipLevel = 0;
+        subresource.m_uiArraySlice = uiSlice;
+        ctx.GetCommandEncoder()->ResolveTexture(ctx.ResolveTexture(hColorCopy), subresource, ctx.ResolveTexture(hColor), subresource);
+      } });
   }
 
   {
+    // a cvar change rebuilds the render graph, so the choice can be made here
+    const plShaderResourceHandle hShader = cvar_ParticlesShowDistortion ? m_hShowShader : m_hApplyShader;
+
     auto pass = ref_graph.AddGraphicsPass("Particle Distortion Apply");
     pass.AddColorTarget(hColor);
     pass.ReadTexture(hColorCopy, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
     pass.ReadTexture(hOffsets, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::PixelShader);
     pass.SetStereoscopic(camera.IsStereoscopic());
-    pass.SetExecuteCallback([=, this](const plRenderGraphContext& ctx)
+    pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
       {
       const plRenderViewContext& renderViewContext = *ctx.GetUserData<plRenderViewContext>();
       renderViewContext.UpdateViewport();
 
-      renderViewContext.m_pRenderContext->BindShader(m_hApplyShader);
+      renderViewContext.m_pRenderContext->BindShader(hShader);
       renderViewContext.m_pRenderContext->BindNullMeshBuffer(plGALPrimitiveTopology::Triangles, 1);
 
       plBindGroupBuilder& bindGroup = renderViewContext.m_pRenderContext->GetBindGroup();

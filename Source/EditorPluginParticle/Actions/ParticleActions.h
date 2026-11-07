@@ -28,6 +28,19 @@ public:
   static plActionDescriptorHandle s_hPreviewStatic;
   static plActionDescriptorHandle s_hPreviewOrbit;
   static plActionDescriptorHandle s_hPreviewLine;
+  static plActionDescriptorHandle s_hBackdropMenu;
+};
+
+/// Dropdown picking what the preview shows around the effect (plParticlePreviewBackdrop).
+class plParticleBackdropAction : public plEnumerationMenuAction
+{
+  PL_ADD_DYNAMIC_REFLECTION(plParticleBackdropAction, plEnumerationMenuAction);
+
+public:
+  plParticleBackdropAction(const plActionContext& context, const char* szName, const char* szIconPath);
+
+  virtual plInt64 GetValue() const override;
+  virtual void Execute(const plVariant& value) override;
 };
 
 /// Dropdown listing every system template ('Particles/Templates' in any data directory);

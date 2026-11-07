@@ -9,6 +9,7 @@ PARTICLE_LIGHTING_MODE
 SHADOW_QUALITY
 SHADING_QUALITY
 CAMERA_MODE
+VELOCITY_OUTPUT
 
 [MATERIALPARAMETER]
 
@@ -32,6 +33,8 @@ CAMERA_MODE
 
 // ribbons have an emissive map but no per-particle emissive multiplier
 #define PARTICLE_HAS_EMISSIVE
+#define PARTICLE_HAS_DISTORTION_OFFSET
+#define PARTICLE_HAS_TEXTURE_ALPHA
 
 #include <Shaders/Particles/ParticlePixelShader.h>
 
@@ -42,6 +45,11 @@ SamplerState ParticleTexture_AutoSampler BIND_GROUP(BG_DRAW_CALL);
 Texture2D ParticleEmissiveMap BIND_GROUP(BG_DRAW_CALL);
 SamplerState ParticleEmissiveMap_AutoSampler BIND_GROUP(BG_DRAW_CALL);
 
+#if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  Texture2D ParticleDistortionTexture BIND_GROUP(BG_DRAW_CALL);
+  SamplerState ParticleDistortionTexture_AutoSampler BIND_GROUP(BG_DRAW_CALL);
+#endif
+
 static float4 g_BaseColor = float4(0.0, 0.0, 0.0, 0.0);
 
 void FillCustomGlobals()
@@ -50,12 +58,37 @@ void FillCustomGlobals()
   g_BaseColor = float4(G.Input.TexCoord0.xy, 1.0, 1.0);
 #else
   g_BaseColor = ParticleTexture.Sample(ParticleTexture_AutoSampler, G.Input.TexCoord0.xy);
+
+#  if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  // a distortion ribbon without a Texture fades out towards both edges of the band
+  if ((LookFlags & PARTICLE_LOOK_FLAG_ROUND_MASK) != 0)
+  {
+    float across = abs(G.Input.TexCoord0.y * 2.0 - 1.0);
+    g_BaseColor = float4(1.0, 1.0, 1.0, 1.0 - smoothstep(0.5, 1.0, across));
+  }
+#  endif
+#endif
+}
+
+float2 GetParticleDistortionOffset()
+{
+#if PARTICLE_RENDER_MODE == PARTICLE_RENDER_MODE_DISTORTION
+  // without a distortion texture the band pushes the image away from its centre line
+  float2 texDistort = (LookFlags & PARTICLE_LOOK_FLAG_DISTORTION_TEXTURE) != 0 ? ParticleDistortionTexture.Sample(ParticleDistortionTexture_AutoSampler, G.Input.TexCoord0.xy).xy : float2(0.5, G.Input.TexCoord0.y);
+  return (texDistort - 0.5) * DistortionStrength;
+#else
+  return 0.0;
 #endif
 }
 
 float GetParticleOpacity()
 {
   return g_BaseColor.a * G.Input.Color0.a;
+}
+
+float GetParticleTextureAlpha()
+{
+  return g_BaseColor.a;
 }
 
 float3 GetParticleColor()

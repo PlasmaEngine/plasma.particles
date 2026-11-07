@@ -2,6 +2,7 @@
 
 #include <Core/Utils/Blackboard.h>
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/Containers/HashTable.h>
 #include <Foundation/IO/MemoryStream.h>
 #include <Foundation/Profiling/Profiling.h>
 #include <Foundation/Reflection/ReflectionUtils.h>
@@ -42,7 +43,8 @@ void plParticleDrivenProperty::Load(plStreamReader& inout_stream)
 
 void plParticleFrameProgram::Save(plStreamWriter& inout_stream) const
 {
-  const plUInt8 uiVersion = 2;
+  // version 3: the assets carry the inline tables and the curve normalization flags
+  const plUInt8 uiVersion = 3;
   inout_stream << uiVersion;
 
   inout_stream << m_Driven.GetCount();
@@ -62,7 +64,7 @@ void plParticleFrameProgram::Load(plStreamReader& inout_stream)
 {
   plUInt8 uiVersion = 0;
   inout_stream >> uiVersion;
-  PL_ASSERT_DEV(uiVersion <= 2, "Invalid particle frame program version {0}", uiVersion);
+  PL_ASSERT_DEV(uiVersion <= 3, "Invalid particle frame program version {0}", uiVersion);
 
   plUInt32 uiCount = 0;
   inout_stream >> uiCount;
@@ -85,7 +87,7 @@ void plParticleFrameProgram::Load(plStreamReader& inout_stream)
 
   if (uiCount > 0 && uiVersion >= 2)
   {
-    m_Assets.Load(inout_stream);
+    m_Assets.Load(inout_stream, uiVersion >= 3);
   }
 }
 
@@ -235,6 +237,7 @@ void plParticleFrameProgramRunner::Clear()
   m_pProgram = nullptr;
   m_pTemplate = nullptr;
   m_pSystem = nullptr;
+  m_pTables.Clear();
 }
 
 void plParticleFrameProgramRunner::Configure(const plParticleSystemDescriptor* pTemplate, plParticleSystemInstance* pSystem, bool bLoweredToGPU)
@@ -248,7 +251,7 @@ void plParticleFrameProgramRunner::Configure(const plParticleSystemDescriptor* p
   m_pProgram = &program;
   m_pTemplate = pTemplate;
   m_pSystem = pSystem;
-  m_Tables.Bake(program.m_Assets);
+  m_pTables = program.m_Assets.GetTables();
 
   // ---- inputs: classify each by name, then lay out the data before any stream points into it ----
   const auto inputDescs = program.m_ByteCode.GetInputs();
@@ -405,6 +408,7 @@ void plParticleFrameProgramRunner::Configure(const plParticleSystemDescriptor* p
     driven.m_pProperty = static_cast<const plAbstractMemberProperty*>(pProp);
     driven.m_uiClone = uiClone;
     driven.m_uiComponents = uiComponents;
+    driven.m_bEmitterSpaceDirection = uiComponents >= 3 && pProp->GetAttributeByType<plParticleEmitterSpaceDirectionAttribute>() != nullptr;
     for (plUInt32 c = 0; c < 4; ++c)
       driven.m_uiOutputOffsets[c] = componentOffsets[c];
   }
@@ -424,6 +428,57 @@ plMutex& plParticleGetBlackboardMutex()
 {
   static plMutex s_Mutex;
   return s_Mutex;
+}
+
+namespace
+{
+  struct CameraAxes
+  {
+    plVec3 m_vForward = plVec3(1, 0, 0);
+    plVec3 m_vRight = plVec3(0, 1, 0);
+    plVec3 m_vUp = plVec3(0, 0, 1);
+  };
+
+  /// The stored camera directions per world; the update tasks read them under the mutex.
+  struct CameraAxesStore
+  {
+    plMutex m_Mutex;
+    plHashTable<const plWorld*, CameraAxes> m_Axes;
+  };
+
+  CameraAxesStore& GetCameraAxesStore()
+  {
+    static CameraAxesStore s_Store;
+    return s_Store;
+  }
+
+  CameraAxes ReadCameraAxes(const plWorld* pWorld)
+  {
+    CameraAxesStore& store = GetCameraAxesStore();
+    PL_LOCK(store.m_Mutex);
+
+    CameraAxes axes;
+    store.m_Axes.TryGetValue(pWorld, axes);
+    return axes;
+  }
+} // namespace
+
+void plParticleStoreMainCameraAxes(const plWorld* pWorld, const plVec3& vForward, const plVec3& vRight, const plVec3& vUp)
+{
+  CameraAxesStore& store = GetCameraAxesStore();
+  PL_LOCK(store.m_Mutex);
+
+  CameraAxes& axes = store.m_Axes[pWorld];
+  axes.m_vForward = vForward;
+  axes.m_vRight = vRight;
+  axes.m_vUp = vUp;
+}
+
+void plParticleClearMainCameraAxes(const plWorld* pWorld)
+{
+  CameraAxesStore& store = GetCameraAxesStore();
+  PL_LOCK(store.m_Mutex);
+  store.m_Axes.Remove(pWorld);
 }
 
 namespace
@@ -531,6 +586,16 @@ bool plParticleReadFrameInput(plStringView sName, const plParticleSystemInstance
     out_vValue.x = (float)pSystem->GetNumActiveParticles();
   else if (sName == plParticleFrameInput::SpawnScale)
     out_vValue.x = plMath::Max((float)cvar_ParticlesSpawnCountScale, 0.0f) * pEffect->GetDynamicSpawnScale();
+  else if (sName == plParticleFrameInput::EffectRight)
+    out_vValue = (transform.m_qRotation * plVec3(0, 1, 0)).GetAsVec4(0);
+  else if (sName == plParticleFrameInput::EffectScale)
+    out_vValue = transform.m_vScale.GetAsVec4(0);
+  else if (sName == plParticleFrameInput::CameraForward)
+    out_vValue = ReadCameraAxes(pSystem->GetOwnerWorldModule()->GetWorld()).m_vForward.GetAsVec4(0);
+  else if (sName == plParticleFrameInput::CameraRight)
+    out_vValue = ReadCameraAxes(pSystem->GetOwnerWorldModule()->GetWorld()).m_vRight.GetAsVec4(0);
+  else if (sName == plParticleFrameInput::CameraUp)
+    out_vValue = ReadCameraAxes(pSystem->GetOwnerWorldModule()->GetWorld()).m_vUp.GetAsVec4(0);
   else
     return false;
 
@@ -567,7 +632,7 @@ void plParticleFrameProgramRunner::Evaluate(const plTime& diff)
 
   FillInputs(diff);
 
-  if (m_VM.Execute(m_pProgram->m_ByteCode, m_InputStreams, m_OutputStreams, 1, m_Tables.GetGlobalData()).Failed())
+  if (m_VM.Execute(m_pProgram->m_ByteCode, m_InputStreams, m_OutputStreams, 1, m_pTables->GetGlobalData()).Failed())
     return;
 
   bool bAnyLowered = false;
@@ -578,6 +643,13 @@ void plParticleFrameProgramRunner::Evaluate(const plTime& diff)
     for (plUInt32 c = 0; c < driven.m_uiComponents; ++c)
     {
       vValue.GetData()[c] = m_OutputData[driven.m_uiOutputOffsets[c]];
+    }
+
+    // the program computes directions in the simulation's space; the property expects them relative to the emitter
+    if (driven.m_bEmitterSpaceDirection)
+    {
+      const plVec3 vLocal = m_pSystem->GetTransform().m_qRotation.GetInverse() * vValue.GetAsVec3();
+      vValue = vLocal.GetAsVec4(vValue.w);
     }
 
     // NaN never equals itself, so the first evaluation always applies

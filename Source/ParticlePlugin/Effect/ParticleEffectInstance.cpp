@@ -14,6 +14,7 @@
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
 #include <ParticlePlugin/System/ParticleSystemDescriptor.h>
 #include <ParticlePlugin/System/ParticleSystemInstance.h>
+#include <ParticlePlugin/Type/ParticleType.h>
 #include <ParticlePlugin/WorldModule/ParticleWorldModule.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
@@ -276,10 +277,15 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
   const auto& desc = pResource->GetDescriptor().m_Effect;
   const auto& systems = desc.GetParticleSystems();
 
-  m_Transform.SetIdentity();
-  m_TransformForNextFrame.SetIdentity();
-  m_vVelocity.SetZero();
-  m_vVelocityForNextFrame.SetZero();
+  // a reconfigure of a running effect (hot reload) keeps where the effect is
+  if (bFirstTime)
+  {
+    m_Transform.SetIdentity();
+    m_TransformForNextFrame.SetIdentity();
+    m_vVelocity.SetZero();
+    m_vVelocityForNextFrame.SetZero();
+  }
+
   m_fApplyInstanceVelocity = desc.m_fApplyInstanceVelocity;
   m_bSimulateInLocalSpace = desc.m_bSimulateInLocalSpace;
   m_InvisibleUpdateRate = desc.m_InvisibleUpdateRate;
@@ -439,10 +445,13 @@ void plParticleEffectInstance::Reconfigure(bool bFirstTime, plArrayPtr<plParticl
 
   const plVec3 vStartVelocity = m_vVelocity * m_fApplyInstanceVelocity;
 
+  // local-space systems simulate in the effect's frame, so their transform stays identity
+  const plTransform systemTransform = m_bSimulateInLocalSpace ? plTransform::MakeIdentity() : m_Transform;
+
   for (plUInt32 i = 0; i < m_ParticleSystems.GetCount(); ++i)
   {
     m_ParticleSystems[i]->ConfigureFromTemplate(systems[i]);
-    m_ParticleSystems[i]->SetTransform(m_Transform, vStartVelocity);
+    m_ParticleSystems[i]->SetTransform(systemTransform, m_bSimulateInLocalSpace ? plVec3::MakeZero() : vStartVelocity);
     m_ParticleSystems[i]->SetEmitterEnabled(m_bEmitterEnabled);
     m_ParticleSystems[i]->Finalize();
   }
@@ -720,6 +729,23 @@ plUInt64 plParticleEffectInstance::GetNumActiveParticles() const
   return num;
 }
 
+bool plParticleEffectInstance::CastsShadows() const
+{
+  for (const plParticleSystemInstance* pSystem : m_ParticleSystems)
+  {
+    if (pSystem == nullptr)
+      continue;
+
+    for (const plParticleType* pType : pSystem->GetTypes())
+    {
+      if (pType->CastsShadows())
+        return true;
+    }
+  }
+
+  return false;
+}
+
 void plParticleEffectInstance::SetTransform(const plTransform& transform, const plVec3& vParticleStartVelocity)
 {
   m_Transform = transform;
@@ -896,9 +922,20 @@ void plParticleEffectInstance::ProcessEventQueues()
     }
   }
 
-  for (const plParticleEvent& e : m_EventQueue)
+  // events carry simulation-space values; reactions spawn into the world
+  const bool bLocalEvents = NeedsToApplyTransform();
+
+  for (const plParticleEvent& simEvent : m_EventQueue)
   {
     plUInt32 rnd = m_Random.UIntInRange(100);
+
+    plParticleEvent e = simEvent;
+    if (bLocalEvents)
+    {
+      e.m_vPosition = m_Transform.TransformPosition(simEvent.m_vPosition);
+      e.m_vDirection = m_Transform.m_qRotation * simEvent.m_vDirection;
+      e.m_vNormal = m_Transform.m_qRotation * simEvent.m_vNormal;
+    }
 
     for (plParticleEventReaction* pReaction : m_EventReactions)
     {

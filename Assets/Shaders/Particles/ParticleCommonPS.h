@@ -12,6 +12,8 @@
 #  include <Shaders/Common/Lighting.h>
 #elif SHADING_QUALITY == SHADING_QUALITY_SIMPLIFIED
 #  include <Shaders/Common/LightingSimplified.h>
+#elif SHADING_QUALITY == SHADING_QUALITY_MOBILE
+#  include <Shaders/Common/LightingMobile.h>
 #else
 #  error "Unknown shading quality configuration."
 #endif

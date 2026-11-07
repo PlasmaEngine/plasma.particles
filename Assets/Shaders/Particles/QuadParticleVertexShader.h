@@ -103,7 +103,7 @@ VS_OUT main(uint VertexID : SV_VertexID, uint InstanceID : SV_InstanceID)
   ret.AmbientLight = max(totalLight - keyLightColor, 0.0);
 
   float3 diffuseLight = 1;
-#  elif PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL
+#  elif PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_PER_PIXEL || PARTICLE_LIGHTING_MODE == PARTICLE_LIGHTING_MODE_SURFACE
   // hand the surface to the pixel shader and light it there
   ret.LitWorldPos = quad.worldPosition;
   ret.LitNormal = quad.normal;

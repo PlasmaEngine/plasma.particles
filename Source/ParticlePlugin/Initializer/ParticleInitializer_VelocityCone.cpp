@@ -17,7 +17,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleInitializerFactory_VelocityCone, 2, pl
     PL_MEMBER_PROPERTY("Angle", m_Angle)->AddAttributes(new plDefaultValueAttribute(plAngle::MakeFromDegree(30)), new plClampValueAttribute(plAngle::MakeFromDegree(1), plAngle::MakeFromDegree(89))),
     PL_MEMBER_PROPERTY("Speed", m_Speed),
     PL_MEMBER_PROPERTY("SpeedScaleParam", m_sSpeedScaleParameter),
-    PL_MEMBER_PROPERTY("Axis", m_vAxis)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1)), new plParticlePerParticleAttribute()),
+    PL_MEMBER_PROPERTY("Axis", m_vAxis)->AddAttributes(new plDefaultValueAttribute(plVec3(0, 0, 1)), new plParticlePerParticleAttribute(), new plParticleEmitterSpaceDirectionAttribute()),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_ATTRIBUTES
@@ -117,7 +117,8 @@ void plParticleInitializer_VelocityCone::InitializeElements(plUInt64 uiStartInde
 
   plRandom& rng = GetRNG();
 
-  // a constant axis turns the cone within the effect's space; +Z leaves it pointing up, as before
+  // A typed (or per-frame) axis is relative to the emitter: +Z leaves the cone along the emitter direction.
+  // A per-particle wire is a direction in the simulation's space (e.g. Velocity or Event Normal) and is used as is.
   const plVec3 vUp(0, 0, 1);
   plQuat qCone = GetOwnerSystem()->GetTransform().m_qRotation;
 
@@ -126,7 +127,6 @@ void plParticleInitializer_VelocityCone::InitializeElements(plUInt64 uiStartInde
     qCone = qCone * plQuat::MakeShortestRotation(vUp, vAxis);
   }
 
-  // a per-particle wire gives each particle its own axis, in simulation space
   plUInt32 uiAxisComponents = 0;
   const float* pAxis = nullptr;
 

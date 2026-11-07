@@ -17,6 +17,7 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleEffectAssetPreferences, 1, plRTTIDefau
     PL_MEMBER_PROPERTY("ShowStats", m_bShowStats)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_MEMBER_PROPERTY("ShowEvents", m_bShowEvents)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_ENUM_MEMBER_PROPERTY("PreviewMotion", plParticlePreviewMotion, m_PreviewMotion),
+    PL_ENUM_MEMBER_PROPERTY("PreviewBackdrop", plParticlePreviewBackdrop, m_PreviewBackdrop),
   }
   PL_END_PROPERTIES;
 }
@@ -88,12 +89,33 @@ void plParticleEffectAssetDocument::SetPreviewMotion(plParticlePreviewMotion::En
   m_Events.Broadcast(e);
 }
 
+plParticlePreviewBackdrop::Enum plParticleEffectAssetDocument::GetPreviewBackdrop() const
+{
+  return plPreferences::QueryPreferences<plParticleEffectAssetPreferences>(this)->m_PreviewBackdrop;
+}
+
+void plParticleEffectAssetDocument::SetPreviewBackdrop(plParticlePreviewBackdrop::Enum backdrop)
+{
+  auto* pPreferences = plPreferences::QueryPreferences<plParticleEffectAssetPreferences>(this);
+  if (pPreferences->m_PreviewBackdrop == backdrop)
+    return;
+
+  pPreferences->m_PreviewBackdrop = backdrop;
+  pPreferences->TriggerPreferencesChangedEvent();
+
+  plParticleEffectAssetEvent e;
+  e.m_pDocument = this;
+  e.m_Type = plParticleEffectAssetEvent::PreviewSettingsChanged;
+  m_Events.Broadcast(e);
+}
+
 void plParticleEffectAssetDocument::FillPreviewSettings(plParticlePreviewSettingsMsgToEngine& out_msg) const
 {
   out_msg.m_DocumentGuid = GetGuid();
   out_msg.m_bShowStats = GetShowStats();
   out_msg.m_bShowEvents = GetShowEvents();
   out_msg.m_Motion = GetPreviewMotion();
+  out_msg.m_Backdrop = GetPreviewBackdrop();
   out_msg.m_SystemNames.Clear();
 
   // the descriptor lists the systems in the order they are wired into the effect

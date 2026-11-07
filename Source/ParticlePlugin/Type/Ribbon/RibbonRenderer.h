@@ -26,6 +26,7 @@ public:
   bool m_bApplyObjectTransform = true;
   plTransform m_GlobalTransform;
   plParticleLookData m_Look;
+  plTexture2DResourceHandle m_hDistortionTexture;
 };
 
 /// \brief Renders a particle system as one continuous camera-facing band through all particles in spawn order.

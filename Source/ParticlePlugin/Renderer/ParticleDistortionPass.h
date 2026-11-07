@@ -36,6 +36,7 @@ protected:
 
   plRenderPipelineNodeInputPin m_PinResolvedDepth;
   plShaderResourceHandle m_hApplyShader;
+  plShaderResourceHandle m_hShowShader; ///< Particles.ShowDistortion
 };
 
 /// \brief Inserts a plParticleDistortionPass behind every plTransparentForwardRenderPass of a pipeline.
