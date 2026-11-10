@@ -19,6 +19,7 @@
 #include <RendererCore/Pipeline/Passes/CopyTexturePass.h>
 #include <RendererCore/Pipeline/Passes/TransparentForwardRenderPass.h>
 #include <RendererCore/Pipeline/RenderPipeline.h>
+#include <RendererCore/Pipeline/RenderPipelineInjection.h>
 
 namespace
 {
@@ -394,8 +395,8 @@ void plGameEngineTestParticleRuntime::CheckDistortionPipeline()
   PL_TEST_BOOL(pPipeline->Connect(pDepth, "Output", pTransparentPass, "ResolvedDepth"));
   PL_TEST_BOOL(pPipeline->Connect(pTransparentPass, "Color", pConsumerPass, "Input"));
 
-  plParticleDistortionPipelineExtension extension;
-  PL_TEST_BOOL(extension.Apply(*pPipeline).Succeeded());
+  // The plugin registered the pass when it started. This is what the pipeline loader calls.
+  plRenderPipelineInjections::Apply(*pPipeline);
 
   auto FindDistortion = [&]() -> plRenderPipelinePass*
   {
@@ -429,8 +430,8 @@ void plGameEngineTestParticleRuntime::CheckDistortionPipeline()
     PL_TEST_BOOL(pDistortionDepth != nullptr && pDistortionDepth->m_pOutput->m_pParent == pDepth);
   }
 
-  // applying again leaves the pipeline as it is
-  PL_TEST_BOOL(extension.Apply(*pPipeline).Succeeded());
+  // applying again leaves the pipeline as it is: a pipeline that holds the pass already keeps it
+  plRenderPipelineInjections::Apply(*pPipeline);
   FindDistortion();
 
   PL_DEFAULT_DELETE(pPipeline);

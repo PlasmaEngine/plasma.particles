@@ -26,9 +26,6 @@ PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleDistortionPass, 1, plRTTIDefaultAlloca
   PL_END_PROPERTIES;
 }
 PL_END_DYNAMIC_REFLECTED_TYPE;
-
-PL_BEGIN_DYNAMIC_REFLECTED_TYPE(plParticleDistortionPipelineExtension, 1, plRTTIDefaultAllocator<plParticleDistortionPipelineExtension>)
-PL_END_DYNAMIC_REFLECTED_TYPE;
 // clang-format on
 
 plParticleDistortionPass::plParticleDistortionPass()
@@ -150,63 +147,6 @@ void plParticleDistortionPass::DeclareRenderObjectDependencies(plRenderGraph& re
 void plParticleDistortionPass::RenderObjects(const plRenderViewContext& renderViewContext)
 {
   RenderDataWithCategory(renderViewContext, plParticleRenderDataCategories::Distortion);
-}
-
-//////////////////////////////////////////////////////////////////////////
-
-plResult plParticleDistortionPipelineExtension::Apply(plRenderPipeline& ref_pipeline) const
-{
-  plHybridArray<plRenderPipelinePass*, 32> passes;
-  ref_pipeline.GetPasses(passes);
-
-  const plHashedString sColor = plMakeHashedString("Color");
-  const plHashedString sResolvedDepth = plMakeHashedString("ResolvedDepth");
-
-  for (plRenderPipelinePass* pPass : passes)
-  {
-    if (plDynamicCast<plTransparentForwardRenderPass*>(pPass) == nullptr)
-      continue;
-
-    const plRenderPipelinePassConnection* pOutput = ref_pipeline.GetOutputConnection(pPass, sColor);
-    if (pOutput == nullptr || pOutput->m_Inputs.IsEmpty())
-      continue;
-
-    // idempotent: an already inserted pass is the colour's only consumer
-    bool bAlreadyInserted = false;
-    for (const plRenderPipelineNodePin* pInput : pOutput->m_Inputs)
-      bAlreadyInserted |= plDynamicCast<plParticleDistortionPass*>(pInput->m_pParent) != nullptr;
-
-    if (bAlreadyInserted)
-      continue;
-
-    const auto consumers = pOutput->m_Inputs;
-
-    plUniquePtr<plParticleDistortionPass> pNewPass = PL_DEFAULT_NEW(plParticleDistortionPass);
-    plParticleDistortionPass* pDistortion = pNewPass.Borrow();
-    ref_pipeline.AddPass(std::move(pNewPass));
-
-    for (const plRenderPipelineNodePin* pInput : consumers)
-    {
-      auto* pConsumer = static_cast<plRenderPipelinePass*>(pInput->m_pParent);
-      const plHashedString sName = pConsumer->GetPinName(pInput);
-
-      if (!ref_pipeline.Disconnect(pPass, sColor, pConsumer, sName) || !ref_pipeline.Connect(pDistortion, sColor, pConsumer, sName))
-        return PL_FAILURE;
-    }
-
-    if (!ref_pipeline.Connect(pPass, sColor, pDistortion, sColor))
-      return PL_FAILURE;
-
-    // read the same resolved depth as the transparent pass; without it the particles are not depth tested
-    if (const plRenderPipelinePassConnection* pDepth = ref_pipeline.GetInputConnection(pPass, sResolvedDepth))
-    {
-      auto* pDepthPass = static_cast<plRenderPipelinePass*>(pDepth->m_pOutput->m_pParent);
-      if (!ref_pipeline.Connect(pDepthPass, pDepthPass->GetPinName(pDepth->m_pOutput), pDistortion, sResolvedDepth))
-        return PL_FAILURE;
-    }
-  }
-
-  return PL_SUCCESS;
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_Renderer_ParticleDistortionPass);
