@@ -8,24 +8,22 @@ ALL
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
-// Phase Gas/Advect. One 8 cubed group per active brick (indirect), one thread per interior cell; aprons are left to
-// GasHalo. Modes (GpuFluidGasPass.x, GPU_FLUID_ADVECT_*):
+// Phase Gas/Advect. One group per active brick and slab (indirect): GPU_FLUID_ADVECT_SLABS groups of 8 x 8 x (8 / slabs)
+// threads per brick, one thread per interior cell; aprons are left to GasHalo. Modes (GpuFluidGasPass.x):
 //
-// SEMI_LAGRANGIAN: the MAC velocity and the scalars from the current sides into the next ones. Every sample point (the
-//   cell centre for the scalars, each face centre for its velocity component) is traced back with a midpoint (RK2)
-//   step through the current velocity, and the field is read there with hardware trilinear inside the atlas brick that
-//   holds the point (GpuFluidSampleAtlas), each MAC component at its own staggered offset. A trace that ends in open
-//   air (a brick without a slot) reads no gas and the ambient wind.
-// REVERSE (scalars): the semi-Lagrangian result phi^ (the next scalars, halo filled) traced forward through the same
-//   velocity, back to where it started: phi~ goes to Scratch.
-// CORRECT (scalars): phi = phi^ + (phi - phi~) / 2, the error estimate of the round trip; where that leaves the range of
-//   the eight texels the backtrace interpolated between, phi^ is kept instead (Selle et al. 2008), so it cannot
-//   overshoot. A plain clamp would keep what the correction adds at peaks but not what it takes from the tails, a
-//   steady gain of gas in a closed box. In place on the next scalars.
-// VELOCITY_REVERSE, VELOCITY_CORRECT: the same for the velocity, one MAC component per face: u^ (the next velocity,
-//   halo filled) traced forward from each face centre into Scratch.xyz, then u = u^ + (u - u~) / 2, or u^ where that
-//   leaves the range of the 8 texels of the current velocity's component around the face's backtrace, in place on the
-//   next velocity.
+// SEMI_LAGRANGIAN: the MAC velocity and the scalars from the current sides (In) into the semi-Lagrangian ones (Out).
+//   Every sample point (the cell centre for the scalars, each face centre for its velocity component) is traced back
+//   with a midpoint (RK2) step through the current velocity, and the field is read there with hardware trilinear. A
+//   sample inside the group's own stored brick (GpuFluidHome) needs no page-table lookup; one that leaves it by more
+//   than the apron goes through the page table, and one that ends in open air (a brick without a slot) reads no gas and
+//   the ambient wind. Pass.w bit 0 skips the scalars, bit 1 the velocity.
+// MACCORMACK: the limited MacCormack correction (Selle et al. 2008) of the semi-Lagrangian results (SL, halo filled),
+//   reverse trace and correction in one pass, into Out (a third side; the SL sides are read-only here):
+//   phi = phi^ + (phi - phi~) / 2, with phi~ the semi-Lagrangian result traced forward through the same velocity back
+//   to the sample point. Where phi leaves the range of the eight texels of phi^n the backtrace interpolated between,
+//   phi^ is kept instead, so it cannot overshoot (a plain clamp keeps what the correction adds at peaks but not what
+//   it takes from the tails: a steady gain of gas in a closed box). Pass.w bit 0: the scalars, bit 1: the velocity,
+//   one MAC component per face, against the range of that component's eight texels.
 //
 // No mode sanitises: a NaN or infinite value is written as NaN, so GasForces, the next writer, counts it in
 // GPU_FLUID_STAT_NAN before it zeroes it.
@@ -35,19 +33,20 @@ ALL
 //
 // Params: 0 xyz ambient wind (m/s)
 
-Texture3D<float4> GpuFluidVelocityIn;
-Texture3D<float4> GpuFluidScalarIn;
+Texture3D<float4> GpuFluidVelocityIn; // u^n, apron filled
+Texture3D<float4> GpuFluidScalarIn;   // phi^n, apron filled
+Texture3D<float4> GpuFluidVelocitySL; // MACCORMACK: u^, apron filled
+Texture3D<float4> GpuFluidScalarSL;   // MACCORMACK: phi^, apron filled
 SamplerState GpuFluidLinearClamp;
 RWTexture3D<float4> GpuFluidVelocityOut;
 RWTexture3D<float4> GpuFluidScalarOut;
-RWTexture3D<float4> GpuFluidScratch;
 
 /// Midpoint trace through the current velocity; a negative time step traces forward.
-float3 Trace(float3 p, float timeStepVoxels, float3 ambient)
+float3 Trace(GpuFluidHome home, float3 p, float timeStepVoxels, float3 ambient)
 {
-  const float3 v1 = GpuFluidSampleVelocity(GpuFluidVelocityIn, GpuFluidLinearClamp, p, ambient);
+  const float3 v1 = GpuFluidSampleVelocityHome(GpuFluidVelocityIn, GpuFluidLinearClamp, home, p, ambient);
   const float3 mid = p - (0.5 * timeStepVoxels) * v1;
-  const float3 v2 = GpuFluidSampleVelocity(GpuFluidVelocityIn, GpuFluidLinearClamp, mid, ambient);
+  const float3 v2 = GpuFluidSampleVelocityHome(GpuFluidVelocityIn, GpuFluidLinearClamp, home, mid, ambient);
   return p - timeStepVoxels * v2;
 }
 
@@ -60,7 +59,30 @@ float3 StaggerOffset(uint axis)
   return offset;
 }
 
-[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+/// Smallest and largest value of the eight texels a sample at q interpolates between (MacCormack's limiter), or
+/// fUnallocated for both in open air.
+void LoadRange(Texture3D<float4> atlas, GpuFluidHome home, float3 q, float4 fUnallocated, out float4 out_min, out float4 out_max)
+{
+  int3 corner;
+  float3 weights;
+  if (!GpuFluidLocateHome(home, q, corner, weights))
+  {
+    out_min = fUnallocated;
+    out_max = fUnallocated;
+    return;
+  }
+
+  out_min = atlas.Load(int4(corner, 0));
+  out_max = out_min;
+  [unroll] for (uint c = 1; c < 8; ++c)
+  {
+    const float4 v = atlas.Load(int4(corner + int3(c & 1, (c >> 1) & 1, c >> 2), 0));
+    out_min = min(out_min, v);
+    out_max = max(out_max, v);
+  }
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_ADVECT_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
   const uint slot = GpuFluidGroupSlot(groupId);
@@ -68,107 +90,94 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     return;
 
   const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const uint fields = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w;
   const float4 step = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep);
   const float3 ambient = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).xyz;
   const float timeStepVoxels = step.x * step.z; // dt / dx: m/s times this is voxels
 
   const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
-  const int3 local = int3(groupThreadId);
+  const GpuFluidHome home = GpuFluidMakeHome(slot, brick);
+  const int3 local = int3(groupThreadId.xy, groupThreadId.z + groupId.z * (GPU_FLUID_BRICK_SIZE / GPU_FLUID_ADVECT_SLABS));
   const float3 cell = float3(brick * GPU_FLUID_BRICK_SIZE + local);
   const float3 centre = cell + 0.5;
   const int3 texel = GpuFluidTexel(slot, local);
   const float4 noGas = float4(0.0, 0.0, 0.0, 0.0);
   const float4 ambient4 = float4(ambient, 0.0);
 
-  if (mode == GPU_FLUID_ADVECT_REVERSE)
+  const bool bScalars = (fields & GPU_FLUID_ADVECT_FIELD_SCALARS) != 0;
+  const bool bVelocity = (fields & GPU_FLUID_ADVECT_FIELD_VELOCITY) != 0;
+
+  if (mode == GPU_FLUID_ADVECT_MACCORMACK)
   {
-    const float3 to = Trace(centre, -timeStepVoxels, ambient);
-    GpuFluidScratch[texel] = GpuFluidLoadTrilinear(GpuFluidScalarOut, to - 0.5, noGas);
-    return;
-  }
-
-  if (mode == GPU_FLUID_ADVECT_CORRECT)
-  {
-    const float3 from = Trace(centre, timeStepVoxels, ambient);
-
-    float4 lower, upper;
-    GpuFluidLoadRange(GpuFluidScalarIn, from - 0.5, lower, upper);
-
-    const float4 forward = GpuFluidScalarOut[texel];
-    const float4 corrected = forward + 0.5 * (GpuFluidScalarIn.Load(int4(texel, 0)) - GpuFluidScratch[texel]);
-    // Out of the source texels' range, the semi-Lagrangian value is kept (Selle et al. 2008) instead of clamping: a
-    // clamp lets the correction add gas at peaks but not take it from the tails, which gains mass in a closed box.
-    float4 result = corrected;
-    [unroll] for (uint c = 0; c < 4; ++c)
+    if (bScalars)
     {
-      if (corrected[c] < lower[c] || corrected[c] > upper[c])
-        result[c] = forward[c];
-    }
-    // max would drop a NaN; it is carried on to GasForces, which counts and zeroes it.
-    GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(result, 0.0), corrected, lower, upper);
-    return;
-  }
+      const float4 forward = GpuFluidScalarSL.Load(int4(texel, 0));
+      const float4 original = GpuFluidScalarIn.Load(int4(texel, 0));
+      const float3 to = Trace(home, centre, -timeStepVoxels, ambient);
+      const float4 reversed = GpuFluidSampleHome(GpuFluidScalarSL, GpuFluidLinearClamp, home, to - 0.5, noGas);
 
-  if (mode == GPU_FLUID_ADVECT_VELOCITY_REVERSE)
-  {
-    float4 reversed = float4(0.0, 0.0, 0.0, 0.0);
-    [unroll] for (uint axis = 0; axis < 3; ++axis)
-    {
-      float3 face = centre;
-      face[axis] = cell[axis];
-      const float3 to = Trace(face, -timeStepVoxels, ambient);
-      reversed[axis] = GpuFluidLoadTrilinear(GpuFluidVelocityOut, to - StaggerOffset(axis), ambient4)[axis];
-    }
-    GpuFluidScratch[texel] = reversed;
-    return;
-  }
-
-  if (mode == GPU_FLUID_ADVECT_VELOCITY_CORRECT)
-  {
-    const float4 original = GpuFluidVelocityIn.Load(int4(texel, 0));
-    const float4 reversed = GpuFluidScratch[texel];
-    float4 velocity = GpuFluidVelocityOut[texel];
-
-    [unroll] for (uint axis = 0; axis < 3; ++axis)
-    {
-      float3 face = centre;
-      face[axis] = cell[axis];
-      const float3 from = Trace(face, timeStepVoxels, ambient);
-
+      const float3 from = Trace(home, centre, timeStepVoxels, ambient);
       float4 lower, upper;
-      GpuFluidLoadRange(GpuFluidVelocityIn, from - StaggerOffset(axis), lower, upper);
-      if (!GpuFluidLocateAllocated(from - StaggerOffset(axis)))
+      LoadRange(GpuFluidScalarIn, home, from - 0.5, noGas, lower, upper);
+
+      const float4 corrected = forward + 0.5 * (original - reversed);
+      float4 result = corrected;
+      [unroll] for (uint c = 0; c < 4; ++c)
       {
-        lower = ambient4;
-        upper = ambient4;
+        if (corrected[c] < lower[c] || corrected[c] > upper[c])
+          result[c] = forward[c];
+      }
+      // max would drop a NaN; it is carried on to GasForces, which counts and zeroes it.
+      GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(result, 0.0), corrected, lower, upper);
+    }
+
+    if (bVelocity)
+    {
+      const float4 forward = GpuFluidVelocitySL.Load(int4(texel, 0));
+      const float4 original = GpuFluidVelocityIn.Load(int4(texel, 0));
+      float4 velocity = float4(0.0, 0.0, 0.0, 0.0);
+
+      [unroll] for (uint axis = 0; axis < 3; ++axis)
+      {
+        float3 face = centre;
+        face[axis] = cell[axis];
+        const float3 offset = StaggerOffset(axis);
+
+        const float3 to = Trace(home, face, -timeStepVoxels, ambient);
+        const float reversed = GpuFluidSampleHome(GpuFluidVelocitySL, GpuFluidLinearClamp, home, to - offset, ambient4)[axis];
+
+        const float3 from = Trace(home, face, timeStepVoxels, ambient);
+        float4 lower, upper;
+        LoadRange(GpuFluidVelocityIn, home, from - offset, ambient4, lower, upper);
+
+        const float corrected = forward[axis] + 0.5 * (original[axis] - reversed);
+        const float limited = (corrected < lower[axis] || corrected > upper[axis]) ? forward[axis] : corrected;
+        velocity[axis] = (GpuFluidIsNonFinite(corrected) || GpuFluidIsNonFinite(lower[axis]) || GpuFluidIsNonFinite(upper[axis])) ? GpuFluidNaN() : limited;
       }
 
-      // Out of the 8 source texels' range: the semi-Lagrangian value (Selle et al. 2008), as for the scalars.
-      const float corrected = velocity[axis] + 0.5 * (original[axis] - reversed[axis]);
-      const float limited = (corrected < lower[axis] || corrected > upper[axis]) ? velocity[axis] : corrected;
-      velocity[axis] = (GpuFluidIsNonFinite(corrected) || GpuFluidIsNonFinite(lower[axis]) || GpuFluidIsNonFinite(upper[axis])) ? GpuFluidNaN() : limited;
+      GpuFluidVelocityOut[texel] = velocity;
     }
-
-    GpuFluidVelocityOut[texel] = velocity;
     return;
   }
 
   // Scalars at the cell centre. Open air outside allocated bricks holds no gas.
+  if (bScalars)
   {
-    const float3 from = Trace(centre, timeStepVoxels, ambient);
-    const float4 value = GpuFluidSampleAtlas(GpuFluidScalarIn, GpuFluidLinearClamp, from - 0.5, noGas);
+    const float3 from = Trace(home, centre, timeStepVoxels, ambient);
+    const float4 value = GpuFluidSampleHome(GpuFluidScalarIn, GpuFluidLinearClamp, home, from - 0.5, noGas);
     GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(value, 0.0), value, value, value);
   }
 
   // Each velocity component at its own face centre.
+  if (bVelocity)
   {
     float4 velocity = float4(0.0, 0.0, 0.0, 0.0);
     [unroll] for (uint axis = 0; axis < 3; ++axis)
     {
       float3 face = centre;
       face[axis] = cell[axis];
-      const float3 from = Trace(face, timeStepVoxels, ambient);
-      velocity[axis] = GpuFluidSampleAtlas(GpuFluidVelocityIn, GpuFluidLinearClamp, from - StaggerOffset(axis), ambient4)[axis];
+      const float3 from = Trace(home, face, timeStepVoxels, ambient);
+      velocity[axis] = GpuFluidSampleHome(GpuFluidVelocityIn, GpuFluidLinearClamp, home, from - StaggerOffset(axis), ambient4)[axis];
     }
     GpuFluidVelocityOut[texel] = velocity;
   }

@@ -16,7 +16,7 @@ ALL
 // The cell-centred velocity of a cell is the mean of its two faces on each axis; w_x = dw/dy - dv/dz etc. by central
 // differences of the neighbours' cell-centred velocities. Every texel this needs lies in the stored brick (-1..8).
 
-RWTexture3D<float4> GpuFluidVelocityTarget; // only read here
+Texture3D<float4> GpuFluidVelocityIn; // read-only view of the next velocity
 RWTexture3D<float4> GpuFluidScratch;
 
 /// Component `axis` of the cell-centred velocity of the cell at texel t.
@@ -24,10 +24,10 @@ float Centred(int3 t, uint axis)
 {
   int3 up = t;
   up[axis] += 1;
-  return 0.5 * (GpuFluidVelocityTarget[t][axis] + GpuFluidVelocityTarget[up][axis]);
+  return 0.5 * (GpuFluidVelocityIn.Load(int4(t, 0))[axis] + GpuFluidVelocityIn.Load(int4(up, 0))[axis]);
 }
 
-[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
   const uint slot = GpuFluidGroupSlot(groupId);
@@ -35,7 +35,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     return;
 
   const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
-  const int3 t = GpuFluidTexel(slot, int3(groupThreadId));
+  const int3 local = int3(groupThreadId.xy, groupThreadId.z + groupId.z * (GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS));
+  const int3 t = GpuFluidTexel(slot, local);
   const int3 ex = int3(1, 0, 0);
   const int3 ey = int3(0, 1, 0);
   const int3 ez = int3(0, 0, 1);

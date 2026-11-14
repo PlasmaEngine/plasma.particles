@@ -167,6 +167,18 @@ struct plGpuFluidGasSimulation
   /// MacCormack correction of the velocity's advection too.
   bool m_bMacCormackVelocity = true;
 
+  /// Each kernel of Gas/Advect and Gas/Forces in a render-graph pass of its own (Gas/Advect SL, Gas/Forces Curl, ...),
+  /// so each is timed (GpuFluid.Gas.ProfileKernels).
+  bool m_bProfileKernels = false;
+
+  /// How far ahead (seconds) GasFinalize's flux marking looks for where content moves (design plan: 2 x the frame's
+  /// ticks).
+  float m_fAllocLookahead = 2.0f * 2.0f / 60.0f;
+
+  /// Closed-box mass correction (GpuFluid.Gas.MassCorrection, only for volumes with every face closed and the whole
+  /// box allocated): GasForces scales the density so the advection does not change the total mass.
+  bool m_bMassCorrection = false;
+
   /// Test hook (GpuFluid.Debug.InjectNaN): the first source writes NaN into one density texel on the frame's first
   /// tick, so a test can see the NaN guards count.
   bool m_bInjectNaN = false;
@@ -229,8 +241,11 @@ public:
   /// The current scalars, the atlas the VDB march reads.
   plGALTextureHandle GetScalarAtlas() const { return m_hScalar[0]; }
 
-  /// Phase Gas/Alloc, second pass: clears every new brick (P1: all of them) in every atlas and buffer.
-  void AddClearPass(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, const plVec3& vAmbientWind);
+  /// Phase Gas/Alloc, second pass: clears every brick assigned this frame (the new list) in every atlas and buffer, then
+  /// fills the new bricks' aprons in the current scalars and velocity from their neighbours. bAllocationChanged:
+  /// the frame may have assigned or freed bricks, so the pressure operator is rebuilt.
+  void AddClearPass(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, const plVec3& vAmbientWind, bool bAllocationChanged,
+    plBitflags<plGpuFluidFaces> openFaces);
 
   /// Every tick of the frame, then Finalize. hStats receives the counters (cleared by the caller).
   void AddFramePasses(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, plRenderGraphBufferHandle hStats,
@@ -240,7 +255,8 @@ public:
   static plUInt32 ComputeDenseLevels(const plVec3U32& vBrickGrid, plUInt32* pOutCells = nullptr, plUInt32* pOutTotalCells = nullptr);
 
 private:
-  plGALTextureHandle m_hVelocity[2];
+  /// Three sides: the current one, the semi-Lagrangian result and the MacCormack result (which becomes current).
+  plGALTextureHandle m_hVelocity[3];
   plGALTextureHandle m_hScalar[2];
   plGALTextureHandle m_hScratch;
   plGALBufferHandle m_hPressure[2];

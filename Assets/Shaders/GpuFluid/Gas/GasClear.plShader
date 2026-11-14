@@ -10,11 +10,12 @@ ALL
 
 // Phase Gas/Alloc: clears every new brick, all 10 cubed texels of every atlas (a reused slot keeps whatever the last
 // brick left in it, and Metal does not zero private textures) plus its pressure, divergence, solid flags, face codes and
-// multigrid data. Velocity starts at the ambient wind (Params0.xyz, m/s), scalars at 0. One 8 cubed group per active
-// brick, indirect.
+// multigrid data. Velocity starts at the ambient wind (Params0.xyz, m/s), scalars at 0. One 8 cubed group per brick of
+// the new list (the bricks GasAlloc assigned this frame), indirect.
 
 RWTexture3D<float4> GpuFluidVelocity0;
 RWTexture3D<float4> GpuFluidVelocity1;
+RWTexture3D<float4> GpuFluidVelocity2;
 RWTexture3D<float4> GpuFluidScalar0;
 RWTexture3D<float4> GpuFluidScalar1;
 RWTexture3D<float4> GpuFluidScratch;
@@ -29,7 +30,7 @@ RWStructuredBuffer<float4> GpuFluidMGCoeff;
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
-  const uint slot = GpuFluidGroupSlot(groupId);
+  const uint slot = GpuFluidNewGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
 
@@ -42,6 +43,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const int3 texel = base + int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
     GpuFluidVelocity0[texel] = wind;
     GpuFluidVelocity1[texel] = wind;
+    GpuFluidVelocity2[texel] = wind;
     GpuFluidScalar0[texel] = zero;
     GpuFluidScalar1[texel] = zero;
     GpuFluidScratch[texel] = zero;

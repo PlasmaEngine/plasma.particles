@@ -87,10 +87,11 @@ namespace
     }
   }
 
-  /// Gas/Finalize runs once per frame; every other gas phase once per tick.
+  /// Gas/Alloc (and its upload, clear and debug passes) and Gas/Finalize run once per frame; every other gas phase once
+  /// per tick.
   bool IsPerFramePhase(plStringView sPhase)
   {
-    return sPhase == "Gas/Finalize";
+    return sPhase == "Gas/Finalize" || sPhase.StartsWith("Gas/Alloc");
   }
 } // namespace
 
@@ -233,8 +234,7 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
     return plTestAppRun::Continue;
 
   // One value per frame of every Gas/* phase. The profiler names the second run of a pass in a frame "<name> #2", so
-  // the runs are summed into one value per frame. Gas/Alloc only runs on the volume's first frame; its stat merely
-  // keeps that value, so it is left out.
+  // the runs are summed into one value per frame. Since P2, Gas/Alloc runs every frame that ticks.
   {
     plDynamicArray<plString> names;
     plDynamicArray<plVariant> values;
@@ -251,9 +251,6 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
         sPhase.SetSubString_FromTo(sPhase.GetData(), szSuffix);
       else if (const char* szUnit = sPhase.FindSubString("["))
         sPhase.SetSubString_FromTo(sPhase.GetData(), szUnit);
-
-      if (sPhase == "Gas/Alloc")
-        continue;
 
       plUInt32 uiIndex = m_PhaseNames.IndexOf(sPhase);
       if (uiIndex == plInvalidIndex)

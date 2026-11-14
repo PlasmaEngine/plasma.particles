@@ -46,6 +46,9 @@
 #define GPU_FLUID_COUNTER_DENIED 1 // bricks that wanted a slot and found the pool full
 #define GPU_FLUID_COUNTER_COLOUR0 2 // active bricks of brick colour 0 (even coordinate sum)
 #define GPU_FLUID_COUNTER_COLOUR1 3 // active bricks of brick colour 1
+#define GPU_FLUID_COUNTER_NEW 4     // slots assigned this frame (the new list, cleared by GasClear)
+#define GPU_FLUID_COUNTER_FREED 5   // slots freed this frame (idle for GPU_FLUID_FREE_IDLE_STEPS)
+#define GPU_FLUID_COUNTER_DENIED_BUCKET 8 // 4 words: denied requests per priority bucket
 
 // The active bricks split by brick colour (parity of the brick coordinate sum) for the multigrid's block red-black
 // launches: colour 0 from the front of the colour list, colour 1 from its back. The colour dispatch arguments are two
@@ -53,6 +56,38 @@
 #define GPU_FLUID_COUNTER_WORDS 16
 #define GPU_FLUID_DISPATCH_FOLD 32768
 #define GPU_FLUID_ARGS_WORDS 4 // uint3 groups + the active count
+
+// The dispatch arguments buffer holds three sets of GPU_FLUID_ARGS_WORDS: every active brick (one group each), every
+// active brick in GPU_FLUID_SLABS slabs (z = slabs), and the bricks assigned this frame (the new list).
+#define GPU_FLUID_ARGS_ACTIVE 0
+#define GPU_FLUID_ARGS_SLABS 4
+#define GPU_FLUID_ARGS_NEW 8
+#define GPU_FLUID_ARGS_TOTAL_WORDS 12
+
+// Sparse allocation (GasAlloc, GasFinalize; design plan section 3). Requests are one bit per virtual brick in each of
+// four priority buckets, bucket b's words at b * (words per bucket). Slots go to requests in bucket order, then virtual
+// index, so the pool denies bucket 3 first, then 2, and bucket 0 only once it is exhausted.
+#define GPU_FLUID_ALLOC_BUCKETS 4
+#define GPU_FLUID_BUCKET_EMITTER 0   // the brick overlaps a source this frame (CPU-binned list)
+#define GPU_FLUID_BUCKET_ALIVE 1     // the brick itself holds content
+#define GPU_FLUID_BUCKET_FLUX 2      // content of a neighbour moves into it within the lookahead
+#define GPU_FLUID_BUCKET_PROXIMITY 3 // content of a neighbour lies within GPU_FLUID_ALLOC_PROXIMITY voxels of the shared boundary
+#define GPU_FLUID_ALLOC_PROXIMITY 2
+#define GPU_FLUID_FREE_IDLE_STEPS 8  // allocation steps without any request before a slot is freed
+#define GPU_FLUID_MAX_EMITTER_BRICKS 8192
+
+// Per-slot meta (uint4, GpuFluidBrickMeta): x allocation steps without a request, y 1 when the last Finalize saw content,
+// z the 27-bit mask of neighbours the last Finalize requested (bit = neighbour index), w the buckets that requested
+// the brick in the last allocation (bit per bucket; the brick debug view's colour).
+#define GPU_FLUID_META_IDLE 0
+#define GPU_FLUID_META_ALIVE 1
+#define GPU_FLUID_META_MASK 2
+#define GPU_FLUID_META_BUCKETS 3
+
+// The grid debug readback (N1 and the brick view): GPU_FLUID_COUNTER_WORDS counters, then per pool slot (packed brick or
+// GPU_FLUID_INVALID_SLOT, meta x, y, z, w), then the active list (capacity words), then per virtual brick (page table,
+// asuint of the brick table's A) when the virtual part is asked for.
+#define GPU_FLUID_DEBUG_SLOT_WORDS 5
 
 // Stats: one 256 byte buffer per volume, uint words, cleared at the start of every GPU frame and read back through a
 // ring of 3. Counts and bounds are order-independent atomics, so the result does not depend on group order. Float
@@ -82,6 +117,14 @@
 #define GPU_FLUID_STAT_EMITTED 28        // density the sources added to interior cells, fixed point GPU_FLUID_MASS_SCALE (summed over the frame's ticks)
 #define GPU_FLUID_STAT_PROBE 32          // 16 words of solver probes (GasPoisson): asuint of max |residual| or |error|
 #define GPU_FLUID_STAT_PROBE_COUNT 16
+#define GPU_FLUID_STAT_ALLOC_NEW 48      // slots assigned this frame
+#define GPU_FLUID_STAT_ALLOC_FREED 49    // slots freed this frame
+#define GPU_FLUID_STAT_ALLOC_FREE 50     // free slots before this frame's assignment
+#define GPU_FLUID_STAT_ALLOC_REQUESTS 51 // requests for bricks without a slot this frame
+#define GPU_FLUID_STAT_DENIED_BUCKET 52  // 4 words: denied requests per bucket
+#define GPU_FLUID_STAT_ALLOC_ACTIVE 56   // active bricks after this frame's allocation
+#define GPU_FLUID_STAT_MASS_ADVECT_IN 57  // closed-box mass correction: density sum before the last tick's advection (fixed point GPU_FLUID_MASS_SCALE)
+#define GPU_FLUID_STAT_MASS_ADVECT_OUT 58 // and after it
 #define GPU_FLUID_STAT_WORD_COUNT 64
 #define GPU_FLUID_STATS_BYTES (GPU_FLUID_STAT_WORD_COUNT * 4)
 

@@ -351,6 +351,8 @@ plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene()
   pGas->m_vExtents = s_vSmokeExtents;
   pGas->m_fVoxelSize = s_fSmokeVoxel;
   pGas->m_uiMaxBricks = 1536;
+  pGas->m_bAllocateAll = true; // the P1 scenes and their numbers are for the whole box
+
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default; // open but the floor
 

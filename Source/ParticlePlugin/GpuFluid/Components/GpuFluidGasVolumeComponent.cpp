@@ -8,6 +8,7 @@
 #include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidColliderComponent.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
+#include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <Shaders/GpuFluid/GpuFluidGasConstants.h>
@@ -25,20 +26,24 @@ plCVarFloat cvar_GpuFluidGasMGProlongScale("GpuFluid.Gas.MGProlongScale", 1.0f, 
 plCVarInt cvar_GpuFluidGasMGDownColour("GpuFluid.Gas.MGDownColour", 0, plCVarFlags::Default, "Multigrid: the brick colour that pre-smooths the fine level first (0 or 1).");
 plCVarBool cvar_GpuFluidGasMGShortCycles("GpuFluid.Gas.MGShortCycles", false, plCVarFlags::Default, "Multigrid: every V-cycle after a tick's first stops at the 4 cubed level (cheaper; misses N2's 1e-2 under wind).");
 plCVarBool cvar_GpuFluidGasProfilePressure("GpuFluid.Gas.ProfilePressure", false, plCVarFlags::Default, "Each step of the gas pressure phase in a render-graph pass of its own, so each is timed.");
+plCVarBool cvar_GpuFluidGasProfileKernels("GpuFluid.Gas.ProfileKernels", false, plCVarFlags::Default, "Each kernel of the gas advection and forces phases in a render-graph pass of its own, so each is timed.");
 plCVarFloat cvar_GpuFluidGasMGOmega("GpuFluid.Gas.MGOmega", 1.0f, plCVarFlags::Default, "Multigrid: over-relaxation of the smoother.");
 plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 4096, plCVarFlags::Default, "Multigrid: dense levels up to this many cells run in one dispatch of one group; larger ones one thread per cell.");
 plCVarBool cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", true, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection too (Medium and up).");
 plCVarFloat cvar_GpuFluidGasVorticity("GpuFluid.Gas.Vorticity", -1.0f, plCVarFlags::Default, "Overrides the gas volumes' vorticity confinement epsilon (negative: each volume's own).");
+plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws every allocated gas brick as a line box: orange a source's, green with content, cyan flux, blue proximity, grey idle.");
+plCVarBool cvar_GpuFluidDebugBrickStats("GpuFluid.Debug.BrickStats", false, plCVarFlags::Default, "Shows the gas volumes' active bricks and pool size on screen.");
 plCVarFloat cvar_GpuFluidGasVorticityRate("GpuFluid.Gas.VorticityRate", 10.0f, plCVarFlags::Default, "Vorticity confinement: the rate k (1/s) of the acceleration eps dx k (N x w).");
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 3, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 4, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
     PL_MEMBER_PROPERTY("Extents", m_vExtents)->AddAttributes(new plDefaultValueAttribute(plVec3(4.0f)), new plClampValueAttribute(plVec3(0.1f), plVec3(1024.0f)), new plSuffixAttribute(" m")),
     PL_MEMBER_PROPERTY("VoxelSize", m_fVoxelSize)->AddAttributes(new plDefaultValueAttribute(0.0625f), new plClampValueAttribute(0.005f, 16.0f), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("MaxBricks", m_uiMaxBricks)->AddAttributes(new plDefaultValueAttribute(1536), new plClampValueAttribute(1, 204 * 204 * 204)),
+    PL_MEMBER_PROPERTY("MaxBricks", m_uiMaxBricks)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 204 * 204 * 204)),
+    PL_MEMBER_PROPERTY("AllocateAll", m_bAllocateAll)->AddAttributes(new plDefaultValueAttribute(false)),
     PL_ENUM_MEMBER_PROPERTY("Quality", plGpuFluidQuality, m_Quality),
     PL_BITFLAGS_MEMBER_PROPERTY("OpenFaces", plGpuFluidFaces, m_OpenFaces),
     PL_MEMBER_PROPERTY("Buoyancy", m_fBuoyancy)->AddAttributes(new plGroupAttribute("Simulation"), new plDefaultValueAttribute(6.0f), new plClampValueAttribute(-100.0f, 100.0f), new plSuffixAttribute(" m/s²")),
@@ -148,6 +153,9 @@ void plGpuFluidGasVolumeComponent::SerializeComponent(plWorldWriter& inout_strea
   s << m_fVorticity;
   s << m_fWindInfluence;
   s << m_bPhysicsBodies;
+
+  // Version 4
+  s << m_bAllocateAll;
 }
 
 void plGpuFluidGasVolumeComponent::DeserializeComponent(plWorldReader& inout_stream)
@@ -175,6 +183,10 @@ void plGpuFluidGasVolumeComponent::DeserializeComponent(plWorldReader& inout_str
   s >> m_RenderMode;
 
   const plUInt32 uiVersion = inout_stream.GetComponentTypeVersion(GetStaticRTTI());
+
+  // Up to version 3 the whole box was allocated.
+  m_bAllocateAll = uiVersion < 4;
+
   if (uiVersion < 2)
   {
     // Version 1 had no solver: its volumes showed the analytic sphere, whatever the source said, so keep that.
@@ -209,6 +221,11 @@ void plGpuFluidGasVolumeComponent::DeserializeComponent(plWorldReader& inout_str
   s >> m_fVorticity;
   s >> m_fWindInfluence;
   s >> m_bPhysicsBodies;
+
+  if (uiVersion < 4)
+    return;
+
+  s >> m_bAllocateAll;
 }
 
 void plGpuFluidGasVolumeComponent::OnActivated()
@@ -255,11 +272,81 @@ plGpuFluidGasSettings plGpuFluidGasVolumeComponent::ComputeSettings() const
   settings.m_Quality = m_Quality;
   settings.m_bSimulate = m_DebugSource == plGpuFluidDebugSource::None;
 
-  // P1 allocates the whole box, so the pool needs no more slots than the box has bricks.
+  // The pool: MaxBricks, or the tier's cap. It never needs more slots than the box has bricks.
   if (settings.m_bSimulate)
-    settings.m_uiMaxBricks = plMath::Min(m_uiMaxBricks, settings.m_vBrickGrid.x * settings.m_vBrickGrid.y * settings.m_vBrickGrid.z);
+  {
+    const plUInt32 uiCap = m_uiMaxBricks > 0 ? m_uiMaxBricks : GetTierBrickCap(m_Quality);
+    settings.m_uiMaxBricks = plMath::Min(uiCap, settings.m_vBrickGrid.x * settings.m_vBrickGrid.y * settings.m_vBrickGrid.z);
+  }
+  else if (m_uiMaxBricks == 0)
+  {
+    settings.m_uiMaxBricks = GetTierBrickCap(m_Quality);
+  }
 
   return settings;
+}
+
+plUInt32 plGpuFluidGasVolumeComponent::GetTierBrickCap(plGpuFluidQuality::Enum quality)
+{
+  switch (quality)
+  {
+    case plGpuFluidQuality::Low:
+      return 512;
+    case plGpuFluidQuality::High:
+      return 3072;
+    case plGpuFluidQuality::Ultra:
+      return 6144;
+    default:
+      return 1536;
+  }
+}
+
+plUInt32 plGpuFluidGasVolumeComponent::GetPoolCapacity() const
+{
+  return m_pManager != nullptr && m_VolumeId != 0 ? m_pManager->GetGasCapacity(m_VolumeId) : 0;
+}
+
+bool plGpuFluidGasVolumeComponent::GetGridDebug(plGpuFluidGridDebug& out_debug) const
+{
+  return m_pManager != nullptr && m_VolumeId != 0 && m_pManager->GetGasGridDebug(m_VolumeId, out_debug);
+}
+
+void plGpuFluidGasVolumeComponent::DrawBrickDebug() const
+{
+  plGpuFluidGridDebug debug;
+  if (!GetGridDebug(debug))
+    return;
+
+  const plVec3 vGridExtents = GetGridExtents();
+  const float fBrick = plMath::Max(m_fVoxelSize, 1e-4f) * plGpuFluidBrickSize;
+  const plTransform transform = GetOwner()->GetGlobalTransform();
+
+  // The bucket that keeps a brick, lowest first; an idle brick (no request this frame) is grey.
+  const plColor colours[5] = {plColor(1.0f, 0.55f, 0.1f), plColor(0.2f, 0.9f, 0.3f), plColor(0.1f, 0.8f, 1.0f), plColor(0.25f, 0.35f, 1.0f), plColor(0.5f, 0.5f, 0.5f)};
+
+  plDynamicArray<plDebugRenderer::Line> lines;
+  lines.Reserve(debug.m_ActiveList.GetCount() * 12);
+  for (plUInt32 uiSlot : debug.m_ActiveList)
+  {
+    if (uiSlot >= debug.m_SlotBrick.GetCount() || debug.m_SlotBrick[uiSlot] == 0xFFFFFFFFu)
+      continue;
+
+    const plUInt32 uiPacked = debug.m_SlotBrick[uiSlot];
+    const plVec3 vBrick(static_cast<float>(uiPacked & 1023u), static_cast<float>((uiPacked >> 10) & 1023u), static_cast<float>(uiPacked >> 20));
+    const plUInt32 uiBuckets = debug.m_SlotBuckets[uiSlot];
+    const plUInt32 uiColour = uiBuckets == 0 ? 4u : plMath::FirstBitLow(uiBuckets);
+
+    // Inset a little, so neighbouring boxes do not draw over each other.
+    const plVec3 vMin = vBrick * fBrick - vGridExtents * 0.5f + plVec3(fBrick * 0.04f);
+    const plVec3 vMax = vMin + plVec3(fBrick * 0.92f);
+    const plVec3 c[8] = {plVec3(vMin.x, vMin.y, vMin.z), plVec3(vMax.x, vMin.y, vMin.z), plVec3(vMin.x, vMax.y, vMin.z), plVec3(vMax.x, vMax.y, vMin.z),
+      plVec3(vMin.x, vMin.y, vMax.z), plVec3(vMax.x, vMin.y, vMax.z), plVec3(vMin.x, vMax.y, vMax.z), plVec3(vMax.x, vMax.y, vMax.z)};
+    const plUInt8 edges[12][2] = {{0, 1}, {2, 3}, {4, 5}, {6, 7}, {0, 2}, {1, 3}, {4, 6}, {5, 7}, {0, 4}, {1, 5}, {2, 6}, {3, 7}};
+    for (const auto& e : edges)
+      lines.PushBack(plDebugRenderer::Line(c[e[0]], c[e[1]], colours[uiColour]));
+  }
+
+  plDebugRenderer::DrawLines(GetWorld(), lines, plColor::White, transform);
 }
 
 void plGpuFluidGasVolumeComponent::EnsureVolume()
@@ -322,7 +409,24 @@ void plGpuFluidGasVolumeComponent::Update()
   if (m_DebugSource == plGpuFluidDebugSource::None)
     FillSimulation(timeDiff, input.m_Simulation);
 
+  input.m_bAllocateAll = m_bAllocateAll;
+  input.m_bDebugGrid = m_bDebugGridReadback || cvar_GpuFluidDebugBricks.GetValue();
+  input.m_bDebugGridVirtual = m_bDebugGridReadback;
+
   m_pManager->SetGasFrameInput(m_VolumeId, input);
+
+  if (cvar_GpuFluidDebugBricks.GetValue())
+    DrawBrickDebug();
+
+  if (cvar_GpuFluidDebugBrickStats.GetValue())
+  {
+    plGpuFluidGasStats stats;
+    if (GetStats(stats))
+    {
+      plDebugRenderer::DrawInfoText(GetWorld(), plDebugTextPlacement::TopLeft, "GpuFluid", plFmt("Gas bricks: {} active of {} in the pool, {} with content, {} new, {} freed, {} denied", stats.m_uiAllocActive,
+                                                                                              GetPoolCapacity(), stats.m_uiAllocatedBricks, stats.m_uiNewBricks, stats.m_uiFreedBricks, stats.m_uiDeniedBricks));
+    }
+  }
 }
 
 void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGasSimulation& out_simulation)
@@ -384,6 +488,8 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_bMacCormackVelocity = sim.m_bMacCormack && cvar_GpuFluidGasVelocityMacCormack.GetValue();
   sim.m_fAllocThreshold = m_fAllocThreshold;
   sim.m_fMeanFloor = 1e-4f;
+  // Twice the frame's ticks, so the next frame's ticks never carry content past what was allocated for it.
+  sim.m_fAllocLookahead = 2.0f * static_cast<float>(plMath::Max(uiTicks, 1u)) * sim.m_fTickSeconds;
 
   // Vorticity confinement from Medium up.
   const float fVorticity = cvar_GpuFluidGasVorticity.GetValue() >= 0.0f ? cvar_GpuFluidGasVorticity.GetValue() : m_fVorticity;
@@ -403,6 +509,7 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_Multigrid.m_uiDownColour = cvar_GpuFluidGasMGDownColour.GetValue() != 0 ? 1u : 0u;
   sim.m_Multigrid.m_bShortLaterCycles = cvar_GpuFluidGasMGShortCycles.GetValue();
   sim.m_Multigrid.m_bProfilePressure = cvar_GpuFluidGasProfilePressure.GetValue();
+  sim.m_bProfileKernels = cvar_GpuFluidGasProfileKernels.GetValue();
   sim.m_Multigrid.m_uiDenseGroupCells = static_cast<plUInt32>(plMath::Max(cvar_GpuFluidGasMGDenseGroupCells.GetValue(), 0));
   sim.m_PoissonTest = m_DebugPoissonTest;
 

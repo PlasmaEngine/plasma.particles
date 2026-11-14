@@ -24,6 +24,7 @@ StructuredBuffer<uint> GpuFluidNeighbors;    // pool slot * 27 + neighbour -> po
 StructuredBuffer<uint> GpuFluidDispatchArgs; // x, y, z groups and the active count
 StructuredBuffer<uint> GpuFluidColourList;   // active bricks by brick colour: colour 0 from the front, colour 1 from the back
 StructuredBuffer<uint> GpuFluidColourArgs;   // two sets of x, y, z groups and the count, one per brick colour
+StructuredBuffer<uint> GpuFluidNewList;      // slots assigned this frame (count in GpuFluidDispatchArgs, set GPU_FLUID_ARGS_NEW)
 #endif
 
 uint3 GpuFluidGrid()
@@ -138,6 +139,16 @@ uint GpuFluidGroupSlot(uint3 groupId)
   if (activeIndex >= GpuFluidDispatchArgs[3])
     return GPU_FLUID_INVALID_SLOT;
   return GpuFluidActiveList[activeIndex];
+}
+
+/// Pool slot an indirect group over the new list (dispatch arguments set GPU_FLUID_ARGS_NEW) works on, or
+/// GPU_FLUID_INVALID_SLOT.
+uint GpuFluidNewGroupSlot(uint3 groupId)
+{
+  const uint index = groupId.y * GPU_FLUID_DISPATCH_FOLD + groupId.x;
+  if (index >= GpuFluidDispatchArgs[GPU_FLUID_ARGS_NEW + 3])
+    return GPU_FLUID_INVALID_SLOT;
+  return GpuFluidNewList[index];
 }
 
 /// Pool slot an indirect group of a brick-colour dispatch works on (colour 0 or 1), or GPU_FLUID_INVALID_SLOT.
@@ -277,6 +288,85 @@ float3 GpuFluidSampleVelocity(Texture3D<float4> velocity, SamplerState linearCla
     GpuFluidSampleAtlas(velocity, linearClamp, p - float3(0.0, 0.5, 0.5), fallback).x,
     GpuFluidSampleAtlas(velocity, linearClamp, p - float3(0.5, 0.0, 0.5), fallback).y,
     GpuFluidSampleAtlas(velocity, linearClamp, p - float3(0.5, 0.5, 0.0), fallback).z);
+}
+
+/// The brick a group works on (its "home"), so samples inside its stored 10 cubed texels skip the page table.
+///
+/// A sample at texel-index position q (see GpuFluidLocate) needs the 8 texels floor(q) .. floor(q) + 1. They all lie in
+/// the home brick's stored texels when q is in [origin - 1, origin + 8) on every axis, origin = brick * 8: the apron
+/// holds the neighbours' faces (GasHalo), so the result is the one the page-table path gives, except against open air
+/// and the domain faces, where the home path interpolates towards the apron's boundary values instead of reading the
+/// fallback for the whole sample. Only a trace that leaves the brick by more than the apron takes the page-table path.
+struct GpuFluidHome
+{
+  float3 m_vOrigin;   ///< brick origin (brick * 8), in voxels
+  float3 m_vTexel;    ///< atlas texel of the home brick's local cell 0 (the slot's apron corner + 1)
+  int3 m_iTexel;      ///< the same, as an integer
+  float3 m_vInvAtlas; ///< 1 / atlas size in texels
+};
+
+GpuFluidHome GpuFluidMakeHome(uint slot, int3 brick)
+{
+  GpuFluidHome home;
+  home.m_vOrigin = float3(brick * GPU_FLUID_BRICK_SIZE);
+  home.m_iTexel = GpuFluidSlotBase(slot) + GPU_FLUID_BRICK_APRON;
+  home.m_vTexel = float3(home.m_iTexel);
+  home.m_vInvAtlas = 1.0 / float3(GpuFluidAtlasBricks() * GPU_FLUID_BRICK_STORE);
+  return home;
+}
+
+/// Whether a sample at q (local to the home brick: q - origin) lies in the home brick's stored texels.
+bool GpuFluidInHomeLocal(float3 local)
+{
+  return all(local >= -1.0) && all(local < float(GPU_FLUID_BRICK_SIZE));
+}
+
+/// GpuFluidSampleAtlas, through the home brick when the sample lies in it.
+float4 GpuFluidSampleHome(Texture3D<float4> atlas, SamplerState linearClamp, GpuFluidHome home, float3 q, float4 fUnallocated)
+{
+  const float3 local = q - home.m_vOrigin;
+  [branch] if (GpuFluidInHomeLocal(local))
+    return atlas.SampleLevel(linearClamp, (home.m_vTexel + local + 0.5) * home.m_vInvAtlas, 0.0);
+  return GpuFluidSampleAtlas(atlas, linearClamp, q, fUnallocated);
+}
+
+/// GpuFluidSampleVelocity through the home brick.
+float3 GpuFluidSampleVelocityHome(Texture3D<float4> velocity, SamplerState linearClamp, GpuFluidHome home, float3 p, float3 vAmbient)
+{
+  const float4 fallback = float4(vAmbient, 0.0);
+  return float3(
+    GpuFluidSampleHome(velocity, linearClamp, home, p - float3(0.0, 0.5, 0.5), fallback).x,
+    GpuFluidSampleHome(velocity, linearClamp, home, p - float3(0.5, 0.0, 0.5), fallback).y,
+    GpuFluidSampleHome(velocity, linearClamp, home, p - float3(0.5, 0.5, 0.0), fallback).z);
+}
+
+/// The atlas texel of the lower corner of the 8 texels a sample at q interpolates between, and its weights; false when
+/// the sample lies in a brick without a slot. Through the home brick when it can.
+///
+/// The weights come from the position relative to the brick, never from the atlas texel, so they do not depend on which
+/// slot a brick has (N11 compares runs with different pools).
+bool GpuFluidLocateHome(GpuFluidHome home, float3 q, out int3 out_corner, out float3 out_weights)
+{
+  float3 local = q - home.m_vOrigin;
+  int3 base = home.m_iTexel;
+  bool bFound = true;
+
+  [branch] if (!GpuFluidInHomeLocal(local))
+  {
+    // The brick of floor(q), as GpuFluidLocate picks it.
+    const int3 grid = int3(GpuFluidGrid());
+    const float3 qc = clamp(q, -1.0, float3(grid * GPU_FLUID_BRICK_SIZE) - (1.0 / 256.0));
+    const int3 brick = clamp(int3(floor(floor(qc) / GPU_FLUID_BRICK_SIZE)), 0, grid - 1);
+    const uint slot = GpuFluidPageTable[GpuFluidBrickLinear(uint3(brick), uint3(grid))];
+    bFound = slot != GPU_FLUID_INVALID_SLOT;
+    base = bFound ? GpuFluidSlotBase(slot) + GPU_FLUID_BRICK_APRON : int3(0, 0, 0);
+    local = qc - float3(brick * GPU_FLUID_BRICK_SIZE);
+  }
+
+  const float3 t0 = floor(local);
+  out_corner = base + int3(t0);
+  out_weights = local - t0;
+  return bFound;
 }
 
 #endif

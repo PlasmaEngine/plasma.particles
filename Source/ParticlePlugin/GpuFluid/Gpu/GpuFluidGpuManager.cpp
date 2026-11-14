@@ -48,6 +48,8 @@ struct plGpuFluidGpuManager::GasVolume
   bool m_bStatsValid = false;
   plGpuFluidGasStats m_Stats;
   float m_fVoxelSize = 0.0625f;
+  bool m_bGridDebugValid = false;
+  plGpuFluidGridDebug m_GridDebug;
 };
 
 struct plGpuFluidGpuManager::LiquidVolume
@@ -86,6 +88,39 @@ namespace
     float f = 0.0f;
     plMemoryUtils::Copy(reinterpret_cast<plUInt8*>(&f), reinterpret_cast<const plUInt8*>(&uiBits), sizeof(float));
     return f;
+  }
+
+  /// Bucket 0 of the allocator, binned on the CPU: every virtual brick a source of the frame can write into, with a
+  /// margin of two voxels for what its gas reaches within the frame's ticks (GasFinalize's marking takes over after).
+  void CollectEmitterBricks(const plGpuFluidGasSimulation& sim, const plVec3U32& vBrickGrid, plDynamicArray<plUInt32>& out_bricks)
+  {
+    out_bricks.Clear();
+    constexpr float fMargin = 2.0f;
+
+    for (const plGpuFluidGasEmitter& emitter : sim.m_Emitters)
+    {
+      if (emitter.m_Shape == plGpuFluidEmitterShape::None)
+        continue;
+
+      const plVec3 vHalf = (emitter.m_Shape == plGpuFluidEmitterShape::Box ? emitter.m_vHalfExtentsVoxels : plVec3(emitter.m_fRadiusVoxels)) + plVec3(fMargin);
+      const plVec3 vMin = (emitter.m_vCenterVoxels - vHalf) / static_cast<float>(plGpuFluidBrickSize);
+      const plVec3 vMax = (emitter.m_vCenterVoxels + vHalf) / static_cast<float>(plGpuFluidBrickSize);
+
+      auto Lo = [](float f, plUInt32 uiCount) { return static_cast<plUInt32>(plMath::Clamp(plMath::Floor(f), 0.0f, static_cast<float>(uiCount) - 1.0f)); };
+      if (vMax.x < 0.0f || vMax.y < 0.0f || vMax.z < 0.0f || vMin.x >= vBrickGrid.x || vMin.y >= vBrickGrid.y || vMin.z >= vBrickGrid.z)
+        continue;
+
+      const plVec3U32 vLo(Lo(vMin.x, vBrickGrid.x), Lo(vMin.y, vBrickGrid.y), Lo(vMin.z, vBrickGrid.z));
+      const plVec3U32 vHi(Lo(vMax.x, vBrickGrid.x), Lo(vMax.y, vBrickGrid.y), Lo(vMax.z, vBrickGrid.z));
+      for (plUInt32 z = vLo.z; z <= vHi.z; ++z)
+        for (plUInt32 y = vLo.y; y <= vHi.y; ++y)
+          for (plUInt32 x = vLo.x; x <= vHi.x; ++x)
+          {
+            if (out_bricks.GetCount() >= GPU_FLUID_MAX_EMITTER_BRICKS)
+              return;
+            out_bricks.PushBack(x + vBrickGrid.x * (y + vBrickGrid.y * z));
+          }
+    }
   }
 } // namespace
 
@@ -240,6 +275,28 @@ bool plGpuFluidGpuManager::GetGasStats(plGpuFluidVolumeId id, plGpuFluidGasStats
 
   out_stats = (*pVolume)->m_Stats;
   return true;
+}
+
+bool plGpuFluidGpuManager::GetGasGridDebug(plGpuFluidVolumeId id, plGpuFluidGridDebug& out_debug) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plUniquePtr<GasVolume>* pVolume = nullptr;
+  if (!m_GasVolumes.TryGetValue(id, pVolume) || !(*pVolume)->m_bGridDebugValid)
+    return false;
+
+  out_debug = (*pVolume)->m_GridDebug;
+  return true;
+}
+
+plUInt32 plGpuFluidGpuManager::GetGasCapacity(plGpuFluidVolumeId id) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plUniquePtr<GasVolume>* pVolume = nullptr;
+  if (!m_GasVolumes.TryGetValue(id, pVolume))
+    return 0;
+  return (*pVolume)->m_uiCapacity;
 }
 
 plUInt32 plGpuFluidGpuManager::GetNumVolumes() const
@@ -521,6 +578,14 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_fMeanDivergenceBefore = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_PRE_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
   stats.m_fMeanDivergenceAfter = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_POST_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
 
+  stats.m_uiNewBricks = pWords[GPU_FLUID_STAT_ALLOC_NEW];
+  stats.m_uiFreedBricks = pWords[GPU_FLUID_STAT_ALLOC_FREED];
+  stats.m_uiFreeSlots = pWords[GPU_FLUID_STAT_ALLOC_FREE];
+  stats.m_uiAllocRequests = pWords[GPU_FLUID_STAT_ALLOC_REQUESTS];
+  stats.m_uiAllocActive = pWords[GPU_FLUID_STAT_ALLOC_ACTIVE];
+  for (plUInt32 b = 0; b < 4; ++b)
+    stats.m_uiDeniedPerBucket[b] = pWords[GPU_FLUID_STAT_DENIED_BUCKET + b];
+
   stats.m_uiSolidCells = pWords[GPU_FLUID_STAT_SOLID_CELLS];
   stats.m_fSolidContactDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_CONTACT]);
   stats.m_fSolidDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_DENSITY]);
@@ -620,19 +685,14 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     const plRenderGraphBufferHandle hStats = graph.ImportBuffer(volume.m_hStats);
     const plGALBufferHandle hStatsGAL = volume.m_hStats;
 
-    plUInt32 uiTicks = 0;
-    if (!bAnalytic)
+    plGpuFluidGridDebug gridDebug;
+    if (volume.m_Grid.PollDebug(gridDebug))
     {
-      // Phase Gas/Alloc: P1 allocates the whole box once, on the volume's first GPU frame.
-      if (!volume.m_Grid.IsAllocated())
-      {
-        volume.m_Grid.AddAllocPasses(graph, gridGraph, input.m_Simulation.m_OpenFaces.GetValue());
-        volume.m_Solver.AddClearPass(graph, volume.m_Grid, gridGraph, input.m_Simulation.m_vAmbientWind);
-      }
-
-      uiTicks = bFreshInput ? plMath::Min(input.m_Simulation.m_uiTicks, plGpuFluidMaxGasTicksPerFrame) : 0;
+      volume.m_GridDebug = std::move(gridDebug);
+      volume.m_bGridDebugValid = true;
     }
 
+    const plUInt32 uiTicks = !bAnalytic && bFreshInput ? plMath::Min(input.m_Simulation.m_uiTicks, plGpuFluidMaxGasTicksPerFrame) : 0;
     const bool bCounters = bAnalytic || uiTicks > 0;
 
     // Reset the counters this frame's kernels add to.
@@ -684,6 +744,23 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     }
     else
     {
+      // Phase Gas/Alloc, every frame that runs ticks: free idle bricks, give free slots to the requests (the sources'
+      // bricks and what the last Finalize marked), clear the new bricks.
+      // A volume's first GPU frame always initialises its grid, so its brick table is never undefined.
+      if (uiTicks > 0 || !volume.m_Grid.IsAllocated())
+      {
+        plGpuFluidAllocInput alloc;
+        alloc.m_bAllocateAll = input.m_bAllocateAll;
+        alloc.m_bDebugReadback = input.m_bDebugGrid;
+        alloc.m_bDebugVirtual = input.m_bDebugGridVirtual;
+        CollectEmitterBricks(input.m_Simulation, volume.m_Settings.m_vBrickGrid, alloc.m_EmitterBricks);
+
+        // In the closed-box mode nothing changes once the box is allocated.
+        const bool bAllocationChanged = !input.m_bAllocateAll || !volume.m_Grid.IsAllocated();
+        volume.m_Grid.AddAllocPasses(graph, gridGraph, hStats, alloc, uiFrame);
+        volume.m_Solver.AddClearPass(graph, volume.m_Grid, gridGraph, input.m_Simulation.m_vAmbientWind, bAllocationChanged, input.m_Simulation.m_OpenFaces);
+      }
+
       plGpuFluidGasSimulation simulation = input.m_Simulation;
       simulation.m_uiTicks = uiTicks;
       // The Poisson test hook solves once per fresh input, like a tick; its readback needs the counters.

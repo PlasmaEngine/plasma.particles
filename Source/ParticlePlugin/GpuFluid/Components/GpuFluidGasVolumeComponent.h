@@ -45,7 +45,8 @@ public:
   /// Authored size of the box, in metres. The grid rounds it up to whole bricks.
   plVec3 m_vExtents = plVec3(4.0f);                                   // [ property ]
   float m_fVoxelSize = 0.0625f;                                       // [ property ] metres
-  plUInt32 m_uiMaxBricks = 1536;                                      // [ property ] atlas pool (Medium)
+  plUInt32 m_uiMaxBricks = 0;                                         // [ property ] atlas pool, 0: the quality's cap (GetTierBrickCap)
+  bool m_bAllocateAll = false;                                        // [ property ] closed-box mode: the whole box stays allocated (up to the pool)
   plEnum<plGpuFluidQuality> m_Quality;                                // [ property ]
   plBitflags<plGpuFluidFaces> m_OpenFaces;                            // [ property ] the rest are walls
 
@@ -127,6 +128,19 @@ public:
   /// Multigrid V-cycles a tick runs at this quality when PressureCycles is 0.
   static plUInt32 GetDefaultPressureCycles(plGpuFluidQuality::Enum quality);
 
+  /// Pool slots of a quality tier (design plan section 9): Low 512, Medium 1536, High 3072, Ultra 6144. The pool is
+  /// created at this size when the volume activates and never resized.
+  static plUInt32 GetTierBrickCap(plGpuFluidQuality::Enum quality);
+
+  /// Pool slots the volume has (0 before its GPU volume exists).
+  plUInt32 GetPoolCapacity() const;
+
+  /// Test hook (N1): copy the allocator's state to the CPU every frame, with the per virtual brick part.
+  bool m_bDebugGridReadback = false;
+
+  /// The newest copy of the allocator's state (m_bDebugGridReadback or GpuFluid.Debug.Bricks), false until one arrived.
+  bool GetGridDebug(plGpuFluidGridDebug& out_debug) const;
+
 protected:
   void Update();
   void OnUpdateLocalBounds(plMsgUpdateLocalBounds& msg);
@@ -141,6 +155,9 @@ private:
 
   /// The colliders (and dynamic physics bodies) overlapping the box, as shapes in voxels for every tick of the frame.
   void GatherSolids(plTime timeDiff, plGpuFluidGasSimulation& inout_simulation);
+
+  /// GpuFluid.Debug.Bricks: every allocated brick as a line box, coloured by the bucket that keeps it.
+  void DrawBrickDebug() const;
 
   void ReleaseVolume();
 

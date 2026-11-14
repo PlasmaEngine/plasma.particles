@@ -42,6 +42,15 @@ struct plGpuFluidGasFrameInput
   /// Smallest brick mean the brick table stores for a kept brick, in atlas density units. Zero would mark it empty.
   float m_fMeanFloor = 1e-4f;
 
+  /// The closed-box mode of the allocator: every brick of the grid stays allocated (up to the pool), in virtual order.
+  /// Otherwise the grid is sparse: bricks are allocated where the sources, the content and its motion need them.
+  bool m_bAllocateAll = false;
+
+  /// Copy the allocator's state to the CPU this frame (GetGasGridDebug), with the per virtual brick part when
+  /// m_bDebugGridVirtual. For N1 and the brick debug view.
+  bool m_bDebugGrid = false;
+  bool m_bDebugGridVirtual = false;
+
   plGpuFluidGasSimulation m_Simulation;
 };
 
@@ -82,6 +91,16 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   float m_fMaxDivergenceAfter = 0.0f;
   float m_fMeanDivergenceBefore = 0.0f;
   float m_fMeanDivergenceAfter = 0.0f;
+
+  /// The frame's allocation (Gas/Alloc): slots assigned and freed, free slots before the assignment, requests for
+  /// bricks without a slot, denied requests per priority bucket (0 sources, 1 alive, 2 flux, 3 proximity), and the
+  /// active bricks after it.
+  plUInt32 m_uiNewBricks = 0;
+  plUInt32 m_uiFreedBricks = 0;
+  plUInt32 m_uiFreeSlots = 0;
+  plUInt32 m_uiAllocRequests = 0;
+  plUInt32 m_uiDeniedPerBucket[4] = {};
+  plUInt32 m_uiAllocActive = 0;
 
   plUInt32 m_uiSolidCells = 0;       ///< interior cells inside a solid on the frame's last tick
   float m_fSolidContactDensity = 0.0f; ///< largest density in a fluid cell next to a solid on that tick
@@ -147,6 +166,12 @@ public:
 
   /// False until the first readback has arrived.
   bool GetGasStats(plGpuFluidVolumeId id, plGpuFluidGasStats& out_stats) const;
+
+  /// The newest grid debug readback of a gas volume (plGpuFluidGasFrameInput::m_bDebugGrid), false until one arrived.
+  bool GetGasGridDebug(plGpuFluidVolumeId id, plGpuFluidGridDebug& out_debug) const;
+
+  /// Pool slots of a gas volume (its tier cap or MaxBricks, never more than its grid has bricks).
+  plUInt32 GetGasCapacity(plGpuFluidVolumeId id) const;
 
   /// Registers a liquid volume. Its GPU resources are created on the render thread at the next BeginRender.
   plGpuFluidVolumeId CreateLiquidVolume(const plGpuFluidLiquidSettings& settings);

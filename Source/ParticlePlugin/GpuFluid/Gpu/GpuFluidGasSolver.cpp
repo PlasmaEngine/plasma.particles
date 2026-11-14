@@ -21,7 +21,7 @@ namespace
   /// Every buffer and atlas of a frame as render-graph handles, captured by value by the pass callbacks.
   struct FrameResources
   {
-    plRenderGraphTextureHandle m_hVelocity[2];
+    plRenderGraphTextureHandle m_hVelocity[3];
     plRenderGraphTextureHandle m_hScalar[2];
     plRenderGraphTextureHandle m_hScratch;
     plRenderGraphBufferHandle m_hPressure[2];
@@ -126,7 +126,27 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
-    pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), 0).IgnoreResult();
+    pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_ACTIVE * sizeof(plUInt32)).IgnoreResult();
+  }
+
+  /// Binds the shader and the grid, dispatches GPU_FLUID_SLABS groups per active brick (groupId.z is the slab).
+  void DispatchPerBrickSlabs(const plRenderGraphContext& ctx, const plGpuFluidSparseGridGraph& grid, const plShaderResourceHandle& hShader, const plGpuFluidGasConstants& constants)
+  {
+    plRenderContext* pContext = ctx.GetRenderContext();
+    pContext->BindShader(hShader);
+    plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
+    pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_SLABS * sizeof(plUInt32)).IgnoreResult();
+  }
+
+  /// Binds the shader and the grid, dispatches one group per brick assigned this frame.
+  void DispatchPerNewBrick(const plRenderGraphContext& ctx, const plGpuFluidSparseGridGraph& grid, const plShaderResourceHandle& hShader, const plGpuFluidGasConstants& constants)
+  {
+    plRenderContext* pContext = ctx.GetRenderContext();
+    pContext->BindShader(hShader);
+    plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
+    pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_NEW * sizeof(plUInt32)).IgnoreResult();
   }
 
   /// One group per active brick of one brick colour (Pass.y 0 or 1), or of every brick (2).
@@ -164,6 +184,7 @@ namespace
     plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
     bindGroup.BindTexture("GpuFluidVelocityTarget", ctx.ResolveTexture(hVelocity));
     bindGroup.BindTexture("GpuFluidHaloTarget", ctx.ResolveTexture(hVelocity));
+    bindGroup.BindTexture("GpuFluidHaloTarget2", ctx.ResolveTexture(hVelocity));
     bindGroup.BindBuffer("GpuFluidPressure", ctx.ResolveBuffer(res.m_hPressure[0]));
     bindGroup.BindBuffer("GpuFluidPressure1", ctx.ResolveBuffer(res.m_hPressure[1]));
     bindGroup.BindBuffer("GpuFluidDivergence", ctx.ResolveBuffer(res.m_hDivergence));
@@ -488,6 +509,7 @@ plResult plGpuFluidGasSolver::Create(const plVec3U32& vBrickGrid, const plVec3U3
 
   m_hVelocity[0] = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Velocity 0");
   m_hVelocity[1] = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Velocity 1");
+  m_hVelocity[2] = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Velocity 2");
   m_hScalar[0] = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Scalar 0");
   m_hScalar[1] = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Scalar 1");
   m_hScratch = CreateAtlas(pDevice, vAtlasBricks, "GpuFluid Gas Scratch");
@@ -515,7 +537,7 @@ plResult plGpuFluidGasSolver::Create(const plVec3U32& vBrickGrid, const plVec3U3
   m_uiVelocitySide = 0;
 
   bool bFailed = m_hLinearClamp.IsInvalidated();
-  for (plGALTextureHandle hTexture : {m_hVelocity[0], m_hVelocity[1], m_hScalar[0], m_hScalar[1], m_hScratch})
+  for (plGALTextureHandle hTexture : {m_hVelocity[0], m_hVelocity[1], m_hVelocity[2], m_hScalar[0], m_hScalar[1], m_hScratch})
     bFailed = bFailed || hTexture.IsInvalidated();
   for (plGALBufferHandle hBuffer : {m_hPressure[0], m_hPressure[1], m_hDivergence, m_hSolidFlags, m_hFaceCodes, m_hMGLocal, m_hMGCoeff, m_hMGMask, m_hMGDense, m_hMGDenseCoeff, m_hSolidShapes})
     bFailed = bFailed || hBuffer.IsInvalidated();
@@ -553,7 +575,7 @@ void plGpuFluidGasSolver::Destroy()
 {
   plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
 
-  for (plGALTextureHandle* pTexture : {&m_hVelocity[0], &m_hVelocity[1], &m_hScalar[0], &m_hScalar[1], &m_hScratch})
+  for (plGALTextureHandle* pTexture : {&m_hVelocity[0], &m_hVelocity[1], &m_hVelocity[2], &m_hScalar[0], &m_hScalar[1], &m_hScratch})
   {
     if (!pTexture->IsInvalidated())
       pDevice->DestroyTexture(*pTexture);
@@ -572,14 +594,22 @@ void plGpuFluidGasSolver::Destroy()
   m_hLinearClamp.Invalidate();
 }
 
-void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, const plVec3& vAmbientWind)
+void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, const plVec3& vAmbientWind,
+  bool bAllocationChanged, plBitflags<plGpuFluidFaces> openFaces)
 {
   plGpuFluidGasSimulation sim;
+  sim.m_OpenFaces = openFaces;
   plGpuFluidGasConstants constants = MakeConstants(grid, sim, 0.0f);
   constants.GpuFluidGasParams0 = plVec4(vAmbientWind.x, vAmbientWind.y, vAmbientWind.z, 0.0f);
 
+  // The new bricks' aprons in the current sides, scalars and velocity in one launch.
+  plGpuFluidGasConstants halo = constants;
+  halo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, GPU_FLUID_HALO_VELOCITY + 1, 0, 1);
+
   const plRenderGraphTextureHandle hVelocity0 = ref_graph.ImportTexture(m_hVelocity[0]);
   const plRenderGraphTextureHandle hVelocity1 = ref_graph.ImportTexture(m_hVelocity[1]);
+  const plRenderGraphTextureHandle hVelocity2 = ref_graph.ImportTexture(m_hVelocity[2]);
+  const plRenderGraphTextureHandle hVelocityCur = m_uiVelocitySide == 0 ? hVelocity0 : (m_uiVelocitySide == 1 ? hVelocity1 : hVelocity2);
   const plRenderGraphTextureHandle hScalar0 = ref_graph.ImportTexture(m_hScalar[0]);
   const plRenderGraphTextureHandle hScalar1 = ref_graph.ImportTexture(m_hScalar[1]);
   const plRenderGraphTextureHandle hScratch = ref_graph.ImportTexture(m_hScratch);
@@ -591,10 +621,11 @@ void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFlui
   const plRenderGraphBufferHandle hMGLocal = ref_graph.ImportBuffer(m_hMGLocal);
   const plRenderGraphBufferHandle hMGCoeff = ref_graph.ImportBuffer(m_hMGCoeff);
 
-  auto pass = ref_graph.AddComputePass("Gas/Alloc");
+  auto pass = ref_graph.AddComputePass("Gas/Alloc Clear");
   plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
   pass.WriteTexture(hVelocity0);
   pass.WriteTexture(hVelocity1);
+  pass.WriteTexture(hVelocity2);
   pass.WriteTexture(hScalar0);
   pass.WriteTexture(hScalar1);
   pass.WriteTexture(hScratch);
@@ -606,11 +637,12 @@ void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFlui
   pass.WriteBuffer(hMGLocal);
   pass.WriteBuffer(hMGCoeff);
   pass.HasSideEffects();
-  pass.SetExecuteCallback([=, hShader = m_hClearShader](const plRenderGraphContext& ctx)
+  pass.SetExecuteCallback([=, hShader = m_hClearShader, hHalo = m_hHaloShader](const plRenderGraphContext& ctx)
     {
       plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
       bindGroup.BindTexture("GpuFluidVelocity0", ctx.ResolveTexture(hVelocity0));
       bindGroup.BindTexture("GpuFluidVelocity1", ctx.ResolveTexture(hVelocity1));
+      bindGroup.BindTexture("GpuFluidVelocity2", ctx.ResolveTexture(hVelocity2));
       bindGroup.BindTexture("GpuFluidScalar0", ctx.ResolveTexture(hScalar0));
       bindGroup.BindTexture("GpuFluidScalar1", ctx.ResolveTexture(hScalar1));
       bindGroup.BindTexture("GpuFluidScratch", ctx.ResolveTexture(hScratch));
@@ -621,11 +653,21 @@ void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFlui
       bindGroup.BindBuffer("GpuFluidFaceCodes", ctx.ResolveBuffer(hFaceCodes));
       bindGroup.BindBuffer("GpuFluidMGLocal", ctx.ResolveBuffer(hMGLocal));
       bindGroup.BindBuffer("GpuFluidMGCoeff", ctx.ResolveBuffer(hMGCoeff));
-      DispatchPerBrick(ctx, gridGraph, hShader, constants);
+      DispatchPerNewBrick(ctx, gridGraph, hShader, constants);
+
+      plGALCommandEncoder* pEncoder = ctx.GetCommandEncoder();
+      const plGALTextureHandle hScalarGAL = ctx.ResolveTexture(hScalar0);
+      const plGALTextureHandle hVelocityGAL = ctx.ResolveTexture(hVelocityCur);
+      UavBarrier(pEncoder, hScalarGAL);
+      UavBarrier(pEncoder, hVelocityGAL);
+      bindGroup.BindTexture("GpuFluidHaloTarget", hScalarGAL);
+      bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocityGAL);
+      DispatchPerNewBrick(ctx, gridGraph, hHalo, halo);
     });
 
-  m_uiVelocitySide = 0;
-  m_bOperatorValid = false; // the clear zeroes the face codes and coefficients
+  // The clear zeroes the new bricks' face codes and coefficients.
+  if (bAllocationChanged)
+    m_bOperatorValid = false;
 }
 
 void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph,
@@ -638,6 +680,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
   FrameResources res;
   res.m_hVelocity[0] = ref_graph.ImportTexture(m_hVelocity[0]);
   res.m_hVelocity[1] = ref_graph.ImportTexture(m_hVelocity[1]);
+  res.m_hVelocity[2] = ref_graph.ImportTexture(m_hVelocity[2]);
   res.m_hScalar[0] = ref_graph.ImportTexture(m_hScalar[0]);
   res.m_hScalar[1] = ref_graph.ImportTexture(m_hScalar[1]);
   res.m_hScratch = ref_graph.ImportTexture(m_hScratch);
@@ -806,11 +849,25 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
     const bool bLastTick = uiTick + 1 == sim.m_uiTicks;
     const plGpuFluidGasConstants base = MakeConstants(grid, sim, sim.m_fTime + uiTick * sim.m_fTickSeconds);
 
+    // The sides of this tick. Velocity: current -> semi-Lagrangian -> MacCormack (the next current; without the
+    // velocity correction the semi-Lagrangian side is it). Scalars: Scalar[0] (current, the march reads it) ->
+    // semi-Lagrangian Scalar[1] -> MacCormack into Scratch; GasForces writes them back to Scalar[0]. The curl takes
+    // whichever of Scalar[1] and Scratch the scalars are done with.
+    const bool bMacCormack = sim.m_bMacCormack;
+    const bool bMacCormackVelocity = sim.m_bMacCormackVelocity;
+    const plUInt32 uiVelocitySL = (m_uiVelocitySide + 1) % 3;
+    const plUInt32 uiVelocitySpare = (m_uiVelocitySide + 2) % 3;
+    const plUInt32 uiVelocityNext = bMacCormackVelocity ? uiVelocitySpare : uiVelocitySL;
+
     const plRenderGraphTextureHandle hVelocityCur = res.m_hVelocity[m_uiVelocitySide];
-    const plRenderGraphTextureHandle hVelocityNext = res.m_hVelocity[m_uiVelocitySide ^ 1];
+    const plRenderGraphTextureHandle hVelocitySL = res.m_hVelocity[uiVelocitySL];
+    const plRenderGraphTextureHandle hVelocitySpare = res.m_hVelocity[uiVelocitySpare];
+    const plRenderGraphTextureHandle hVelocityNext = res.m_hVelocity[uiVelocityNext];
     const plRenderGraphTextureHandle hScalar0 = res.m_hScalar[0];
     const plRenderGraphTextureHandle hScalar1 = res.m_hScalar[1];
     const plRenderGraphTextureHandle hScratch = res.m_hScratch;
+    const plRenderGraphTextureHandle hScalarAdvected = bMacCormack ? hScratch : hScalar1;
+    const plRenderGraphTextureHandle hCurlTarget = bMacCormack ? hScalar1 : hScratch;
 
     // Gas/Emit: each source in place on the current scalars and velocity.
     {
@@ -861,78 +918,128 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         });
     }
 
-    // Gas/Advect: current -> next (semi-Lagrangian), the scalars' apron, and with MacCormack the reverse trace into
-    // Scratch, the limited correction and the apron again; the same for the velocity.
+    // Gas/Advect: current -> semi-Lagrangian sides and their aprons; with MacCormack the correction (reverse trace and
+    // limiter in one launch) into the third sides and their aprons. Each launch does the scalars and the velocity
+    // together.
     {
-      plGpuFluidGasConstants scalarHalo = base;
-      scalarHalo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, 0, 0, 0);
-      scalarHalo.GpuFluidGasParams0 = vWind;
+      const plUInt32 uiCorrected = (bMacCormack ? GPU_FLUID_ADVECT_FIELD_SCALARS : 0u) | (bMacCormackVelocity ? GPU_FLUID_ADVECT_FIELD_VELOCITY : 0u);
 
-      plGpuFluidGasConstants velocityHalo = base;
-      velocityHalo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_VELOCITY, 0, 0, 0);
-      velocityHalo.GpuFluidGasParams0 = vWind;
+      plGpuFluidGasConstants semiLagrangian = base;
+      semiLagrangian.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_SEMI_LAGRANGIAN, 0, 0, GPU_FLUID_ADVECT_FIELD_SCALARS | GPU_FLUID_ADVECT_FIELD_VELOCITY);
+      semiLagrangian.GpuFluidGasParams0 = vWind;
 
-      plGpuFluidGasConstants advect[5] = {base, base, base, base, base};
-      for (plUInt32 uiMode = 0; uiMode < 5; ++uiMode)
+      plGpuFluidGasConstants macCormack = base;
+      macCormack.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_MACCORMACK, 0, 0, uiCorrected);
+      macCormack.GpuFluidGasParams0 = vWind;
+
+      // Both semi-Lagrangian sides' aprons in one launch.
+      plGpuFluidGasConstants haloSL = base;
+      haloSL.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, GPU_FLUID_HALO_VELOCITY + 1, 0, 0);
+      haloSL.GpuFluidGasParams0 = vWind;
+
+      // The corrected sides' aprons: target 1 the scalars (when corrected), target 2 the velocity (when corrected).
+      plGpuFluidGasConstants haloMC = base;
+      if (bMacCormack)
+        haloMC.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, bMacCormackVelocity ? GPU_FLUID_HALO_VELOCITY + 1 : 0u, 0, 0);
+      else
+        haloMC.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_VELOCITY, 0, 0, 0);
+      haloMC.GpuFluidGasParams0 = vWind;
+
+      // Steps of the phase, one pass normally; with GpuFluid.Gas.ProfileKernels each in a pass of its own.
+      enum AdvectStep : plUInt32
       {
-        advect[uiMode].GpuFluidGasPass = plVec4U32(uiMode, 0, 0, 0);
-        advect[uiMode].GpuFluidGasParams0 = vWind;
+        SemiLagrangian,
+        HaloSL,
+        MacCormack,
+        HaloMC,
+        AdvectStepCount
+      };
+      static const char* s_szAdvectSteps[] = {"Gas/Advect SL", "Gas/Advect Halo", "Gas/Advect MacCormack", "Gas/Advect Halo 2"};
+
+      plHybridArray<plUInt32, AdvectStepCount> steps;
+      steps.PushBack(SemiLagrangian);
+      steps.PushBack(HaloSL);
+      if (uiCorrected != 0)
+      {
+        steps.PushBack(MacCormack);
+        steps.PushBack(HaloMC);
       }
 
-      const bool bMacCormack = sim.m_bMacCormack;
-      const bool bMacCormackVelocity = sim.m_bMacCormackVelocity;
+      auto RecordAdvect = [=, hAdvect = m_hAdvectShader, hHalo = m_hHaloShader](const plRenderGraphContext& ctx, plUInt32 uiFirst, plUInt32 uiEnd)
+      {
+        plGALCommandEncoder* pEncoder = ctx.GetCommandEncoder();
+        const plGALTextureHandle hScalarSLGAL = ctx.ResolveTexture(hScalar1);
+        const plGALTextureHandle hVelocitySLGAL = ctx.ResolveTexture(hVelocitySL);
+        const plGALTextureHandle hScratchGAL = ctx.ResolveTexture(hScratch);
+        const plGALTextureHandle hSpareGAL = ctx.ResolveTexture(hVelocitySpare);
 
-      auto pass = ref_graph.AddComputePass("Gas/Advect");
-      plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
-      pass.ReadTexture(hVelocityCur, {}, plGALResourceState::ComputeShaderRead);
-      pass.ReadTexture(hScalar0, {}, plGALResourceState::ComputeShaderRead);
-      pass.WriteTexture(hVelocityNext);
-      pass.WriteTexture(hScalar1);
-      pass.WriteTexture(hScratch);
-      pass.HasSideEffects();
-      pass.SetExecuteCallback([=, hAdvect = m_hAdvectShader, hHalo = m_hHaloShader](const plRenderGraphContext& ctx)
+        plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
+        bindGroup.BindTexture("GpuFluidVelocityIn", ctx.ResolveTexture(hVelocityCur));
+        bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalar0));
+        bindGroup.BindSampler("GpuFluidLinearClamp", hSampler);
+
+        for (plUInt32 i = uiFirst; i < uiEnd; ++i)
         {
-          plGALCommandEncoder* pEncoder = ctx.GetCommandEncoder();
-          const plGALTextureHandle hScalarOut = ctx.ResolveTexture(hScalar1);
-          const plGALTextureHandle hVelocityOut = ctx.ResolveTexture(hVelocityNext);
-          const plGALTextureHandle hScratchGAL = ctx.ResolveTexture(hScratch);
-
-          plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
-          bindGroup.BindTexture("GpuFluidVelocityIn", ctx.ResolveTexture(hVelocityCur));
-          bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalar0));
-          bindGroup.BindSampler("GpuFluidLinearClamp", hSampler);
-          bindGroup.BindTexture("GpuFluidVelocityOut", hVelocityOut);
-          bindGroup.BindTexture("GpuFluidScalarOut", hScalarOut);
-          bindGroup.BindTexture("GpuFluidScratch", hScratchGAL);
-          DispatchPerBrick(ctx, gridGraph, hAdvect, advect[GPU_FLUID_ADVECT_SEMI_LAGRANGIAN]);
-
-          UavBarrier(pEncoder, hScalarOut);
-          UavBarrier(pEncoder, hVelocityOut);
-          bindGroup.BindTexture("GpuFluidHaloTarget", hScalarOut);
-          DispatchPerBrick(ctx, gridGraph, hHalo, scalarHalo);
-
-          if (bMacCormack)
+          if (i > uiFirst)
           {
-            UavBarrier(pEncoder, hScalarOut);
-            DispatchPerBrick(ctx, gridGraph, hAdvect, advect[GPU_FLUID_ADVECT_REVERSE]);
+            UavBarrier(pEncoder, hScalarSLGAL);
+            UavBarrier(pEncoder, hVelocitySLGAL);
             UavBarrier(pEncoder, hScratchGAL);
-            DispatchPerBrick(ctx, gridGraph, hAdvect, advect[GPU_FLUID_ADVECT_CORRECT]);
-            UavBarrier(pEncoder, hScalarOut);
-            DispatchPerBrick(ctx, gridGraph, hHalo, scalarHalo);
+            UavBarrier(pEncoder, hSpareGAL);
           }
 
-          if (bMacCormackVelocity)
+          switch (steps[i])
           {
-            bindGroup.BindTexture("GpuFluidHaloTarget", hVelocityOut);
-            DispatchPerBrick(ctx, gridGraph, hHalo, velocityHalo);
-            UavBarrier(pEncoder, hVelocityOut);
-            UavBarrier(pEncoder, hScratchGAL);
-            DispatchPerBrick(ctx, gridGraph, hAdvect, advect[GPU_FLUID_ADVECT_VELOCITY_REVERSE]);
-            UavBarrier(pEncoder, hScratchGAL);
-            DispatchPerBrick(ctx, gridGraph, hAdvect, advect[GPU_FLUID_ADVECT_VELOCITY_CORRECT]);
-            UavBarrier(pEncoder, hVelocityOut);
+            case SemiLagrangian:
+              bindGroup.BindTexture("GpuFluidVelocitySL", ctx.ResolveTexture(hVelocityCur)); // not read in this mode
+              bindGroup.BindTexture("GpuFluidScalarSL", ctx.ResolveTexture(hScalar0));
+              bindGroup.BindTexture("GpuFluidVelocityOut", hVelocitySLGAL);
+              bindGroup.BindTexture("GpuFluidScalarOut", hScalarSLGAL);
+              DispatchPerBrickSlabs(ctx, gridGraph, hAdvect, semiLagrangian);
+              break;
+            case HaloSL:
+              bindGroup.BindTexture("GpuFluidHaloTarget", hScalarSLGAL);
+              bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocitySLGAL);
+              DispatchPerBrick(ctx, gridGraph, hHalo, haloSL);
+              break;
+            case MacCormack:
+              // The semi-Lagrangian sides are read through read-only views (the pass holds them for writing); the
+              // outputs are the third sides, or the spare one standing in for a field that is not corrected.
+              pEncoder->TextureBarrier(hScalarSLGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::ComputeShaderRead);
+              pEncoder->TextureBarrier(hVelocitySLGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::ComputeShaderRead);
+              bindGroup.BindTexture("GpuFluidVelocitySL", hVelocitySLGAL);
+              bindGroup.BindTexture("GpuFluidScalarSL", hScalarSLGAL);
+              bindGroup.BindTexture("GpuFluidVelocityOut", hSpareGAL);
+              bindGroup.BindTexture("GpuFluidScalarOut", hScratchGAL);
+              DispatchPerBrickSlabs(ctx, gridGraph, hAdvect, macCormack);
+              pEncoder->TextureBarrier(hScalarSLGAL, plGALResourceState::ComputeShaderRead, plGALResourceState::UnorderedAccessWrite);
+              pEncoder->TextureBarrier(hVelocitySLGAL, plGALResourceState::ComputeShaderRead, plGALResourceState::UnorderedAccessWrite);
+              break;
+            case HaloMC:
+              bindGroup.BindTexture("GpuFluidHaloTarget", bMacCormack ? hScratchGAL : hSpareGAL);
+              bindGroup.BindTexture("GpuFluidHaloTarget2", hSpareGAL);
+              DispatchPerBrick(ctx, gridGraph, hHalo, haloMC);
+              break;
           }
-        });
+        }
+      };
+
+      const bool bProfile = sim.m_bProfileKernels;
+      for (plUInt32 uiPass = 0; uiPass < (bProfile ? steps.GetCount() : 1u); ++uiPass)
+      {
+        auto pass = ref_graph.AddComputePass(bProfile ? s_szAdvectSteps[steps[uiPass]] : "Gas/Advect");
+        plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
+        pass.ReadTexture(hVelocityCur, {}, plGALResourceState::ComputeShaderRead);
+        pass.ReadTexture(hScalar0, {}, plGALResourceState::ComputeShaderRead);
+        pass.WriteTexture(hVelocitySL);
+        pass.WriteTexture(hVelocitySpare);
+        pass.WriteTexture(hScalar1);
+        pass.WriteTexture(hScratch);
+        pass.HasSideEffects();
+        const plUInt32 uiFirst = bProfile ? uiPass : 0u;
+        const plUInt32 uiEnd = bProfile ? uiPass + 1 : steps.GetCount();
+        pass.SetExecuteCallback([=](const plRenderGraphContext& ctx) { RecordAdvect(ctx, uiFirst, uiEnd); });
+      }
     }
 
     // Gas/Forces: the curl, buoyancy and confinement on the next velocity; cooled, dissipated, clamped scalars back to
@@ -957,56 +1064,104 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
 
       const bool bVorticity = sim.m_fVorticity > 0.0f;
 
-      auto pass = ref_graph.AddComputePass("Gas/Forces");
-      plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
-      pass.ReadTexture(hScalar1, {}, plGALResourceState::ComputeShaderRead);
-      pass.ReadBuffer(res.m_hSolidShapes, plGALResourceState::ComputeShaderRead);
-      pass.WriteTexture(hScalar0);
-      pass.WriteTexture(hVelocityNext);
-      pass.WriteTexture(hScratch);
-      pass.WriteBuffer(res.m_hSolidFlags);
-      pass.WriteBuffer(hStats);
-      pass.HasSideEffects();
-      pass.SetExecuteCallback([=, hForces = m_hForcesShader, hHalo = m_hHaloShader, hCurl = m_hCurlShader, hSolids = m_hSolidsShader](const plRenderGraphContext& ctx)
+      enum ForcesStep : plUInt32
+      {
+        Curl,
+        CurlHalo,
+        Forces,
+        Solids,
+        VelocityHalo,
+        ForcesStepCount
+      };
+      static const char* s_szForcesSteps[] = {"Gas/Forces Curl", "Gas/Forces Curl Apron", "Gas/Forces Forces", "Gas/Forces Solids", "Gas/Forces Halo"};
+
+      // The advection left the next velocity's apron filled, which the curl needs.
+      plHybridArray<plUInt32, ForcesStepCount> steps;
+      if (bVorticity)
+      {
+        steps.PushBack(Curl);
+        steps.PushBack(CurlHalo);
+      }
+      steps.PushBack(Forces);
+      steps.PushBack(Solids);
+      steps.PushBack(VelocityHalo);
+
+      auto RecordForces = [=, hForces = m_hForcesShader, hHalo = m_hHaloShader, hCurl = m_hCurlShader, hSolids = m_hSolidsShader](const plRenderGraphContext& ctx, plUInt32 uiFirst, plUInt32 uiEnd)
+      {
+        plGALCommandEncoder* pEncoder = ctx.GetCommandEncoder();
+        const plGALTextureHandle hVelocityGAL = ctx.ResolveTexture(hVelocityNext);
+        const plGALTextureHandle hCurlGAL = ctx.ResolveTexture(hCurlTarget);
+        const plGALTextureHandle hScalarGAL = ctx.ResolveTexture(hScalar0);
+
+        plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
+        bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalarAdvected));
+        bindGroup.BindTexture("GpuFluidScalarOut", hScalarGAL);
+        bindGroup.BindTexture("GpuFluidScalarTarget", hScalarGAL);
+        bindGroup.BindTexture("GpuFluidVelocityTarget", hVelocityGAL);
+        bindGroup.BindTexture("GpuFluidScratch", hCurlGAL);
+        bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
+        bindGroup.BindBuffer("GpuFluidSolidFlags", ctx.ResolveBuffer(res.m_hSolidFlags));
+        bindGroup.BindBuffer("GpuFluidSolidShapes", ctx.ResolveBuffer(res.m_hSolidShapes));
+
+        for (plUInt32 i = uiFirst; i < uiEnd; ++i)
         {
-          plGALCommandEncoder* pEncoder = ctx.GetCommandEncoder();
-          const plGALTextureHandle hVelocityGAL = ctx.ResolveTexture(hVelocityNext);
-          const plGALTextureHandle hScratchGAL = ctx.ResolveTexture(hScratch);
-          const plGALTextureHandle hScalarGAL = ctx.ResolveTexture(hScalar0);
-
-          plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
-          bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalar1));
-          bindGroup.BindTexture("GpuFluidScalarOut", hScalarGAL);
-          bindGroup.BindTexture("GpuFluidScalarTarget", hScalarGAL);
-          bindGroup.BindTexture("GpuFluidVelocityTarget", hVelocityGAL);
-          bindGroup.BindTexture("GpuFluidScratch", hScratchGAL);
-          bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
-          bindGroup.BindBuffer("GpuFluidSolidFlags", ctx.ResolveBuffer(res.m_hSolidFlags));
-          bindGroup.BindBuffer("GpuFluidSolidShapes", ctx.ResolveBuffer(res.m_hSolidShapes));
-
-          if (bVorticity)
+          if (i > uiFirst)
           {
-            // The curl needs the next velocity's apron (the advection wrote interiors only).
-            bindGroup.BindTexture("GpuFluidHaloTarget", hVelocityGAL);
-            DispatchPerBrick(ctx, gridGraph, hHalo, velocityHalo);
             UavBarrier(pEncoder, hVelocityGAL);
-            DispatchPerBrick(ctx, gridGraph, hCurl, base);
-            UavBarrier(pEncoder, hScratchGAL);
-            bindGroup.BindTexture("GpuFluidHaloTarget", hScratchGAL);
-            DispatchPerBrick(ctx, gridGraph, hHalo, copyHalo);
-            UavBarrier(pEncoder, hScratchGAL);
+            UavBarrier(pEncoder, hCurlGAL);
+            UavBarrier(pEncoder, hScalarGAL);
           }
 
-          DispatchPerBrick(ctx, gridGraph, hForces, forces);
-          UavBarrier(pEncoder, hVelocityGAL);
-          UavBarrier(pEncoder, hScalarGAL);
+          switch (steps[i])
+          {
+            case Curl:
+              // Read through a read-only view: the pass holds the velocity for writing, so it changes state around it.
+              pEncoder->TextureBarrier(hVelocityGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::ComputeShaderRead);
+              bindGroup.BindTexture("GpuFluidVelocityIn", hVelocityGAL);
+              DispatchPerBrickSlabs(ctx, gridGraph, hCurl, base);
+              pEncoder->TextureBarrier(hVelocityGAL, plGALResourceState::ComputeShaderRead, plGALResourceState::UnorderedAccessWrite);
+              break;
+            case CurlHalo:
+              bindGroup.BindTexture("GpuFluidHaloTarget", hCurlGAL);
+              bindGroup.BindTexture("GpuFluidHaloTarget2", hCurlGAL);
+              DispatchPerBrick(ctx, gridGraph, hHalo, copyHalo);
+              break;
+            case Forces:
+              // The curl through a read-only view as well.
+              pEncoder->TextureBarrier(hCurlGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::ComputeShaderRead);
+              bindGroup.BindTexture("GpuFluidCurl", hCurlGAL);
+              DispatchPerBrick(ctx, gridGraph, hForces, forces);
+              pEncoder->TextureBarrier(hCurlGAL, plGALResourceState::ComputeShaderRead, plGALResourceState::UnorderedAccessWrite);
+              break;
+            case Solids:
+              DispatchPerBrick(ctx, gridGraph, hSolids, solids);
+              break;
+            case VelocityHalo:
+              bindGroup.BindTexture("GpuFluidHaloTarget", hVelocityGAL);
+              bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocityGAL);
+              DispatchPerBrick(ctx, gridGraph, hHalo, velocityHalo);
+              break;
+          }
+        }
+      };
 
-          DispatchPerBrick(ctx, gridGraph, hSolids, solids);
-          UavBarrier(pEncoder, hVelocityGAL);
-
-          bindGroup.BindTexture("GpuFluidHaloTarget", hVelocityGAL);
-          DispatchPerBrick(ctx, gridGraph, hHalo, velocityHalo);
-        });
+      const bool bProfile = sim.m_bProfileKernels;
+      for (plUInt32 uiPass = 0; uiPass < (bProfile ? steps.GetCount() : 1u); ++uiPass)
+      {
+        auto pass = ref_graph.AddComputePass(bProfile ? s_szForcesSteps[steps[uiPass]] : "Gas/Forces");
+        plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
+        pass.ReadTexture(hScalarAdvected, {}, plGALResourceState::ComputeShaderRead);
+        pass.ReadBuffer(res.m_hSolidShapes, plGALResourceState::ComputeShaderRead);
+        pass.WriteTexture(hScalar0);
+        pass.WriteTexture(hVelocityNext);
+        pass.WriteTexture(hCurlTarget);
+        pass.WriteBuffer(res.m_hSolidFlags);
+        pass.WriteBuffer(hStats);
+        pass.HasSideEffects();
+        const plUInt32 uiFirst = bProfile ? uiPass : 0u;
+        const plUInt32 uiEnd = bProfile ? uiPass + 1 : steps.GetCount();
+        pass.SetExecuteCallback([=](const plRenderGraphContext& ctx) { RecordForces(ctx, uiFirst, uiEnd); });
+      }
     }
 
     // Gas/Pressure: the operator, divergence, the solver, projection, the velocity's apron.
@@ -1093,7 +1248,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
       }
     }
 
-    m_uiVelocitySide ^= 1;
+    m_uiVelocitySide = uiVelocityNext;
   }
 
   // Gas/Finalize, once per frame.
@@ -1103,7 +1258,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
     const plRenderGraphBufferHandle hFaceCodes = res.m_hFaceCodes;
 
     plGpuFluidGasConstants finalize = MakeConstants(grid, sim, sim.m_fTime + sim.m_uiTicks * sim.m_fTickSeconds);
-    finalize.GpuFluidGasParams0 = plVec4(sim.m_fAllocThreshold, sim.m_fMeanFloor, 0.0f, 0.0f);
+    finalize.GpuFluidGasParams0 = plVec4(sim.m_fAllocThreshold, sim.m_fMeanFloor, sim.m_fAllocLookahead, static_cast<float>(grid.GetRequestWords()));
 
     auto pass = ref_graph.AddComputePass("Gas/Finalize");
     plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
@@ -1112,6 +1267,8 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
     pass.WriteTexture(gridGraph.m_hIndirection);
     pass.WriteBuffer(hStats);
     pass.WriteBuffer(hFaceCodes);
+    pass.WriteBuffer(gridGraph.m_hRequests);
+    pass.WriteBuffer(gridGraph.m_hBrickMeta);
     pass.HasSideEffects();
     pass.SetExecuteCallback([=, hShader = m_hFinalizeShader](const plRenderGraphContext& ctx)
       {
@@ -1121,6 +1278,8 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         bindGroup.BindTexture("GpuFluidIndirectionOutput", ctx.ResolveTexture(gridGraph.m_hIndirection));
         bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
         bindGroup.BindBuffer("GpuFluidFaceCodes", ctx.ResolveBuffer(hFaceCodes));
+        bindGroup.BindBuffer("GpuFluidRequests", ctx.ResolveBuffer(gridGraph.m_hRequests));
+        bindGroup.BindBuffer("GpuFluidBrickMeta", ctx.ResolveBuffer(gridGraph.m_hBrickMeta));
         DispatchPerBrick(ctx, gridGraph, hShader, finalize);
       });
   }

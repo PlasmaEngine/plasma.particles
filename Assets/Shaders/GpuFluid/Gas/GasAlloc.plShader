@@ -10,23 +10,51 @@ ALL
 #define GPU_FLUID_SPARSE_WRITABLE
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
-// Phase Gas/Alloc of a gas volume. Three modes (GpuFluidGasPass.x), one dispatch each, in this order:
+// Phase Gas/Alloc of a gas volume: the sparse allocator (design plan section 3). Once per frame that runs ticks, before
+// them; the modes run in this order (GpuFluidGasPass.x), the two scans (GpuFluidScan) in between:
 //
-// 0 Reset:   zeroes the grid counters. One group.
-// 1 Assign:  gives every virtual brick a pool slot (P1: the whole box, slot = linear brick index, so the result does
-//            not depend on group order), fills the page table, the slot -> brick map and the brick table's RGB.
-//            Bricks beyond the pool capacity stay unallocated and count as denied. One thread per virtual brick.
-//            P2 replaces this mode with the mark / scan / assign allocator; modes 0 and 2 stay.
-// 2 Lists:   compacts the active list, rebuilds the 27-entry neighbour table of every active slot, and writes the
-//            dispatch arguments (one group per active brick, folded into 2D); sorts the active bricks into the brick
-//            colour list (colour 0 from the front, colour 1 from the back; the order inside a colour does not matter,
-//            no kernel depends on it). One thread per pool slot.
-// 3 Colours: the two colour lists' dispatch arguments. One thread.
+//  0 INIT          once, when the volume is created: no brick has a slot, every pool slot is free, the brick table, the
+//                  requests and the per-slot meta are zero. One thread per item of the largest of those.
+//  1 RESET         the grid counters to 0. One group.
+//  2 MARK_EMITTERS bucket 0 for the CPU-binned bricks the sources overlap this frame. One thread per list entry.
+//  3 MARK_ALL      bucket 0 for every brick of the grid (AllocateAll: the closed-box mode keeps the whole box). One thread
+//                  per request word.
+//  4 FREE          every slot with a brick: no request in any bucket this frame adds one to its idle steps, any request
+//                  resets them; at GPU_FLUID_FREE_IDLE_STEPS the slot is freed (page entry, brick table texel, meta).
+//                  Writes 1 for every slot that is free afterwards into the slot scan. One thread per pool slot.
+//  5 PENDING       the requests for bricks without a slot, each in the first bucket that asked for it, and their count
+//                  per word (the request scan's input); clears the requests for the next Finalize. One thread per
+//                  request word.
+//    [scan of the free flags -> free rank per slot, total F; scan of the pending counts -> first rank per word, total R]
+//  6 FREE_LIST     the free slots in ascending order: free list[rank] = slot. One thread per pool slot.
+//  7 ASSIGN        request k (bucket order, then virtual index) takes free slot k while k < F, else it is denied (counted
+//                  per bucket). A new slot gets its page entry, brick, meta and brick table texel (A = 0), and goes on the
+//                  new list, which GasClear clears. One thread per bucket word.
+//  8 LISTS         the active list in ascending slot order (rank from the free scan: no atomics, so it does not depend on
+//                  group order), the 27-entry neighbour table and the brick colour lists. One thread per pool slot.
+//  9 ARGS          dispatch arguments (every active brick, the same in slabs, the new list; the colours), and the frame's
+//                  allocation numbers into the stats. One thread.
+// 10 DEBUG         the grid debug readback (N1, the brick view): counters, per slot brick and meta, the active list and,
+//                  when Params0.z is 1, per virtual brick the page entry and the brick table's A. One thread per item.
+//
+// Every count is an integer atomic and every slot choice comes from a scan, so the allocation is the same whatever order
+// the groups run in, and the same for every pool size while the pool has room (N11).
+//
+// Pass: y request words per bucket, z emitter list entries, w unused.   Params0: x byte offset of the free total in the
+// slot scan's scratch, y byte offset of the request total in the request scan's scratch, z 1: the debug readback's
+// virtual part.
 
-#define GPU_FLUID_ALLOC_RESET 0
-#define GPU_FLUID_ALLOC_ASSIGN 1
-#define GPU_FLUID_ALLOC_LISTS 2
-#define GPU_FLUID_ALLOC_COLOURS 3
+#define GPU_FLUID_ALLOC_INIT 0
+#define GPU_FLUID_ALLOC_RESET 1
+#define GPU_FLUID_ALLOC_MARK_EMITTERS 2
+#define GPU_FLUID_ALLOC_MARK_ALL 3
+#define GPU_FLUID_ALLOC_FREE 4
+#define GPU_FLUID_ALLOC_PENDING 5
+#define GPU_FLUID_ALLOC_FREE_LIST 6
+#define GPU_FLUID_ALLOC_ASSIGN 7
+#define GPU_FLUID_ALLOC_LISTS 8
+#define GPU_FLUID_ALLOC_ARGS 9
+#define GPU_FLUID_ALLOC_DEBUG 10
 
 RWStructuredBuffer<uint> GpuFluidPageTableOutput;
 RWStructuredBuffer<uint> GpuFluidActiveListOutput;
@@ -36,25 +64,86 @@ RWStructuredBuffer<uint> GpuFluidCountersOutput;
 RWStructuredBuffer<uint> GpuFluidDispatchArgsOutput;
 RWStructuredBuffer<uint> GpuFluidColourListOutput;
 RWStructuredBuffer<uint> GpuFluidColourArgsOutput;
+RWTexture3D<float4> GpuFluidIndirectionOutput; // RGBA16F: rgb = atlas brick / 255, a = brick mean (0 = empty)
 
-void WriteArgs(RWStructuredBuffer<uint> args, uint first, uint count)
+RWByteAddressBuffer GpuFluidRequests;          // 4 buckets of request words
+RWStructuredBuffer<uint> GpuFluidPending;      // 4 buckets of request words for bricks without a slot
+RWByteAddressBuffer GpuFluidRequestScan;       // per bucket word: pending count, scanned in place to the first rank
+RWByteAddressBuffer GpuFluidRequestScratch;    // the request scan's block sums and total
+RWByteAddressBuffer GpuFluidSlotScan;          // per pool slot: 1 when free, scanned in place to the free rank
+RWByteAddressBuffer GpuFluidSlotScratch;       // the slot scan's block sums and total
+RWStructuredBuffer<uint> GpuFluidFreeList;     // rank -> free slot
+RWStructuredBuffer<uint> GpuFluidNewList;      // slots assigned this frame
+RWStructuredBuffer<uint> GpuFluidBrickMeta;    // 4 words per slot (GPU_FLUID_META_*)
+StructuredBuffer<uint> GpuFluidEmitterBricks;  // linear virtual bricks the sources overlap
+RWByteAddressBuffer GpuFluidStats;
+RWStructuredBuffer<uint> GpuFluidGridDebug;
+
+void WriteArgs(uint first, uint count, uint z)
 {
   const uint groupsX = min(count, (uint)GPU_FLUID_DISPATCH_FOLD);
   const uint groupsY = (count + GPU_FLUID_DISPATCH_FOLD - 1) / GPU_FLUID_DISPATCH_FOLD;
-  args[first + 0] = max(groupsX, 1u);
-  args[first + 1] = max(groupsY, 1u);
-  args[first + 2] = 1;
-  args[first + 3] = count;
+  GpuFluidDispatchArgsOutput[first + 0] = max(groupsX, 1u);
+  GpuFluidDispatchArgsOutput[first + 1] = max(groupsY, 1u);
+  GpuFluidDispatchArgsOutput[first + 2] = z;
+  GpuFluidDispatchArgsOutput[first + 3] = count;
 }
-RWTexture3D<float4> GpuFluidIndirectionOutput; // RGBA16F: rgb = atlas brick / 255, a = brick mean (0 = empty)
+
+void WriteColourArgs(uint first, uint count)
+{
+  const uint groupsX = min(count, (uint)GPU_FLUID_DISPATCH_FOLD);
+  const uint groupsY = (count + GPU_FLUID_DISPATCH_FOLD - 1) / GPU_FLUID_DISPATCH_FOLD;
+  GpuFluidColourArgsOutput[first + 0] = max(groupsX, 1u);
+  GpuFluidColourArgsOutput[first + 1] = max(groupsY, 1u);
+  GpuFluidColourArgsOutput[first + 2] = 1;
+  GpuFluidColourArgsOutput[first + 3] = count;
+}
+
+uint3 BrickOfLinear(uint index, uint3 grid)
+{
+  return uint3(index % grid.x, (index / grid.x) % grid.y, index / (grid.x * grid.y));
+}
+
+bool IsRequested(uint bucket, uint brickLinear, uint words)
+{
+  const uint word = GpuFluidRequests.Load((bucket * words + (brickLinear >> 5)) * 4);
+  return (word & (1u << (brickLinear & 31u))) != 0;
+}
 
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
-  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
+  const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const uint mode = pass.x;
+  const uint words = pass.y;
   const uint3 grid = GpuFluidGrid();
+  const uint virtualBricks = grid.x * grid.y * grid.z;
   const uint capacity = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasGrid).w;
   const uint index = dispatchThreadId.x;
+
+  if (mode == GPU_FLUID_ALLOC_INIT)
+  {
+    if (index < virtualBricks)
+    {
+      GpuFluidPageTableOutput[index] = GPU_FLUID_INVALID_SLOT;
+      GpuFluidIndirectionOutput[BrickOfLinear(index, grid)] = float4(0.0, 0.0, 0.0, 0.0);
+    }
+    if (index < capacity)
+    {
+      GpuFluidBrickCoordsOutput[index] = GPU_FLUID_INVALID_SLOT;
+      GpuFluidActiveListOutput[index] = GPU_FLUID_INVALID_SLOT;
+      [unroll] for (uint i = 0; i < 4; ++i)
+        GpuFluidBrickMeta[index * 4 + i] = 0;
+    }
+    if (index < GPU_FLUID_ALLOC_BUCKETS * words)
+      GpuFluidRequests.Store(index * 4, 0u);
+    if (index < GPU_FLUID_ARGS_TOTAL_WORDS)
+      GpuFluidDispatchArgsOutput[index] = (index % GPU_FLUID_ARGS_WORDS) == 3 ? 0u : 1u;
+    if (index < 2 * GPU_FLUID_ARGS_WORDS)
+      GpuFluidColourArgsOutput[index] = (index % GPU_FLUID_ARGS_WORDS) == 3 ? 0u : 1u;
+    return;
+  }
 
   if (mode == GPU_FLUID_ALLOC_RESET)
   {
@@ -63,70 +152,199 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     return;
   }
 
-  if (mode == GPU_FLUID_ALLOC_ASSIGN)
+  if (mode == GPU_FLUID_ALLOC_MARK_EMITTERS)
   {
-    const uint brickCount = grid.x * grid.y * grid.z;
-    if (index >= brickCount)
+    if (index >= pass.z)
+      return;
+    const uint brickLinear = GpuFluidEmitterBricks[index];
+    if (brickLinear >= virtualBricks)
+      return;
+    uint previous;
+    GpuFluidRequests.InterlockedOr((GPU_FLUID_BUCKET_EMITTER * words + (brickLinear >> 5)) * 4, 1u << (brickLinear & 31u), previous);
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_MARK_ALL)
+  {
+    if (index >= words)
+      return;
+    const uint first = index * 32;
+    const uint valid = virtualBricks > first ? min(virtualBricks - first, 32u) : 0u;
+    const uint bits = valid >= 32 ? 0xFFFFFFFFu : ((1u << valid) - 1u);
+    uint previous;
+    GpuFluidRequests.InterlockedOr((GPU_FLUID_BUCKET_EMITTER * words + index) * 4, bits, previous);
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_FREE)
+  {
+    if (index >= capacity)
       return;
 
-    const uint3 brick = uint3(index % grid.x, (index / grid.x) % grid.y, index / (grid.x * grid.y));
-
-    if (index < capacity)
+    const uint packed = GpuFluidBrickCoordsOutput[index];
+    if (packed == GPU_FLUID_INVALID_SLOT)
     {
-      const uint slot = index;
-      GpuFluidPageTableOutput[index] = slot;
-      GpuFluidBrickCoordsOutput[slot] = GpuFluidPackBrick(brick);
-
-      // A stays 0 until Finalize has seen content: an empty brick is skipped by the march.
-      GpuFluidIndirectionOutput[brick] = float4(float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks())) / 255.0, 0.0);
-
-      uint previous;
-      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE], 1u, previous);
+      GpuFluidSlotScan.Store(index * 4, 1u);
+      return;
     }
-    else
+
+    const uint3 brick = GpuFluidUnpackBrick(packed);
+    const uint brickLinear = GpuFluidBrickLinear(brick, grid);
+
+    uint buckets = 0;
+    [unroll] for (uint b = 0; b < GPU_FLUID_ALLOC_BUCKETS; ++b)
     {
-      GpuFluidPageTableOutput[index] = GPU_FLUID_INVALID_SLOT;
+      if (IsRequested(b, brickLinear, words))
+        buckets |= 1u << b;
+    }
+
+    const uint idle = buckets != 0 ? 0u : GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_IDLE] + 1;
+    if (idle >= GPU_FLUID_FREE_IDLE_STEPS)
+    {
+      GpuFluidPageTableOutput[brickLinear] = GPU_FLUID_INVALID_SLOT;
+      GpuFluidBrickCoordsOutput[index] = GPU_FLUID_INVALID_SLOT;
       GpuFluidIndirectionOutput[brick] = float4(0.0, 0.0, 0.0, 0.0);
+      [unroll] for (uint i = 0; i < 4; ++i)
+        GpuFluidBrickMeta[index * 4 + i] = 0;
+      GpuFluidSlotScan.Store(index * 4, 1u);
 
       uint previous;
-      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED], 1u, previous);
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREED], 1u, previous);
+      return;
+    }
+
+    GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_IDLE] = idle;
+    GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_BUCKETS] = buckets;
+    GpuFluidSlotScan.Store(index * 4, 0u);
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_PENDING)
+  {
+    if (index >= words)
+      return;
+
+    uint bits[GPU_FLUID_ALLOC_BUCKETS];
+    uint any = 0;
+    [unroll] for (uint b = 0; b < GPU_FLUID_ALLOC_BUCKETS; ++b)
+    {
+      bits[b] = GpuFluidRequests.Load((b * words + index) * 4);
+      any |= bits[b];
+      GpuFluidRequests.Store((b * words + index) * 4, 0u);
+    }
+
+    // Which of the requested bricks have no slot yet.
+    uint unallocated = 0;
+    uint scan = any;
+    while (scan != 0)
+    {
+      const uint bit = firstbitlow(scan);
+      scan &= scan - 1u;
+      const uint brickLinear = index * 32 + bit;
+      if (brickLinear < virtualBricks && GpuFluidPageTableOutput[brickLinear] == GPU_FLUID_INVALID_SLOT)
+        unallocated |= 1u << bit;
+    }
+
+    uint seen = 0;
+    [unroll] for (uint b2 = 0; b2 < GPU_FLUID_ALLOC_BUCKETS; ++b2)
+    {
+      const uint pending = bits[b2] & ~seen & unallocated;
+      seen |= bits[b2];
+      GpuFluidPending[b2 * words + index] = pending;
+      GpuFluidRequestScan.Store((b2 * words + index) * 4, countbits(pending));
     }
     return;
   }
 
-  if (mode == GPU_FLUID_ALLOC_COLOURS)
+  const uint freeTotal = GpuFluidSlotScratch.Load(uint(params.x));
+  const uint requestTotal = GpuFluidRequestScratch.Load(uint(params.y));
+  const uint assigned = min(freeTotal, requestTotal);
+
+  if (mode == GPU_FLUID_ALLOC_FREE_LIST)
   {
-    if (index == 0)
+    if (index < capacity && GpuFluidBrickCoordsOutput[index] == GPU_FLUID_INVALID_SLOT)
+      GpuFluidFreeList[GpuFluidSlotScan.Load(index * 4)] = index;
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_ASSIGN)
+  {
+    if (index >= GPU_FLUID_ALLOC_BUCKETS * words)
+      return;
+
+    uint bits = GpuFluidPending[index];
+    if (bits == 0)
+      return;
+
+    const uint bucket = index / words;
+    const uint word = index % words;
+    uint rank = GpuFluidRequestScan.Load(index * 4);
+    uint denied = 0;
+
+    while (bits != 0)
     {
-      WriteArgs(GpuFluidColourArgsOutput, 0, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR0]);
-      WriteArgs(GpuFluidColourArgsOutput, GPU_FLUID_ARGS_WORDS, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR1]);
+      const uint bit = firstbitlow(bits);
+      bits &= bits - 1u;
+      const uint brickLinear = word * 32 + bit;
+
+      if (rank < freeTotal)
+      {
+        const uint slot = GpuFluidFreeList[rank];
+        const uint3 brick = BrickOfLinear(brickLinear, grid);
+        GpuFluidPageTableOutput[brickLinear] = slot;
+        GpuFluidBrickCoordsOutput[slot] = GpuFluidPackBrick(brick);
+        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_IDLE] = 0;
+        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_ALIVE] = 0;
+        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASK] = 0;
+        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_BUCKETS] = 1u << bucket;
+        // A stays 0 until Finalize has seen content: an empty brick is skipped by the march.
+        GpuFluidIndirectionOutput[brick] = float4(float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks())) / 255.0, 0.0);
+
+        uint position;
+        InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_NEW], 1u, position);
+        GpuFluidNewList[position] = slot;
+      }
+      else
+      {
+        ++denied;
+      }
+      ++rank;
+    }
+
+    if (denied > 0)
+    {
+      uint previous;
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED], denied, previous);
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED_BUCKET + bucket], denied, previous);
     }
     return;
   }
 
   if (mode == GPU_FLUID_ALLOC_LISTS)
   {
-    const uint activeCount = GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE];
-
-    if (index == 0)
-      WriteArgs(GpuFluidDispatchArgsOutput, 0, activeCount);
-
-    if (index >= activeCount)
+    if (index >= capacity)
       return;
 
-    // P1 assigns slot = brick index to the first `capacity` bricks, so the active list is the identity.
-    const uint slot = index;
-    GpuFluidActiveListOutput[index] = slot;
+    const uint packed = GpuFluidBrickCoordsOutput[index];
+    if (packed == GPU_FLUID_INVALID_SLOT)
+      return;
 
-    const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoordsOutput[slot]));
+    // Slots below this one that hold a brick now: the ones that already did, plus the free ones that were assigned
+    // (assignment takes the free slots in ascending order).
+    const uint freeBefore = GpuFluidSlotScan.Load(index * 4);
+    const uint rank = (index - freeBefore) + min(freeBefore, assigned);
+    GpuFluidActiveListOutput[rank] = index;
 
-    // The brick colour lists.
+    const int3 brick = int3(GpuFluidUnpackBrick(packed));
+
+    // The brick colour lists (the order inside a colour does not matter, no kernel depends on it).
     {
       const uint colour = uint(brick.x + brick.y + brick.z) & 1u;
       uint position;
       InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR0 + colour], 1u, position);
-      GpuFluidColourListOutput[colour == 0 ? position : capacity - 1 - position] = slot;
+      GpuFluidColourListOutput[colour == 0 ? position : capacity - 1 - position] = index;
     }
+
     for (int n = 0; n < GPU_FLUID_NEIGHBOR_COUNT; ++n)
     {
       const int3 d = int3(n % 3, (n / 3) % 3, n / 9) - 1;
@@ -141,7 +359,60 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         value = otherSlot == GPU_FLUID_INVALID_SLOT ? GPU_FLUID_NEIGHBOR_UNALLOCATED : otherSlot;
       }
 
-      GpuFluidNeighborsOutput[slot * GPU_FLUID_NEIGHBOR_COUNT + n] = value;
+      GpuFluidNeighborsOutput[index * GPU_FLUID_NEIGHBOR_COUNT + n] = value;
     }
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_ARGS)
+  {
+    if (index != 0)
+      return;
+
+    const uint active = (capacity - freeTotal) + assigned;
+    GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE] = active;
+    WriteArgs(GPU_FLUID_ARGS_ACTIVE, active, 1);
+    WriteArgs(GPU_FLUID_ARGS_SLABS, active, GPU_FLUID_SLABS);
+    WriteArgs(GPU_FLUID_ARGS_NEW, assigned, 1);
+    WriteColourArgs(0, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR0]);
+    WriteColourArgs(GPU_FLUID_ARGS_WORDS, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR1]);
+
+    GpuFluidStats.Store(GPU_FLUID_STAT_SLOTS_REQUESTED * 4, requestTotal + (capacity - freeTotal));
+    GpuFluidStats.Store(GPU_FLUID_STAT_DENIED * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED]);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_NEW * 4, assigned);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_FREED * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREED]);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_FREE * 4, freeTotal);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_REQUESTS * 4, requestTotal);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_ACTIVE * 4, active);
+    [unroll] for (uint b = 0; b < GPU_FLUID_ALLOC_BUCKETS; ++b)
+      GpuFluidStats.Store((GPU_FLUID_STAT_DENIED_BUCKET + b) * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED_BUCKET + b]);
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_DEBUG)
+  {
+    if (index < GPU_FLUID_COUNTER_WORDS)
+      GpuFluidGridDebug[index] = GpuFluidCountersOutput[index];
+
+    const uint slotPart = GPU_FLUID_COUNTER_WORDS;
+    const uint listPart = slotPart + capacity * GPU_FLUID_DEBUG_SLOT_WORDS;
+    const uint virtualPart = listPart + capacity;
+
+    if (index < capacity)
+    {
+      GpuFluidGridDebug[slotPart + index * GPU_FLUID_DEBUG_SLOT_WORDS + 0] = GpuFluidBrickCoordsOutput[index];
+      [unroll] for (uint i = 0; i < 4; ++i)
+        GpuFluidGridDebug[slotPart + index * GPU_FLUID_DEBUG_SLOT_WORDS + 1 + i] = GpuFluidBrickMeta[index * 4 + i];
+
+      const uint active = GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE];
+      GpuFluidGridDebug[listPart + index] = index < active ? GpuFluidActiveListOutput[index] : GPU_FLUID_INVALID_SLOT;
+    }
+
+    if (params.z > 0.5 && index < virtualBricks)
+    {
+      GpuFluidGridDebug[virtualPart + index * 2 + 0] = GpuFluidPageTableOutput[index];
+      GpuFluidGridDebug[virtualPart + index * 2 + 1] = asuint(GpuFluidIndirectionOutput[BrickOfLinear(index, grid)].a);
+    }
+    return;
   }
 }

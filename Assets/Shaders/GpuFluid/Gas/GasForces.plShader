@@ -33,7 +33,7 @@ ALL
 Texture3D<float4> GpuFluidScalarIn;         // advected scalars, apron filled
 RWTexture3D<float4> GpuFluidScalarOut;      // the current side, all 10 cubed texels
 RWTexture3D<float4> GpuFluidVelocityTarget; // the next velocity side, interior faces in place
-RWTexture3D<float4> GpuFluidScratch;        // only read here: the curl (GasCurl, apron filled) when vorticity is on
+Texture3D<float4> GpuFluidCurl;             // the curl (GasCurl, apron filled) when vorticity is on
 RWByteAddressBuffer GpuFluidStats;
 
 /// The vorticity confinement acceleration on this texel's three -side faces (m/s^2): eps dx k (N x w), with N the unit
@@ -50,8 +50,8 @@ float3 Confinement(int3 texel, float epsilon, float dx, float rate)
   {
     int3 belowTexel = texel;
     belowTexel[axis] -= 1;
-    const float4 here = GpuFluidScratch[texel];
-    const float4 below = GpuFluidScratch[belowTexel];
+    const float4 here = GpuFluidCurl.Load(int4(texel, 0));
+    const float4 below = GpuFluidCurl.Load(int4(belowTexel, 0));
 
     float3 gradient;
     [unroll] for (uint g = 0; g < 3; ++g)
@@ -64,7 +64,8 @@ float3 Confinement(int3 texel, float epsilon, float dx, float rate)
       {
         int3 e = int3(0, 0, 0);
         e[g] = 1;
-        gradient[g] = 0.25 * (GpuFluidScratch[texel + e].w - GpuFluidScratch[texel - e].w + GpuFluidScratch[belowTexel + e].w - GpuFluidScratch[belowTexel - e].w);
+        gradient[g] = 0.25 * (GpuFluidCurl.Load(int4(texel + e, 0)).w - GpuFluidCurl.Load(int4(texel - e, 0)).w + GpuFluidCurl.Load(int4(belowTexel + e, 0)).w -
+                               GpuFluidCurl.Load(int4(belowTexel - e, 0)).w);
       }
     }
 

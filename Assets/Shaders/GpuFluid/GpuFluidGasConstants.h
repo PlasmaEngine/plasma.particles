@@ -11,12 +11,17 @@
 #define GPU_FLUID_EMITTER_SPHERE 0
 #define GPU_FLUID_EMITTER_BOX 1
 
-// GasAdvect modes.
-#define GPU_FLUID_ADVECT_SEMI_LAGRANGIAN 0
-#define GPU_FLUID_ADVECT_REVERSE 1          // scalars: MacCormack reverse trace into Scratch
-#define GPU_FLUID_ADVECT_CORRECT 2          // scalars: MacCormack limited correction
-#define GPU_FLUID_ADVECT_VELOCITY_REVERSE 3 // velocity: MacCormack reverse trace of every MAC component into Scratch.xyz
-#define GPU_FLUID_ADVECT_VELOCITY_CORRECT 4 // velocity: MacCormack limited correction, each component clamped to its 8 source texels
+// GasAdvect modes (Pass.x) and the fields a launch advects (Pass.w bits).
+#define GPU_FLUID_ADVECT_SEMI_LAGRANGIAN 0 // In -> Out, RK2 backtrace
+#define GPU_FLUID_ADVECT_MACCORMACK 1      // the limited correction of SL (the semi-Lagrangian sides) -> Out, reverse trace included
+#define GPU_FLUID_ADVECT_FIELD_SCALARS 1
+#define GPU_FLUID_ADVECT_FIELD_VELOCITY 2
+
+// Per-brick kernels that use no groupshared memory run as GPU_FLUID_SLABS groups of 8 x 8 x (8 / slabs) threads per brick
+// (the z of the slab dispatch arguments, GPU_FLUID_ARGS_SLABS), which keeps more groups resident than one 512 thread
+// group per brick.
+#define GPU_FLUID_SLABS 4
+#define GPU_FLUID_ADVECT_SLABS GPU_FLUID_SLABS
 
 // Pressure solvers (GpuFluid.Gas.PressureSolver).
 #define GPU_FLUID_PRESSURE_RBSOR 0
