@@ -44,3 +44,16 @@ Source: `fable-eval-1.json`. Scores: G1 1, G2 3.5, G3 3, G4 2, G5 1.5; about 2.5
    - E4: smoke shadows onto opaque surfaces.
    - Plume-top streaking: check the velocity advection on the open top face; MacCormack velocity on Medium+.
    - Fix AO brick seams in the march instead of overriding CVars per test.
+
+## A2: performance pass (user, 2026-11-14)
+The user asked for a large performance pass to make GpuFluid game ready, ahead of the remaining feature phases. Research: `PerfResearch.md`.
+1. **Order:**
+   - an idle-GPU baseline and one GPU capture;
+   - gas pressure dispatch and barrier reduction;
+   - one velocity fetch per RK stage in advection;
+   - liquid P2G as a groupshared scatter with integer atomics and a per-cell cap;
+   - liquid CFL 3 and less particle data moved by the sort.
+   Each step is gated by Release Tier Timing, with a CSV committed and a before/after clip.
+2. **Gas:** Medium and Low run velocity and pressure at half the density resolution (the Flow approach). High and Ultra keep full resolution. This comes after the structural fixes, so its own gain is measured.
+3. **Liquid floods:** tall cells plus narrow-band FLIP, so cost follows the surface rather than the water volume. Full 3D behaviour is kept; no shallow-water layer.
+4. Timings only on an idle GPU (the editor closed).
