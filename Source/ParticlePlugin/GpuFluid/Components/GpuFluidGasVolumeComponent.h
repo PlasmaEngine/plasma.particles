@@ -13,11 +13,13 @@ using plGpuFluidGasVolumeComponentManager = plComponentManagerSimple<class plGpu
 /// \brief A box of simulated gas, rendered by the VDB march straight from the GPU.
 ///
 /// The volume is a sparse grid of 8 cubed bricks fixed in the object's space: Extents over VoxelSize, rounded up to
-/// whole bricks. Its atlas and brick table live on the GPU and are handed to the march every frame as
+/// whole bricks. Its atlases and brick table live on the GPU and are handed to the march every frame as
 /// plVDBVolumeGpuRenderData, with no resource and no copy in between.
 ///
-/// P0: there is no solver yet. The content comes from the analytic debug source, a sphere of density and temperature
-/// that can pulse, which is what checks the hand-off against a baked volume.
+/// The gas solver (plGpuFluidGasSolver) steps at a fixed tick of 1/60 s, at most two ticks a frame, with buoyancy
+/// against the physics world's gravity (or -Z without physics). P1 allocates every brick of the box (up to MaxBricks);
+/// the volume's own source (Emitter*) feeds it. The analytic debug source replaces the simulation with a known sphere,
+/// which checks the hand-off against a baked volume.
 class PL_PARTICLEPLUGIN_DLL plGpuFluidGasVolumeComponent final : public plComponent
 {
   PL_DECLARE_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, plComponent, plGpuFluidGasVolumeComponentManager);
@@ -43,8 +45,31 @@ public:
   /// Authored size of the box, in metres. The grid rounds it up to whole bricks.
   plVec3 m_vExtents = plVec3(4.0f);                                   // [ property ]
   float m_fVoxelSize = 0.0625f;                                       // [ property ] metres
-  plUInt32 m_uiMaxBricks = 512;                                       // [ property ] atlas pool
+  plUInt32 m_uiMaxBricks = 1536;                                      // [ property ] atlas pool (Medium)
   plEnum<plGpuFluidQuality> m_Quality;                                // [ property ]
+  plBitflags<plGpuFluidFaces> m_OpenFaces;                            // [ property ] the rest are walls
+
+  // Simulation
+  float m_fBuoyancy = 6.0f;                                           // [ property ] m/s^2 per unit temperature
+  float m_fDensityWeight = 0.1f;                                      // [ property ] m/s^2 per unit density
+  float m_fCooling = 0.5f;                                            // [ property ] 1/s
+  float m_fDissipation = 0.03f;                                       // [ property ] density, 1/s
+  float m_fVelocityDissipation = 0.0f;                                // [ property ] 1/s
+  float m_fDensityMax = 4.0f;                                         // [ property ] clamp and march majorant
+  plUInt32 m_uiPressureIterations = 40;                               // [ property ] red-black iterations per tick
+  float m_fEdgeFade = 0.75f;                                          // [ property ] metres before an open face over which gas fades
+
+  // The volume's own source.
+  plEnum<plGpuFluidEmitterShape> m_EmitterShape;                      // [ property ]
+  plVec3 m_vEmitterOffset = plVec3(0.0f, 0.0f, -1.4f);                // [ property ] metres, from the box centre
+  float m_fEmitterRadius = 0.5f;                                      // [ property ] metres (sphere)
+  plVec3 m_vEmitterHalfExtents = plVec3(0.4f, 0.4f, 0.2f);            // [ property ] metres (box)
+  float m_fEmitterSoftness = 0.2f;                                    // [ property ] metres from full strength to none
+  float m_fEmissionRate = 5.0f;                                       // [ property ] density per second
+  float m_fEmitterTemperature = 1.0f;                                 // [ property ] 0..1
+  plVec3 m_vEmitterVelocity = plVec3(0.0f, 0.0f, 2.0f);               // [ property ] m/s, volume space
+  float m_fEmitterNoise = 0.9f;                                       // [ property ] 0..1
+  float m_fEmitterNoiseScale = 0.3f;                                  // [ property ] metres, size of the puffs
 
   plEnum<plGpuFluidDebugSource> m_DebugSource;                        // [ property ]
   float m_fSphereRadius = 1.4f;                                       // [ property ] metres
@@ -55,15 +80,24 @@ public:
   float m_fPeakTemperature = 0.8f;                                    // [ property ] 0..1
   float m_fAllocThreshold = 1e-3f;                                    // [ property ] peak density a brick needs to be kept
 
-  float m_fDensityScale = 4.0f;                                       // [ property ]
+  float m_fDensityScale = 12.0f;                                       // [ property ]
   plColor m_Albedo = plColor::White;                                  // [ property ]
   plColor m_EmissionColor = plColor::Black;                           // [ property ]
   float m_fEmissionScale = 0.0f;                                      // [ property ]
   float m_fAnisotropy = 0.2f;                                         // [ property ]
   plEnum<plVDBVolumeRenderMode> m_RenderMode;                         // [ property ]
 
-  /// Sets the pulse clock, so a scene looks the same whatever ran before it.
-  void ResetClock(plTime time = plTime::MakeZero()) { m_PulseTime = time; }
+  /// Sets the pulse clock and the simulation clock, so a scene looks the same whatever ran before it.
+  void ResetClock(plTime time = plTime::MakeZero())
+  {
+    m_PulseTime = time;
+    m_SimAccumulator = plTime::MakeZero();
+    m_SimTime = plTime::MakeZero();
+    m_uiTicksRun = 0;
+  }
+
+  /// Solver ticks requested since the volume was created or the clock reset.
+  plUInt64 GetTicksRun() const { return m_uiTicksRun; }
 
   /// Bricks per axis of the virtual grid.
   plVec3U32 GetBrickGrid() const;
@@ -85,12 +119,20 @@ protected:
 private:
   plGpuFluidGasSettings ComputeSettings() const;
   void EnsureVolume();
+
+  /// Advances the fixed-tick clock by the frame's time and describes the frame's solver work.
+  void FillSimulation(plTime timeDiff, plGpuFluidGasSimulation& out_simulation);
   void ReleaseVolume();
 
   plGpuFluidGpuManager* m_pManager = nullptr;
   plGpuFluidVolumeId m_VolumeId = 0;
   plGpuFluidGasSettings m_ActiveSettings;
   plTime m_PulseTime;
+
+  /// Fixed-tick clock of the solver: unspent time, and the time the next tick starts at.
+  plTime m_SimAccumulator;
+  plTime m_SimTime;
+  plUInt64 m_uiTicksRun = 0;
 
   /// The grid extents the owner's local bounds were last computed from; a change to Extents or VoxelSize refreshes them.
   plVec3 m_vBoundsExtents = plVec3::MakeZero();

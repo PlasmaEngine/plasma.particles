@@ -163,6 +163,8 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Components_GpuFluidGasVolumeComponent);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidGpuManager);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidReadback);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidSparseGrid);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidGasSolver);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_GpuFluidDeclarations);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer);
   PL_STATICLINK_REFERENCE(ParticlePlugin_Initializer_ParticleInitializer_BoxPosition);

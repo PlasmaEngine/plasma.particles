@@ -6,7 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #include <Shaders/Common/Common.h>
-#include <Shaders/GpuFluid/GpuFluidConstants.h>
+#include <Shaders/GpuFluid/GpuFluidAnalyticConstants.h>
 
 // P0 handoff source: an analytic sphere written straight into the sparse VDB layout the march reads, so the GPU path
 // can be checked against a baked volume of the same density before any solver exists.

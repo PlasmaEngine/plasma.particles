@@ -1,0 +1,130 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Forces. One 8 cubed group per active brick (indirect).
+//
+// Scalars, all 10 cubed texels (each texel's change is local, so the apron stays consistent): advected scalars (the
+// temporary side) -> the current side, with cooling T_amb + (T - T_amb) e^(-c dt), density and fuel dissipation, an
+// edge fade near open faces (extra dissipation growing quadratically over the last voxels before the face), the density
+// clamp that keeps the march's majorant true, and a NaN guard.
+//
+// Velocity, interior faces, in place: buoyancy (alpha (T - T_amb) - beta rho) along the direction against gravity, with T
+// and rho averaged onto the face from the two cells it separates (the -side cell comes from the apron), velocity
+// dissipation, the speed clamp, and no flow through closed domain faces on the -side (the +side faces are apron
+// texels, which GasHalo sets).
+//
+// Params: 0 up direction xyz (unit), alpha (m/s^2 per unit temperature)
+//         1 beta (m/s^2 per unit density), ambient temperature, cooling (1/s), density dissipation (1/s)
+//         2 density clamp, velocity dissipation (1/s), fuel dissipation (1/s), edge fade width (voxels, 0 = off)
+//         3 x edge fade rate at the face (1/s)
+
+Texture3D<float4> GpuFluidScalarIn;         // advected scalars, apron filled
+RWTexture3D<float4> GpuFluidScalarOut;      // the current side, all 10 cubed texels
+RWTexture3D<float4> GpuFluidVelocityTarget; // the next velocity side, interior faces in place
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const float4 step = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep);
+  const float4 p0 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const float4 p1 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1);
+  const float4 p2 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams2);
+  const float4 p3 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams3);
+  const float dt = step.x;
+  const float ambientTemperature = p1.y;
+
+  const int3 base = GpuFluidSlotBase(slot);
+
+  // Scalars.
+  {
+    const float coolingFactor = exp(-p1.z * dt);
+    const float densityFactor = exp(-p1.w * dt);
+    const float fuelFactor = exp(-p2.z * dt);
+    const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+    const float3 gridVoxels = float3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
+    const float edgeFadeVoxels = p2.w;
+    const float edgeFadeRate = p3.x;
+
+    for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+    {
+      const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+
+      float4 s = GpuFluidScalarIn[base + stored];
+      if (!GpuFluidIsFinite(s))
+        s = float4(0.0, 0.0, 0.0, 0.0); // counted by Finalize; never let it reach the march
+
+      // Edge fade: gas thins out as it nears an open face, so what leaves the box fades away instead of being cut off
+      // along the box's straight edge.
+      float edgeFactor = 1.0;
+      if (edgeFadeVoxels > 0.0)
+      {
+        const float3 centre = float3(brick * GPU_FLUID_BRICK_SIZE + stored - GPU_FLUID_BRICK_APRON) + 0.5;
+        float nearest = 1e6;
+        [unroll] for (uint axis = 0; axis < 3; ++axis)
+        {
+          if (GpuFluidFaceOpen(axis, -1))
+            nearest = min(nearest, centre[axis]);
+          if (GpuFluidFaceOpen(axis, 1))
+            nearest = min(nearest, gridVoxels[axis] - centre[axis]);
+        }
+        const float inside = 1.0 - saturate(nearest / edgeFadeVoxels);
+        edgeFactor = exp(-edgeFadeRate * inside * inside * dt);
+      }
+
+      s.r = clamp(s.r * densityFactor * edgeFactor, 0.0, p2.x);
+      s.g = saturate(ambientTemperature + (s.g - ambientTemperature) * coolingFactor);
+      s.b = max(s.b * fuelFactor * edgeFactor, 0.0);
+      s.a = max(s.a, 0.0);
+      GpuFluidScalarOut[base + stored] = s;
+    }
+  }
+
+  // Velocity on the three -side faces of this thread's cell.
+  {
+    const int3 local = int3(groupThreadId);
+    const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+    const int3 cell = brick * GPU_FLUID_BRICK_SIZE + local;
+    const int3 texel = base + local + GPU_FLUID_BRICK_APRON;
+
+    const float4 here = GpuFluidScalarIn[texel];
+    const float4 belowX = GpuFluidScalarIn[texel - int3(1, 0, 0)];
+    const float4 belowY = GpuFluidScalarIn[texel - int3(0, 1, 0)];
+    const float4 belowZ = GpuFluidScalarIn[texel - int3(0, 0, 1)];
+
+    const float2 faceX = 0.5 * (here.rg + belowX.rg);
+    const float2 faceY = 0.5 * (here.rg + belowY.rg);
+    const float2 faceZ = 0.5 * (here.rg + belowZ.rg);
+
+    // rg = density, temperature -> acceleration along up.
+    const float3 lift = float3(
+      p0.w * (faceX.y - ambientTemperature) - p1.x * faceX.x,
+      p0.w * (faceY.y - ambientTemperature) - p1.x * faceY.x,
+      p0.w * (faceZ.y - ambientTemperature) - p1.x * faceZ.x);
+
+    float4 velocity = GpuFluidVelocityTarget[texel];
+    velocity.xyz = (velocity.xyz + dt * lift * p0.xyz) * exp(-p2.y * dt);
+    velocity.xyz = clamp(velocity.xyz, -GPU_FLUID_MAX_SPEED, GPU_FLUID_MAX_SPEED);
+    if (!GpuFluidIsFinite(velocity))
+      velocity = float4(0.0, 0.0, 0.0, 0.0);
+
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+    {
+      if (cell[axis] == 0 && !GpuFluidFaceOpen(axis, -1))
+        velocity[axis] = 0.0; // the wall itself
+    }
+
+    velocity.w = 0.0;
+    GpuFluidVelocityTarget[texel] = velocity;
+  }
+}

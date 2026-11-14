@@ -1,0 +1,107 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Advect. One 8 cubed group per active brick (indirect), one thread per interior cell; aprons are left to
+// GasHalo. Three modes (GpuFluidGasPass.x):
+//
+// 0 Semi-Lagrangian: the MAC velocity and the scalars from the current sides into the next ones. Every sample point
+//   (the cell centre for the scalars, each face centre for its velocity component) is traced back with a midpoint
+//   (RK2) step through the current velocity, and the field is read there with hardware trilinear inside the atlas brick
+//   that holds the point (GpuFluidSampleAtlas), each MAC component at its own staggered offset.
+// 1 MacCormack, reverse step (scalars): the semi-Lagrangian result phi^ (the next scalars, halo filled) traced forward
+//   through the same velocity, back to where it started: phi~ goes to Scratch.
+// 2 MacCormack, correction (scalars): phi = phi^ + (phi - phi~) / 2, the error estimate of the round trip, clamped to
+//   the range of the eight texels the backtrace interpolated between, so it cannot overshoot. In place on the next
+//   scalars (each thread its own texel).
+//
+// Semi-Lagrangian smears the scalars by about a quarter voxel squared every tick, several voxels over a few hundred
+// ticks; the correction removes most of that, which is what keeps smoke edges and puffs crisp.
+
+Texture3D<float4> GpuFluidVelocityIn;
+Texture3D<float4> GpuFluidScalarIn;
+SamplerState GpuFluidLinearClamp;
+RWTexture3D<float4> GpuFluidVelocityOut;
+RWTexture3D<float4> GpuFluidScalarOut;
+RWTexture3D<float4> GpuFluidScratch;
+
+#define GPU_FLUID_ADVECT_SEMI_LAGRANGIAN 0
+#define GPU_FLUID_ADVECT_REVERSE 1
+#define GPU_FLUID_ADVECT_CORRECT 2
+
+/// Midpoint trace through the current velocity; a negative time step traces forward.
+float3 Trace(float3 p, float timeStepVoxels)
+{
+  const float3 ambient = float3(0.0, 0.0, 0.0);
+  const float3 v1 = GpuFluidSampleVelocity(GpuFluidVelocityIn, GpuFluidLinearClamp, p, ambient);
+  const float3 mid = p - (0.5 * timeStepVoxels) * v1;
+  const float3 v2 = GpuFluidSampleVelocity(GpuFluidVelocityIn, GpuFluidLinearClamp, mid, ambient);
+  return p - timeStepVoxels * v2;
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const float4 step = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep);
+  const float timeStepVoxels = step.x * step.z; // dt / dx: m/s times this is voxels
+
+  const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+  const int3 local = int3(groupThreadId);
+  const float3 cell = float3(brick * GPU_FLUID_BRICK_SIZE + local);
+  const float3 centre = cell + 0.5;
+  const int3 texel = GpuFluidTexel(slot, local);
+  const float4 noGas = float4(0.0, 0.0, 0.0, 0.0);
+
+  if (mode == GPU_FLUID_ADVECT_REVERSE)
+  {
+    const float3 to = Trace(centre, -timeStepVoxels);
+    GpuFluidScratch[texel] = GpuFluidLoadTrilinear(GpuFluidScalarOut, to - 0.5, noGas);
+    return;
+  }
+
+  if (mode == GPU_FLUID_ADVECT_CORRECT)
+  {
+    const float3 from = Trace(centre, timeStepVoxels);
+
+    float4 lower, upper;
+    GpuFluidLoadRange(GpuFluidScalarIn, from - 0.5, lower, upper);
+
+    const float4 forward = GpuFluidScalarOut[texel];
+    const float4 corrected = forward + 0.5 * (GpuFluidScalarIn.Load(int4(texel, 0)) - GpuFluidScratch[texel]);
+    GpuFluidScalarOut[texel] = max(clamp(corrected, lower, upper), 0.0);
+    return;
+  }
+
+  // Scalars at the cell centre. Open air outside allocated bricks holds no gas.
+  {
+    const float3 from = Trace(centre, timeStepVoxels);
+    const float4 value = GpuFluidSampleAtlas(GpuFluidScalarIn, GpuFluidLinearClamp, from - 0.5, noGas);
+    GpuFluidScalarOut[texel] = max(value, 0.0);
+  }
+
+  // Each velocity component at its own face centre.
+  {
+    const float4 ambient = float4(0.0, 0.0, 0.0, 0.0);
+    const float3 fromU = Trace(float3(cell.x, centre.y, centre.z), timeStepVoxels);
+    const float3 fromV = Trace(float3(centre.x, cell.y, centre.z), timeStepVoxels);
+    const float3 fromW = Trace(float3(centre.x, centre.y, cell.z), timeStepVoxels);
+
+    float4 velocity;
+    velocity.x = GpuFluidSampleAtlas(GpuFluidVelocityIn, GpuFluidLinearClamp, fromU - float3(0.0, 0.5, 0.5), ambient).x;
+    velocity.y = GpuFluidSampleAtlas(GpuFluidVelocityIn, GpuFluidLinearClamp, fromV - float3(0.5, 0.0, 0.5), ambient).y;
+    velocity.z = GpuFluidSampleAtlas(GpuFluidVelocityIn, GpuFluidLinearClamp, fromW - float3(0.5, 0.5, 0.0), ambient).z;
+    velocity.w = 0.0;
+    GpuFluidVelocityOut[texel] = velocity;
+  }
+}

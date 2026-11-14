@@ -15,21 +15,22 @@
 #include <RendererFoundation/Device/Device.h>
 #include <RendererFoundation/Resources/Buffer.h>
 #include <RendererFoundation/Resources/Texture.h>
-#include <Shaders/GpuFluid/GpuFluidConstants.h>
+#include <Shaders/GpuFluid/GpuFluidAnalyticConstants.h>
 
 static_assert(sizeof(plGpuFluidAnalyticConstants) <= 128, "Push constants are limited to 128 bytes on Metal");
 static_assert(GPU_FLUID_BRICK_SIZE == plGpuFluidBrickSize && GPU_FLUID_BRICK_STORE == plGpuFluidBrickStore);
+static_assert(GPU_FLUID_FACE_NEG_X == plGpuFluidFaces::NegX && GPU_FLUID_FACE_POS_X == plGpuFluidFaces::PosX && GPU_FLUID_FACE_NEG_Y == plGpuFluidFaces::NegY &&
+              GPU_FLUID_FACE_POS_Y == plGpuFluidFaces::PosY && GPU_FLUID_FACE_NEG_Z == plGpuFluidFaces::NegZ && GPU_FLUID_FACE_POS_Z == plGpuFluidFaces::PosZ);
 
 struct plGpuFluidGpuManager::GasVolume
 {
   plGpuFluidVolumeId m_Id = 0;
   plGpuFluidGasSettings m_Settings;
-  plVec3U32 m_vAtlasBricks = plVec3U32::MakeZero();
   plUInt32 m_uiCapacity = 0;
 
   // Render thread.
-  plGALTextureHandle m_hAtlas;
-  plGALTextureHandle m_hIndirection;
+  plGpuFluidSparseGrid m_Grid;
+  plGpuFluidGasSolver m_Solver;
   plGALBufferHandle m_hStats;
   plGpuFluidReadbackRing m_Readback;
   plDynamicArray<plUInt8> m_ReadbackScratch;
@@ -37,12 +38,16 @@ struct plGpuFluidGpuManager::GasVolume
   bool m_bHasLastInput = false;
   plGpuFluidGasFrameInput m_LastInput;
 
+  /// Ticks of the frames whose stats are in flight, by readback slot.
+  plUInt32 m_uiReadbackTicks[plGpuFluidReadbackRing::s_uiSlotCount] = {};
+
   // Under the manager's mutex.
   plGpuFluidGasFrameInput m_Input[2];
   bool m_bInputValid[2] = {false, false};
   bool m_bPublishable = false;
   bool m_bStatsValid = false;
   plGpuFluidGasStats m_Stats;
+  float m_fVoxelSize = 0.0625f;
 };
 
 namespace
@@ -52,35 +57,11 @@ namespace
   plEventSubscriptionID s_uiRenderEventId = 0;
   bool s_bStarted = false;
 
-  /// Roughly cubic, so no axis runs away, and never more than 204 bricks per axis (2048 texels / 10).
-  plVec3U32 ComputeAtlasBricks(plUInt32 uiCapacity)
+  float AsFloat(plUInt32 uiBits)
   {
-    plUInt32 uiSide = 1;
-    while (uiSide * uiSide * uiSide < uiCapacity && uiSide < GPU_FLUID_MAX_ATLAS_BRICKS_PER_AXIS)
-      ++uiSide;
-
-    const plUInt32 uiDepth = plMath::Clamp<plUInt32>((uiCapacity + uiSide * uiSide - 1) / (uiSide * uiSide), 1, GPU_FLUID_MAX_ATLAS_BRICKS_PER_AXIS);
-    return plVec3U32(uiSide, uiSide, uiDepth);
-  }
-
-  plGALTextureHandle Create3DTexture(plGALDevice* pDevice, const plVec3U32& vSize, const char* szName)
-  {
-    plGALTextureCreationDescription desc;
-    desc.m_Type = plGALTextureType::Texture3D;
-    desc.m_Format = plGALResourceFormat::RGBAHalf;
-    desc.m_uiWidth = vSize.x;
-    desc.m_uiHeight = vSize.y;
-    desc.m_uiDepth = vSize.z;
-    desc.m_uiMipLevelCount = 1;
-    desc.m_uiArraySize = 1;
-    desc.m_bAllowShaderResourceView = true;
-    desc.m_bAllowUAV = true;
-    desc.m_ResourceAccess.m_bImmutable = false;
-
-    plGALTextureHandle hTexture = pDevice->CreateTexture(desc);
-    if (!hTexture.IsInvalidated())
-      pDevice->GetTexture(hTexture)->SetDebugName(szName);
-    return hTexture;
+    float f = 0.0f;
+    plMemoryUtils::Copy(reinterpret_cast<plUInt8*>(&f), reinterpret_cast<const plUInt8*>(&uiBits), sizeof(float));
+    return f;
   }
 } // namespace
 
@@ -142,7 +123,6 @@ plGpuFluidVolumeId plGpuFluidGpuManager::CreateGasVolume(const plGpuFluidGasSett
 
   const plUInt32 uiMaxAtlas = GPU_FLUID_MAX_ATLAS_BRICKS_PER_AXIS * GPU_FLUID_MAX_ATLAS_BRICKS_PER_AXIS * GPU_FLUID_MAX_ATLAS_BRICKS_PER_AXIS;
   pVolume->m_uiCapacity = plMath::Clamp<plUInt32>(settings.m_uiMaxBricks, 1, uiMaxAtlas);
-  pVolume->m_vAtlasBricks = ComputeAtlasBricks(pVolume->m_uiCapacity);
 
   const plGpuFluidVolumeId id = pVolume->m_Id;
   m_GasVolumes.Insert(id, std::move(pVolume));
@@ -174,6 +154,7 @@ void plGpuFluidGpuManager::SetGasFrameInput(plGpuFluidVolumeId id, const plGpuFl
   const plUInt32 uiIndex = plRenderWorld::GetDataIndexForExtraction();
   (*pVolume)->m_Input[uiIndex] = input;
   (*pVolume)->m_bInputValid[uiIndex] = true;
+  (*pVolume)->m_fVoxelSize = input.m_Simulation.m_fVoxelSize;
 }
 
 bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPublish& out_publish) const
@@ -188,22 +169,27 @@ bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPub
   if (!volume.m_bPublishable)
     return false;
 
-  out_publish.m_hAtlas = volume.m_hAtlas;
-  out_publish.m_hIndirection = volume.m_hIndirection;
+  out_publish.m_hAtlas = volume.m_Solver.GetScalarAtlas();
+  out_publish.m_hIndirection = volume.m_Grid.GetIndirection();
   out_publish.m_vBrickGrid = volume.m_Settings.m_vBrickGrid;
-  out_publish.m_vAtlasBricks = volume.m_vAtlasBricks;
+  out_publish.m_vAtlasBricks = volume.m_Grid.GetAtlasBricks();
 
-  // The readback box is two to three frames old, so it is grown by a brick on every side. Until the first readback
-  // the whole grid is marched, which is always safe.
+  // The readback box is two to three frames old. It is grown by one brick, plus how far the fastest gas can move in
+  // that time (three frames of two ticks each at most). Until the first readback the whole grid is marched, which is
+  // always safe.
   out_publish.m_BoundsUVW = plBoundingBox::MakeFromMinMax(plVec3::MakeZero(), plVec3(1.0f));
   if (volume.m_bStatsValid && volume.m_Stats.HasBounds())
   {
+    const float fBrickMetres = plMath::Max(volume.m_fVoxelSize, 1e-4f) * plGpuFluidBrickSize;
+    const float fLatencySeconds = 3.0f * plGpuFluidMaxGasTicksPerFrame * plGpuFluidGasTick;
+    const float fGrow = 1.0f + plMath::Ceil(volume.m_Stats.m_fMaxSpeed * fLatencySeconds / fBrickMetres);
+
     const plVec3 vGrid(static_cast<float>(volume.m_Settings.m_vBrickGrid.x), static_cast<float>(volume.m_Settings.m_vBrickGrid.y), static_cast<float>(volume.m_Settings.m_vBrickGrid.z));
     const plVec3 vMin(static_cast<float>(volume.m_Stats.m_vBoundsMinBrick.x), static_cast<float>(volume.m_Stats.m_vBoundsMinBrick.y), static_cast<float>(volume.m_Stats.m_vBoundsMinBrick.z));
     const plVec3 vMax(static_cast<float>(volume.m_Stats.m_vBoundsMaxBrick.x), static_cast<float>(volume.m_Stats.m_vBoundsMaxBrick.y), static_cast<float>(volume.m_Stats.m_vBoundsMaxBrick.z));
 
-    const plVec3 vMinUVW = (vMin - plVec3(1.0f)).CompDiv(vGrid).CompMax(plVec3::MakeZero());
-    const plVec3 vMaxUVW = (vMax + plVec3(2.0f)).CompDiv(vGrid).CompMin(plVec3(1.0f));
+    const plVec3 vMinUVW = (vMin - plVec3(fGrow)).CompDiv(vGrid).CompMax(plVec3::MakeZero());
+    const plVec3 vMaxUVW = (vMax + plVec3(1.0f + fGrow)).CompDiv(vGrid).CompMin(plVec3(1.0f));
     out_publish.m_BoundsUVW = plBoundingBox::MakeFromMinMax(vMinUVW, vMaxUVW);
   }
 
@@ -246,8 +232,9 @@ void plGpuFluidGpuManager::CreateResources(GasVolume& ref_volume)
 {
   plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
 
-  ref_volume.m_hAtlas = Create3DTexture(pDevice, ref_volume.m_vAtlasBricks * plGpuFluidBrickStore, "GpuFluid Gas Atlas");
-  ref_volume.m_hIndirection = Create3DTexture(pDevice, ref_volume.m_Settings.m_vBrickGrid, "GpuFluid Gas Brick Table");
+  plResult result = ref_volume.m_Grid.Create(ref_volume.m_Settings.m_vBrickGrid, ref_volume.m_uiCapacity);
+  if (result.Succeeded())
+    result = ref_volume.m_Solver.Create(ref_volume.m_Grid.GetAtlasBricks(), ref_volume.m_uiCapacity);
 
   plGALBufferCreationDescription statsDesc;
   statsDesc.m_uiTotalSize = GPU_FLUID_STATS_BYTES;
@@ -259,7 +246,7 @@ void plGpuFluidGpuManager::CreateResources(GasVolume& ref_volume)
 
   ref_volume.m_bResourcesCreated = true;
 
-  if (ref_volume.m_hAtlas.IsInvalidated() || ref_volume.m_hIndirection.IsInvalidated() || ref_volume.m_hStats.IsInvalidated())
+  if (result.Failed() || ref_volume.m_hStats.IsInvalidated())
   {
     plLog::Error("GpuFluid: could not create the GPU resources of a gas volume ({} x {} x {} bricks, {} in the pool)", ref_volume.m_Settings.m_vBrickGrid.x,
       ref_volume.m_Settings.m_vBrickGrid.y, ref_volume.m_Settings.m_vBrickGrid.z, ref_volume.m_uiCapacity);
@@ -272,15 +259,12 @@ void plGpuFluidGpuManager::DestroyResources(GasVolume& ref_volume)
 {
   plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
 
-  if (!ref_volume.m_hAtlas.IsInvalidated())
-    pDevice->DestroyTexture(ref_volume.m_hAtlas);
-  if (!ref_volume.m_hIndirection.IsInvalidated())
-    pDevice->DestroyTexture(ref_volume.m_hIndirection);
+  ref_volume.m_Grid.Destroy();
+  ref_volume.m_Solver.Destroy();
+
   if (!ref_volume.m_hStats.IsInvalidated())
     pDevice->DestroyBuffer(ref_volume.m_hStats);
 
-  ref_volume.m_hAtlas.Invalidate();
-  ref_volume.m_hIndirection.Invalidate();
   ref_volume.m_hStats.Invalidate();
   ref_volume.m_Readback.Reset();
   ref_volume.m_bResourcesCreated = false;
@@ -308,24 +292,42 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
     return;
 
   const plUInt32* pWords = reinterpret_cast<const plUInt32*>(ref_volume.m_ReadbackScratch.GetData());
+  const bool bSimulated = ref_volume.m_Settings.m_bSimulate;
 
   plGpuFluidGasStats& stats = ref_volume.m_Stats;
   stats.m_uiFrame = uiFrame;
+  stats.m_uiTicks = ref_volume.m_uiReadbackTicks[uiFrame % plGpuFluidReadbackRing::s_uiSlotCount];
   stats.m_uiRequestedBricks = pWords[GPU_FLUID_STAT_SLOTS_REQUESTED];
-  stats.m_uiAllocatedBricks = plMath::Min(pWords[GPU_FLUID_STAT_SLOTS_REQUESTED], ref_volume.m_uiCapacity);
+  stats.m_uiAllocatedBricks = bSimulated ? pWords[GPU_FLUID_STAT_CONTENT_BRICKS] : plMath::Min(pWords[GPU_FLUID_STAT_SLOTS_REQUESTED], ref_volume.m_uiCapacity);
+  stats.m_uiActiveBricks = pWords[GPU_FLUID_STAT_ACTIVE_BRICKS];
   stats.m_uiDeniedBricks = pWords[GPU_FLUID_STAT_DENIED];
   stats.m_uiNaNCount = pWords[GPU_FLUID_STAT_NAN];
   stats.m_vBoundsMinBrick.Set(pWords[GPU_FLUID_STAT_BOUNDS_MIN + 0], pWords[GPU_FLUID_STAT_BOUNDS_MIN + 1], pWords[GPU_FLUID_STAT_BOUNDS_MIN + 2]);
   stats.m_vBoundsMaxBrick.Set(pWords[GPU_FLUID_STAT_BOUNDS_MAX + 0], pWords[GPU_FLUID_STAT_BOUNDS_MAX + 1], pWords[GPU_FLUID_STAT_BOUNDS_MAX + 2]);
   stats.m_fMass = static_cast<float>(static_cast<double>(pWords[GPU_FLUID_STAT_MASS]) / GPU_FLUID_MASS_SCALE);
 
-  float fMaxDensity = 0.0f;
-  plMemoryUtils::Copy(reinterpret_cast<plUInt32*>(&fMaxDensity), &pWords[GPU_FLUID_STAT_MAX_DENSITY], 1);
-  stats.m_fMaxDensity = fMaxDensity;
+  stats.m_vCentroid.SetZero();
+  if (pWords[GPU_FLUID_STAT_MASS] > 0)
+  {
+    const double fMass = static_cast<double>(pWords[GPU_FLUID_STAT_MASS]);
+    stats.m_vCentroid.Set(static_cast<float>(pWords[GPU_FLUID_STAT_CENTROID + 0] / fMass), static_cast<float>(pWords[GPU_FLUID_STAT_CENTROID + 1] / fMass),
+      static_cast<float>(pWords[GPU_FLUID_STAT_CENTROID + 2] / fMass));
+  }
+
+  stats.m_fMaxDensity = AsFloat(pWords[GPU_FLUID_STAT_MAX_DENSITY]);
+  stats.m_fMaxTemperature = AsFloat(pWords[GPU_FLUID_STAT_MAX_TEMPERATURE]);
+  stats.m_fMaxSpeed = AsFloat(pWords[GPU_FLUID_STAT_MAX_SPEED]);
+  stats.m_fMaxDivergenceBefore = AsFloat(pWords[GPU_FLUID_STAT_DIV_PRE]);
+  stats.m_fMaxDivergenceAfter = AsFloat(pWords[GPU_FLUID_STAT_DIV_POST]);
+
+  const double fCells = plMath::Max(1.0, static_cast<double>(stats.m_uiActiveBricks) * GPU_FLUID_BRICK_CELLS);
+  stats.m_fMeanDivergenceBefore = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_PRE_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
+  stats.m_fMeanDivergenceAfter = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_POST_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
 
   ref_volume.m_bStatsValid = true;
 
   plStats::SetStat("GpuFluid/Gas/AllocatedBricks", stats.m_uiAllocatedBricks);
+  plStats::SetStat("GpuFluid/Gas/ActiveBricks", stats.m_uiActiveBricks);
   plStats::SetStat("GpuFluid/Gas/BricksDenied", stats.m_uiDeniedBricks);
   plStats::SetStat("GpuFluid/Gas/NaNCount", stats.m_uiNaNCount);
 }
@@ -372,28 +374,52 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
 
     ReadStats(volume);
 
+    // A simulated volume steps only on fresh input: repeating a frame's ticks would run the clock twice.
+    bool bFreshInput = false;
     if (volume.m_bInputValid[uiInputIndex])
     {
       volume.m_LastInput = volume.m_Input[uiInputIndex];
       volume.m_bInputValid[uiInputIndex] = false;
       volume.m_bHasLastInput = true;
+      bFreshInput = true;
     }
 
-    if (volume.m_hAtlas.IsInvalidated() || !volume.m_bHasLastInput || volume.m_LastInput.m_Source == plGpuFluidDebugSource::None)
+    if (!volume.m_Solver.IsCreated() || !volume.m_bHasLastInput)
     {
       volume.m_bPublishable = false;
       continue;
     }
 
-    const plGALTextureHandle hAtlasGAL = volume.m_hAtlas;
-    const plGALTextureHandle hIndirectionGAL = volume.m_hIndirection;
+    const plGpuFluidGasFrameInput& input = volume.m_LastInput;
+    const bool bAnalytic = !volume.m_Settings.m_bSimulate;
+    if (bAnalytic && input.m_Source == plGpuFluidDebugSource::None)
+    {
+      volume.m_bPublishable = false;
+      continue;
+    }
+
+    const plGpuFluidSparseGridGraph gridGraph = volume.m_Grid.Import(graph);
+    const plRenderGraphTextureHandle hAtlas = graph.ImportTexture(volume.m_Solver.GetScalarAtlas());
+    const plRenderGraphBufferHandle hStats = graph.ImportBuffer(volume.m_hStats);
     const plGALBufferHandle hStatsGAL = volume.m_hStats;
 
-    const plRenderGraphTextureHandle hAtlas = graph.ImportTexture(hAtlasGAL);
-    const plRenderGraphTextureHandle hIndirection = graph.ImportTexture(hIndirectionGAL);
-    const plRenderGraphBufferHandle hStats = graph.ImportBuffer(hStatsGAL);
+    plUInt32 uiTicks = 0;
+    if (!bAnalytic)
+    {
+      // Phase Gas/Alloc: P1 allocates the whole box once, on the volume's first GPU frame.
+      if (!volume.m_Grid.IsAllocated())
+      {
+        volume.m_Grid.AddAllocPasses(graph, gridGraph, input.m_Simulation.m_OpenFaces.GetValue());
+        volume.m_Solver.AddClearPass(graph, volume.m_Grid, gridGraph);
+      }
 
-    // Gas/Alloc of the solver to come: reset the counters this frame's kernels add to.
+      uiTicks = bFreshInput ? plMath::Min(input.m_Simulation.m_uiTicks, plGpuFluidMaxGasTicksPerFrame) : 0;
+    }
+
+    const bool bCounters = bAnalytic || uiTicks > 0;
+
+    // Reset the counters this frame's kernels add to.
+    if (bCounters)
     {
       auto pass = graph.AddComputePass("GpuFluid Stats Clear");
       pass.WriteBuffer(hStats, plGALResourceState::UnorderedAccessWrite);
@@ -407,14 +433,16 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
         });
     }
 
-    // The analytic source: content, brick table and atlas in one dispatch over the virtual grid.
+    if (bAnalytic)
     {
-      const plGpuFluidGasFrameInput& input = volume.m_LastInput;
+      // The analytic source: content, brick table and atlas in one dispatch over the virtual grid.
       const plVec3U32 vGrid = volume.m_Settings.m_vBrickGrid;
+      const plVec3U32 vAtlasBricks = volume.m_Grid.GetAtlasBricks();
+      const plRenderGraphTextureHandle hIndirection = gridGraph.m_hIndirection;
 
       plGpuFluidAnalyticConstants constants;
       constants.GpuFluidBrickGrid = plVec4U32(vGrid.x, vGrid.y, vGrid.z, volume.m_uiCapacity);
-      constants.GpuFluidAtlasBricks = plVec4U32(volume.m_vAtlasBricks.x, volume.m_vAtlasBricks.y, volume.m_vAtlasBricks.z, 0);
+      constants.GpuFluidAtlasBricks = plVec4U32(vAtlasBricks.x, vAtlasBricks.y, vAtlasBricks.z, 0);
       constants.GpuFluidSphere = plVec4(input.m_Sphere.m_vCenterVoxels.x, input.m_Sphere.m_vCenterVoxels.y, input.m_Sphere.m_vCenterVoxels.z, input.m_Sphere.m_fRadiusVoxels);
       constants.GpuFluidSphereShape = plVec4(input.m_Sphere.m_fSoftnessVoxels, input.m_Sphere.m_fPeakDensity, input.m_Sphere.m_fPeakTemperature, 0.0f);
       constants.GpuFluidBrickRules = plVec4(input.m_fAllocThreshold, input.m_fMeanFloor, 0.0f, 0.0f);
@@ -437,23 +465,35 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
           pContext->Dispatch(vGrid.x, vGrid.y, vGrid.z).IgnoreResult();
         });
     }
+    else
+    {
+      plGpuFluidGasSimulation simulation = input.m_Simulation;
+      simulation.m_uiTicks = uiTicks;
+      volume.m_Solver.AddFramePasses(graph, volume.m_Grid, gridGraph, hStats, simulation);
+    }
 
     // Stats to the CPU, through a ring of three so nothing waits. A copy is not allowed inside a compute pass.
-    const plUInt32 uiReadbackSlot = volume.m_Readback.ReserveSlot(uiFrame);
-    if (uiReadbackSlot != plInvalidIndex)
+    if (bCounters)
     {
-      plGpuFluidReadbackRing* pRing = &volume.m_Readback;
+      const plUInt32 uiReadbackSlot = volume.m_Readback.ReserveSlot(uiFrame);
+      if (uiReadbackSlot != plInvalidIndex)
+      {
+        volume.m_uiReadbackTicks[uiFrame % plGpuFluidReadbackRing::s_uiSlotCount] = uiTicks;
+        plGpuFluidReadbackRing* pRing = &volume.m_Readback;
 
-      auto pass = graph.AddTransferPass("GpuFluid Stats Readback");
-      pass.ReadBuffer(hStats, plGALResourceState::CopySource);
-      pass.HasSideEffects();
-      pass.SetExecuteCallback([pRing, uiReadbackSlot, hStatsGAL](const plRenderGraphContext& ctx)
-        { pRing->Submit(uiReadbackSlot, *ctx.GetCommandEncoder(), hStatsGAL); });
+        auto pass = graph.AddTransferPass("GpuFluid Stats Readback");
+        pass.ReadBuffer(hStats, plGALResourceState::CopySource);
+        pass.HasSideEffects();
+        pass.SetExecuteCallback([pRing, uiReadbackSlot, hStatsGAL](const plRenderGraphContext& ctx)
+          { pRing->Submit(uiReadbackSlot, *ctx.GetCommandEncoder(), hStatsGAL); });
+      }
     }
 
     // The march, the froxel inject and the path tracer read these without declaring it, from other graphs. This
     // leaves them in a shader-read state for those.
     {
+      const plRenderGraphTextureHandle hIndirection = gridGraph.m_hIndirection;
+
       auto pass = graph.AddComputePass("GpuFluid Publish");
       pass.ReadTexture(hAtlas, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::ComputeShader);
       pass.ReadTexture(hIndirection, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::ComputeShader);
