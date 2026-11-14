@@ -99,11 +99,13 @@ plStatus plGpuFluidLiquidPass::AddRenderPasses(const plViewData& viewData, const
   const plRenderData::Category category = plGpuFluidLiquidSurfaceRenderData::LiquidSurface;
   auto HasLiquid = [this, category]() { return GetPipeline()->GetRenderDataBatchesWithCategory(category).GetBatchCount() > 0; };
 
-  // 1. The scene so far, single sampled: what the refraction looks through.
+  // 1. The scene so far, single sampled: what the refraction looks through. A single-sampled source makes
+  //    ResolveTexture a plain copy, which needs the copy states rather than the resolve states (D3D12 debug layer).
   {
+    const bool bMsaa = colorDesc.m_SampleCount != plGALMSAASampleCount::None;
     auto pass = ref_graph.AddTransferPass("GpuFluid Liquid Copy Scene Color");
-    pass.ReadTexture(hColor, {}, plGALResourceState::ResolveSource);
-    pass.WriteTexture(hSceneColor, {}, plGALResourceState::ResolveDestination);
+    pass.ReadTexture(hColor, {}, bMsaa ? plGALResourceState::ResolveSource : plGALResourceState::CopySource);
+    pass.WriteTexture(hSceneColor, {}, bMsaa ? plGALResourceState::ResolveDestination : plGALResourceState::CopyDestination);
     pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
       {
         if (!HasLiquid())

@@ -32,12 +32,14 @@ namespace
 
   constexpr plUInt32 s_uiAllocThreads = 64;
 
-  plGALBufferHandle CreateUIntBuffer(plGALDevice* pDevice, plUInt32 uiCount, bool bIndirectArguments, const char* szName)
+  plGALBufferHandle CreateUIntBuffer(plGALDevice* pDevice, plUInt32 uiCount, bool bIndirectArguments, const char* szName, bool bUnorderedAccess = true)
   {
     plGALBufferCreationDescription desc;
     desc.m_uiStructSize = sizeof(plUInt32);
     desc.m_uiTotalSize = plMath::Max(uiCount, 1u) * sizeof(plUInt32);
-    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource | plGALBufferUsageFlags::UnorderedAccess;
+    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource;
+    if (bUnorderedAccess)
+      desc.m_BufferFlags |= plGALBufferUsageFlags::UnorderedAccess;
     if (bIndirectArguments)
       desc.m_BufferFlags |= plGALBufferUsageFlags::DrawIndirect;
     desc.m_ResourceAccess.m_bImmutable = false;
@@ -172,7 +174,8 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
   m_hFreeList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas FreeList");
   m_hNewList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas NewList");
   m_hBrickMeta = CreateUIntBuffer(pDevice, uiCapacity * 4, false, "GpuFluid Gas BrickMeta");
-  m_hEmitterBricks = CreateUIntBuffer(pDevice, GPU_FLUID_MAX_EMITTER_BRICKS, false, "GpuFluid Gas EmitterBricks");
+  // Read-only: the CPU uploads it, so it rests in the shader-read state the device's upload path expects.
+  m_hEmitterBricks = CreateUIntBuffer(pDevice, GPU_FLUID_MAX_EMITTER_BRICKS, false, "GpuFluid Gas EmitterBricks", false);
 
   {
     plGALTextureCreationDescription desc;
@@ -276,19 +279,11 @@ void plGpuFluidSparseGrid::AddAllocPasses(
     m_bDebugVirtualParts[uiDebugSlot] = input.m_bDebugVirtual;
   }
 
+  // The sources' bricks go up through the device's upload path, which runs ahead of this frame's rendering. A copy
+  // recorded in a graph pass of its own conflicted with the resting state that path assumes (D3D12 debug layer).
   const plRenderGraphBufferHandle hEmitterBricks = ref_graph.ImportBuffer(m_hEmitterBricks);
   if (uiEmitterBricks > 0)
-  {
-    plDynamicArray<plUInt32> bricks;
-    bricks.SetCountUninitialized(uiEmitterBricks);
-    plMemoryUtils::Copy(bricks.GetData(), input.m_EmitterBricks.GetData(), uiEmitterBricks);
-
-    auto pass = ref_graph.AddTransferPass("Gas/Alloc Upload");
-    pass.WriteBuffer(hEmitterBricks, plGALResourceState::CopyDestination);
-    pass.HasSideEffects();
-    pass.SetExecuteCallback([hEmitterBricks, bricks = std::move(bricks)](const plRenderGraphContext& ctx)
-      { ctx.GetCommandEncoder()->UpdateBuffer(ctx.ResolveBuffer(hEmitterBricks), 0, bricks.GetArrayPtr().ToByteArray(), plGALUpdateMode::AheadOfTime); });
-  }
+    plGALDevice::GetDefaultDevice()->UpdateBufferAheadOfTime(m_hEmitterBricks, input.m_EmitterBricks.GetArrayPtr().GetSubArray(0, uiEmitterBricks).ToByteArray());
 
   plGpuFluidGasConstants constants;
   plMemoryUtils::ZeroFill(&constants, 1);

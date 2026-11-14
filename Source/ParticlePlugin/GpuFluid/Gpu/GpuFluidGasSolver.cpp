@@ -79,12 +79,14 @@ namespace
     return hTexture;
   }
 
-  plGALBufferHandle CreateStructuredBuffer(plGALDevice* pDevice, plUInt32 uiStructSize, plUInt32 uiCount, const char* szName)
+  plGALBufferHandle CreateStructuredBuffer(plGALDevice* pDevice, plUInt32 uiStructSize, plUInt32 uiCount, const char* szName, bool bUnorderedAccess = true)
   {
     plGALBufferCreationDescription desc;
     desc.m_uiStructSize = uiStructSize;
     desc.m_uiTotalSize = plMath::Max(uiCount, 1u) * uiStructSize;
-    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource | plGALBufferUsageFlags::UnorderedAccess;
+    desc.m_BufferFlags = plGALBufferUsageFlags::StructuredBuffer | plGALBufferUsageFlags::ShaderResource;
+    if (bUnorderedAccess)
+      desc.m_BufferFlags |= plGALBufferUsageFlags::UnorderedAccess;
     desc.m_ResourceAccess.m_bImmutable = false;
 
     plGALBufferHandle hBuffer = pDevice->CreateBuffer(desc);
@@ -533,7 +535,7 @@ plResult plGpuFluidGasSolver::Create(const plVec3U32& vBrickGrid, const plVec3U3
   m_hMGMask = CreateStructuredBuffer(pDevice, sizeof(plUInt32), uiCapacity * GPU_FLUID_MG_MASK_STRIDE, "GpuFluid Gas MGMask");
   m_hMGDense = CreateStructuredBuffer(pDevice, sizeof(plVec2), uiDenseTotal, "GpuFluid Gas MGDense");
   m_hMGDenseCoeff = CreateStructuredBuffer(pDevice, sizeof(plVec4), uiDenseTotal * 2, "GpuFluid Gas MGDenseCoeff");
-  m_hSolidShapes = CreateStructuredBuffer(pDevice, sizeof(plGpuFluidSolidShape), plGpuFluidMaxGasTicksPerFrame * GPU_FLUID_MAX_SOLID_SHAPES, "GpuFluid Gas SolidShapes");
+  m_hSolidShapes = CreateStructuredBuffer(pDevice, sizeof(plGpuFluidSolidShape), plGpuFluidMaxGasTicksPerFrame * GPU_FLUID_MAX_SOLID_SHAPES, "GpuFluid Gas SolidShapes", false);
 
   plGALSamplerStateCreationDescription samplerDesc;
   samplerDesc.m_MinFilter = plGALTextureFilterMode::Linear;
@@ -734,21 +736,14 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
   const bool bMultigrid = sim.m_PressureSolver == plGpuFluidPressureSolver::Multigrid;
   const plVec4 vWind(sim.m_vAmbientWind.x, sim.m_vAmbientWind.y, sim.m_vAmbientWind.z, 0.0f);
 
-  // The frame's solids, one upload for every tick. A copy is not allowed inside a compute pass.
+  // The frame's solids, one upload for every tick, through the device's upload path, which runs ahead of this frame's
+  // rendering. A copy recorded in a graph pass of its own conflicted with the resting state that path assumes (D3D12
+  // debug layer).
   const plUInt32 uiSolidsPerTick = plMath::Min(sim.m_uiSolidsPerTick, static_cast<plUInt32>(GPU_FLUID_MAX_SOLID_SHAPES));
   if (uiSolidsPerTick > 0 && !sim.m_Solids.IsEmpty())
   {
     const plUInt32 uiCount = plMath::Min(sim.m_Solids.GetCount(), plGpuFluidMaxGasTicksPerFrame * static_cast<plUInt32>(GPU_FLUID_MAX_SOLID_SHAPES));
-    plDynamicArray<plGpuFluidSolid> shapes;
-    shapes.SetCountUninitialized(uiCount);
-    plMemoryUtils::Copy(shapes.GetData(), sim.m_Solids.GetData(), uiCount);
-
-    const plRenderGraphBufferHandle hShapes = res.m_hSolidShapes;
-    auto pass = ref_graph.AddTransferPass("Gas/Solids Upload");
-    pass.WriteBuffer(hShapes, plGALResourceState::CopyDestination);
-    pass.HasSideEffects();
-    pass.SetExecuteCallback([hShapes, shapes = std::move(shapes)](const plRenderGraphContext& ctx)
-      { ctx.GetCommandEncoder()->UpdateBuffer(ctx.ResolveBuffer(hShapes), 0, shapes.GetArrayPtr().ToByteArray(), plGALUpdateMode::AheadOfTime); });
+    plGALDevice::GetDefaultDevice()->UpdateBufferAheadOfTime(m_hSolidShapes, sim.m_Solids.GetArrayPtr().GetSubArray(0, uiCount).ToByteArray());
   }
 
   if (bPoisson)

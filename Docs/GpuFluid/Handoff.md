@@ -67,11 +67,29 @@ The ABI epoch is 8 (`SdkVersion.cpp`), so every package must be rebuilt against 
 - P13 production.
 - The four hero demos in `PlanAmendments.md`.
 
-**Never run:** DX12 and Vulkan. Offline shader compiles for both pass on the Mac (`Utilities/GpuFluid/compile_offline.sh`). Run both galleries on both backends first, and watch for:
-- typed RGBA16F 3D UAV loads;
-- push-constant blocks;
-- an RWByteAddressBuffer passed as a function parameter;
-- the 2D-folded indirect arguments.
+## DX12 and Vulkan (PC, 2026-11-14)
+Windows 11, RTX 4080, Release engine and package, `Utilities/GpuFluid/run_gallery.ps1`.
+
+| Run | DX12 | Vulkan |
+|---|---|---|
+| GpuFluid Gallery (19 sub-tests) | all pass | all pass |
+| GpuFluid Liquid Gallery (8 sub-tests) | all pass | all pass |
+| Debug layer / validation layer | no GpuFluid messages | no GpuFluid messages |
+
+The items flagged on the Mac (typed RGBA16F 3D UAV loads, push-constant blocks, RWByteAddressBuffer parameters, 2D-folded indirect arguments) all worked as written.
+
+**Fixed on the way:**
+- Engine: `VDB Apply` drew its fullscreen triangle without binding a null mesh buffer, so DX12 drew with the previous pass's topology (`Not implemented`, primitive count 0xFFFFFFFF). It now binds one (engine `d44ff7505`).
+- Vulkan dropped NaNs: an injected NaN was never counted (an injected infinity was), because SPIR-V without `SignedZeroInfNanPreserve` may treat NaN as undefined. Every GpuFluid compute kernel now declares the mode (`GpuFluidFloatMode.hlsli`).
+- D3D12 debug layer: the emitter-brick and solid-shape uploads ran as copies in graph transfer passes, which disagreed with the resting state the device's inline upload assumes. Both buffers are now read-only and go up through `plGALDevice::UpdateBufferAheadOfTime`.
+- D3D12 debug layer: the liquid pass's scene-colour copy declared resolve states for what is a plain copy without MSAA. It now declares the copy states, as `TransparentForwardRenderPass` does.
+
+**Engine validation errors that are not GpuFluid's** (they fail every validation run): virtual shadow maps, the contact-shadow pass and the reflection cubemap (D3D12 barrier states); contact-shadow texture layouts and the screenshot's swapchain copy (Vulkan).
+
+**Running on the PC:**
+- The worktree has no transformed assets of its own. Copy `AssetCache` for `Data/Base`, `Data/Plugins`, `Data/UnitTests/SharedData` and `Data/UnitTests/GameEngineTest/SharedAssets` from a transformed checkout, or the images only say "Render pipeline resource is missing" while the numeric checks still pass.
+- `-debugDevice` turns on D3D12 GPU-based validation, too slow for these tests; use `PL_DX12_DEBUG_DEVICE=1` for the debug layer alone.
+- The package's GitHub push URL is SSH and this PC has no key; push over HTTPS.
 
 ## Open review findings: P2
 
