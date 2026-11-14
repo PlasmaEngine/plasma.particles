@@ -91,5 +91,8 @@ private:
   plGpuFluidVolumeId m_VolumeId = 0;
   plGpuFluidGasSettings m_ActiveSettings;
   plTime m_PulseTime;
+
+  /// The grid extents the owner's local bounds were last computed from; a change to Extents or VoxelSize refreshes them.
+  plVec3 m_vBoundsExtents = plVec3::MakeZero();
   mutable bool m_bPublished = false;
 };

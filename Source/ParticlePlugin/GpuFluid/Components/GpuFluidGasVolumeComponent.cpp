@@ -177,7 +177,11 @@ void plGpuFluidGasVolumeComponent::Update()
 
   EnsureVolume();
 
-  m_PulseTime += GetWorld()->GetClock().GetTimeDiff();
+  // Extents and VoxelSize are plain properties: a change (with or without a recreate) only reaches culling here.
+  if (m_VolumeId != 0 && GetGridExtents() != m_vBoundsExtents)
+    GetOwner()->UpdateLocalBounds();
+
+  m_PulseTime +=GetWorld()->GetClock().GetTimeDiff();
 
   const float fVoxel = plMath::Max(m_fVoxelSize, 1e-4f);
   const plVec3U32 vGrid = m_ActiveSettings.m_vBrickGrid;
@@ -206,7 +210,8 @@ void plGpuFluidGasVolumeComponent::OnUpdateLocalBounds(plMsgUpdateLocalBounds& m
   if (m_VolumeId == 0)
     return;
 
-  const plBoundingBox box = plBoundingBox::MakeFromCenterAndHalfExtents(plVec3::MakeZero(), GetGridExtents() * 0.5f);
+  m_vBoundsExtents = GetGridExtents();
+  const plBoundingBox box = plBoundingBox::MakeFromCenterAndHalfExtents(plVec3::MakeZero(), m_vBoundsExtents * 0.5f);
   msg.AddBounds(plBoundingBoxSphere::MakeFromBox(box),
     GetOwner()->IsDynamic() ? plDefaultSpatialDataCategories::RenderDynamic : plDefaultSpatialDataCategories::RenderStatic);
 }
