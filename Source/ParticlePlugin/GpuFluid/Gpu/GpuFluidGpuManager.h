@@ -1,5 +1,7 @@
 #pragma once
 
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidBasinSolver.h>
+
 #include <Foundation/Containers/DynamicArray.h>
 #include <Foundation/Containers/HashTable.h>
 #include <Foundation/Math/BoundingBox.h>
@@ -209,6 +211,16 @@ public:
   /// False until the first readback of the volume's current simulation has arrived.
   bool GetLiquidStats(plGpuFluidVolumeId id, plGpuFluidLiquidStats& out_stats) const;
 
+  /// Registers a flood basin's wave surface (vColumns columns of fColumnSize). Created on the render thread at the next
+  /// BeginRender.
+  plGpuFluidVolumeId CreateBasin(const plVec2U32& vColumns, float fColumnSize);
+
+  /// The work of the frame being updated. Update thread.
+  void SetBasinFrameInput(plGpuFluidVolumeId id, const plGpuFluidBasinFrameInput& input);
+
+  /// False while the basin has no surface on the GPU yet.
+  bool GetBasinPublish(plGpuFluidVolumeId id, plGpuFluidBasinPublish& out_publish) const;
+
   plUInt32 GetNumVolumes() const;
 
   /// Frames a retired volume's resources outlive it.
@@ -219,6 +231,7 @@ private:
   struct LiquidVolume;
 
   void RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt64 uiFrame, bool& inout_bAnyPass);
+  void RecordBasins(plRenderGraph& ref_graph, bool& inout_bAnyPass);
   void ReadLiquidStats(LiquidVolume& ref_volume);
 
   static void OnRenderEvent(const plRenderWorldRenderEvent& e);
@@ -250,6 +263,27 @@ private:
   };
   plDynamicArray<RetiredLiquid> m_RetiredLiquid;
   plGpuFluidLiquidShaders m_LiquidShaders;
+
+  struct BasinVolume
+  {
+    plVec2U32 m_vColumns = plVec2U32::MakeZero();
+    float m_fColumnSize = 0.05f;
+    plGpuFluidBasinSolver m_Solver; // render thread
+    bool m_bResourcesCreated = false;
+    bool m_bHasLastInput = false;
+    plGpuFluidBasinFrameInput m_LastInput;
+    plGpuFluidBasinFrameInput m_Input[2]; // under the mutex
+    bool m_bInputValid[2] = {false, false};
+    bool m_bPublishable = false;
+    plGpuFluidBasinPublish m_Publish;
+  };
+  plHashTable<plGpuFluidVolumeId, plUniquePtr<BasinVolume>> m_Basins;
+  struct RetiredBasin
+  {
+    plUniquePtr<BasinVolume> m_pVolume;
+    plUInt64 m_uiDestroyAtFrame = 0;
+  };
+  plDynamicArray<RetiredBasin> m_RetiredBasins;
 
   plSharedPtr<plRenderGraph> m_pGraph;
   plShaderResourceHandle m_hAnalyticSphereShader;

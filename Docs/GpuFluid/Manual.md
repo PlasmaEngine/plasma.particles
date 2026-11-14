@@ -41,6 +41,52 @@ volume and it pours there.
 Add a `GpuFluid Liquid Fill` and size its box over the area to fill. It is seeded when the simulation starts or
 resets; moving or resizing it in the editor restarts the volumes it overlaps, so the viewport shows the starting state.
 
+## Flooding large rooms: flood basins
+
+Particles everywhere cost too much for a big room (a 15 x 15 m hall knee-deep is 112 m^3 of water, millions of
+particles). A `GpuFluid Flood Basin` keeps such water as a level instead: the volume poured in, spread over the room's
+free floor, with a simulated wave surface on top. Particle water is kept for where the water really moves in 3D, such as a
+burst pipe's jet, and drains into the basin where it lands.
+
+1. Add an object with `GpuFluid Flood Basin` over the room. Its box's bottom is the floor; size Extents to the room's
+   inside and as tall as the water may get. Set InitialLevel for water present at the start.
+2. Furniture, pillars and a raised floor take their share of the room when they have collision (the same geometry the
+   liquid bakes): water rises faster around them and stops at a stage it does not reach.
+3. Sources in the box pour straight into the basin. For a visible jet, put the source inside a `GpuFluid Liquid Volume`
+   that covers the stream down to the floor: its water joins the basin below the basin's level.
+4. Drains in the box empty it while open (an orifice: discharge coefficient x area x sqrt(2 g head)).
+5. Rooms next to each other are a basin each. A `GpuFluid Flood Opening` box across the doorway (overlapping both basins;
+   its bottom is the sill) lets the higher water flow into the lower until they stand level. Open closes it (a door).
+6. Waves come from jets landing, moving `GpuFluid Collider`s crossing the water (a floating crate, a character's legs) and
+   streams through openings, and reflect off walls and furniture. WaveStrength, WaveDamping and MaxWaveHeight tune them.
+
+Gameplay reads the water with `GetWorldLevel()`, `GetLevel()` and `GetVolume()`; `AddVolume()` and `AddWave()` change it.
+The stats `GpuFluid/Basin/<object name>/Level` and `Volume` show it. While editing, the basin draws its level and volume.
+
+Not simulated: water spreading across a dry floor (the basin rises everywhere at once), breaking waves, water flowing over
+water, and an underwater view. The sample project `GpuFluidFloodHall` shows a 15 x 15 m hall and a side room flooding to
+about knee height.
+
+### GpuFluid Flood Basin
+
+| Property | Default | Description |
+| --- | --- | --- |
+| Extents | 15 x 15 x 2 m | The room; the box's bottom is the floor. |
+| ColumnSize | 0.05 m | Wave grid resolution (also of the solid profile). |
+| InitialLevel | 0 m | Water depth at the start and after a reset. |
+| DrainCoefficient | 0.6 | Discharge coefficient of its drains and openings. |
+| WaveDamping | 0.003 | Share of the wave motion lost per step. |
+| MaxWaveHeight | 0.12 m | Waves are clamped to it. |
+| WaveStrength | 1 | Scales every wave source. |
+| Absorption, ScatterColor, SurfaceRoughness, RefractionStrength | flood water | The look, as on a liquid volume. |
+
+### GpuFluid Flood Opening
+
+| Property | Default | Description |
+| --- | --- | --- |
+| HalfExtents | 0.3 x 0.6 x 1 m | The opening; it must overlap two basins. Its bottom is the sill, its top caps the flow. |
+| Open | on | Whether water passes (plMsgSetPlaying too). |
+
 ## Smoke
 
 1. Add an object with `GpuFluid Gas Volume` and size its Extents.

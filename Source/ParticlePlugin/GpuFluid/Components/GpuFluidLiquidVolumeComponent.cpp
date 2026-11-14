@@ -8,6 +8,7 @@
 #include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidColliderComponent.h>
+#include <ParticlePlugin/GpuFluid/Components/GpuFluidFloodBasinComponent.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidModifierComponents.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/Pipeline/View.h>
@@ -590,6 +591,22 @@ void plGpuFluidLiquidVolumeComponent::Update()
 
   m_pManager->SetLiquidFrameInput(m_VolumeId, input);
 
+  // What drained since the last readback goes into the flood basin around the volume (as water volume).
+  plGpuFluidLiquidStats stats;
+  if (GetStats(stats))
+  {
+    if (stats.m_uiDrained < m_uiDrainedCounted)
+      m_uiDrainedCounted = 0; // the simulation was reset
+    const plUInt32 uiNew = stats.m_uiDrained - m_uiDrainedCounted;
+    m_uiDrainedCounted = stats.m_uiDrained;
+    plGpuFluidFloodBasinComponent* pBasin = nullptr;
+    if (uiNew > 0 && GetWorld()->TryGetComponent(m_hBasin, pBasin))
+    {
+      const double fParticleVolume = plMath::Pow(static_cast<double>(m_ActiveSettings.m_fCellSize), 3.0) / plMath::Max(1u, m_ActiveSettings.m_uiParticlesPerCell);
+      pBasin->AddVolume(uiNew * fParticleVolume);
+    }
+  }
+
   if (cvar_GpuFluidLiquidShowSolids.GetValue())
     DrawStaticSolids(GetWorld());
 }
@@ -644,6 +661,17 @@ void plGpuFluidLiquidVolumeComponent::GatherModifiers(plGpuFluidLiquidFrameInput
     box.CenterType = plVec4(vDomainCenter.x, vDomainCenter.y, vDomainCenter.z, static_cast<float>(GPU_FLUID_LIQUID_SHAPE_BOX));
     box.Size = plVec4(vHalfExtents.x, vHalfExtents.y, vHalfExtents.z, 0.0f);
   };
+  // Inside a flood basin: the liquid reaching the basin's water joins it (a drain over the whole domain below the
+  // basin's level, at least two cells tall so particles landing on a dry floor go too); Update hands the drained volume
+  // to the basin.
+  m_hBasin.Invalidate();
+  if (plGpuFluidFloodBasinComponent* pBasin = plGpuFluidFloodBasinComponent::FindBasinAt(*GetWorld(), vCenter))
+  {
+    m_hBasin = pBasin->GetHandle();
+    const float fTop = plMath::Clamp(pBasin->GetWorldLevel() - vOrigin.z, 2.0f * m_ActiveSettings.m_fCellSize, vSize.z);
+    AddDrain(plVec3(vHalf.x, vHalf.y, 0.5f * fTop), plVec3(vHalf.x, vHalf.y, 0.5f * fTop));
+  }
+
   for (const plGpuFluidLiquidDrain& drain : m_Drains)
   {
     if (drain.m_bOpen)

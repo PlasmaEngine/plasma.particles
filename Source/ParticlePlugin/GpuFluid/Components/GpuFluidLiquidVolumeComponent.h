@@ -253,6 +253,9 @@ private:
 
   // What restarts the simulation (the fill components) and what bakes the solids again (the static colliders).
   plUInt64 m_uiFillHash = 0;
+  /// The flood basin the volume drains into (GatherModifiers), and the drained particles already handed to it.
+  plComponentHandle m_hBasin;
+  plUInt32 m_uiDrainedCounted = 0;
   plUInt64 m_uiColliderHash = 0;
 
   // Static solids: the bake in use, the one a task is building (with the meshes it reads), and what asks for a new one.

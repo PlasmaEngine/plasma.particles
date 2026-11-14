@@ -1,0 +1,72 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Basin/GpuFluidBasinConstants.h>
+
+// One step of the basin's waves: the linear shallow-water wave equation on the column heights,
+//   h_new = h + (h - h_old) (1 - damping) + (c dt / dx)^2 (sum of the 4 neighbours - 4 h),   c^2 = g depth,
+// in place of h_old (each thread reads only its own old height). A neighbour the water does not reach, or past the
+// basin's edge, takes the column's own height: the wave reflects there.
+
+RWByteAddressBuffer GpuFluidBasinHeight;   // h (read only here; written state, like every height buffer of the pass)
+RWByteAddressBuffer GpuFluidBasinHeightOld; // h_old in, h_new out
+ByteAddressBuffer GpuFluidBasinDepth;      // water depth per column (m), <= 0: no water
+
+uint ColumnIndex(int2 c) { return (uint)c.x + BASIN_CONST(GpuFluidBasinDims).x * (uint)c.y; }
+
+bool IsWater(int2 c)
+{
+  const int2 dims = int2(BASIN_CONST(GpuFluidBasinDims).xy);
+  return all(c >= 0) && all(c < dims) && asfloat(GpuFluidBasinDepth.Load(ColumnIndex(c) * 4)) > 0.0;
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_BASIN_GROUP, GPU_FLUID_BASIN_GROUP, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const int2 c = int2(dispatchThreadId.xy);
+  const int2 dims = int2(BASIN_CONST(GpuFluidBasinDims).xy);
+  if (any(c >= dims))
+    return;
+
+  const uint index = ColumnIndex(c);
+  const float depth = asfloat(GpuFluidBasinDepth.Load(index * 4));
+  if (depth <= 0.0)
+  {
+    GpuFluidBasinHeightOld.Store(index * 4, asuint(0.0));
+    return;
+  }
+
+  const float h = asfloat(GpuFluidBasinHeight.Load(index * 4));
+  const float hOld = asfloat(GpuFluidBasinHeightOld.Load(index * 4));
+
+  float laplacian = 0.0;
+  const int2 offsets[4] = {int2(-1, 0), int2(1, 0), int2(0, -1), int2(0, 1)};
+  [unroll] for (uint i = 0; i < 4; ++i)
+  {
+    const int2 n = c + offsets[i];
+    const float hn = IsWater(n) ? asfloat(GpuFluidBasinHeight.Load(ColumnIndex(n) * 4)) : h;
+    laplacian += hn - h;
+  }
+
+  const float dx = BASIN_CONST(GpuFluidBasinGrid).x;
+  const float dt = BASIN_CONST(GpuFluidBasinGrid).z;
+  const float damping = BASIN_CONST(GpuFluidBasinGrid).w;
+  const float gravity = BASIN_CONST(GpuFluidBasinLevel).y;
+  const float speedDepth = min(depth, BASIN_CONST(GpuFluidBasinLevel).w);
+  // At most 0.45, under the scheme's limit of 0.5 for the 2D stencil.
+  const float courant = min(gravity * speedDepth * dt * dt / (dx * dx), 0.45);
+
+  const float maxHeight = BASIN_CONST(GpuFluidBasinLevel).z;
+  float hNew = h + (h - hOld) * (1.0 - damping) + courant * laplacian;
+  hNew = clamp(hNew, -maxHeight, maxHeight);
+  if (!(abs(hNew) <= maxHeight)) // NaN
+    hNew = 0.0;
+  GpuFluidBasinHeightOld.Store(index * 4, asuint(hNew));
+}

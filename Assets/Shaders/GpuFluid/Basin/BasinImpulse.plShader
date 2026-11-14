@@ -1,0 +1,44 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Basin/GpuFluidBasinConstants.h>
+
+// Pushes the basin's water down (a negative height) or up in a smooth bump: what lands in it (a falling jet, a splash)
+// or moves through it (a wake). Added to the current heights only, so the bump starts at rest and spreads as a ring.
+// One thread per column of the bump's square, from column GpuFluidBasinDims.zw.
+
+RWByteAddressBuffer GpuFluidBasinHeight;
+ByteAddressBuffer GpuFluidBasinDepth;
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_BASIN_GROUP, GPU_FLUID_BASIN_GROUP, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint2 dims = BASIN_CONST(GpuFluidBasinDims).xy;
+  const uint2 c = BASIN_CONST(GpuFluidBasinDims).zw + dispatchThreadId.xy;
+  if (any(c >= dims))
+    return;
+
+  const uint index = c.x + dims.x * c.y;
+  if (asfloat(GpuFluidBasinDepth.Load(index * 4)) <= 0.0)
+    return;
+
+  const float dx = BASIN_CONST(GpuFluidBasinGrid).x;
+  const float4 impulse = BASIN_CONST(GpuFluidBasinImpulse);
+  const float2 position = (float2(c) + 0.5) * dx;
+  const float r = length(position - impulse.xy) / max(impulse.z, 1.0e-4);
+  if (r >= 1.0)
+    return;
+
+  // Smooth cosine bump: full at the centre, zero with zero slope at the radius.
+  const float shape = 0.5 + 0.5 * cos(r * 3.14159265);
+  const float maxHeight = BASIN_CONST(GpuFluidBasinLevel).z;
+  const float h = asfloat(GpuFluidBasinHeight.Load(index * 4)) + impulse.w * shape;
+  GpuFluidBasinHeight.Store(index * 4, asuint(clamp(h, -maxHeight, maxHeight)));
+}

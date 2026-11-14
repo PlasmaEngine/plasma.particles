@@ -1,0 +1,72 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Basin/GpuFluidBasinConstants.h>
+
+// The basin's surface mesh: one vertex per column corner ((columns + 1) per axis), at the level plus the mean height
+// of the water columns around it, with the normal of the heights. The quads (one per column) and the draw arguments
+// never change and were written once. Where the water does not reach, the plane continues a little below the level:
+// it lies inside the solid there (furniture, walls) and the opaque scene hides it.
+
+RWByteAddressBuffer GpuFluidBasinHeight; // read only here; the pass keeps every height buffer in the written state
+ByteAddressBuffer GpuFluidBasinDepth;
+RWByteAddressBuffer GpuFluidBasinVertices;
+
+float ColumnHeight(int2 c, out float weight)
+{
+  const int2 dims = int2(BASIN_CONST(GpuFluidBasinDims).xy);
+  weight = 0.0;
+  if (any(c < 0) || any(c >= dims))
+    return 0.0;
+  const uint index = (uint)c.x + (uint)dims.x * (uint)c.y;
+  if (asfloat(GpuFluidBasinDepth.Load(index * 4)) <= 0.0)
+    return 0.0;
+  weight = 1.0;
+  return asfloat(GpuFluidBasinHeight.Load(index * 4));
+}
+
+/// The wave height at corner v: the mean of the water columns that share it. A corner no water column shares sinks
+/// below the level, into the solid there, so the plane does not fight a solid top that stands at the level (a stage
+/// the water just reaches).
+float CornerHeight(int2 v)
+{
+  float sum = 0.0, count = 0.0, w;
+  [unroll] for (uint i = 0; i < 4; ++i)
+  {
+    const int2 c = v - int2(i & 1u, (i >> 1) & 1u);
+    sum += ColumnHeight(c, w);
+    count += w;
+  }
+  return count > 0.0 ? sum / count : -GPU_FLUID_BASIN_DRY_SINK;
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_BASIN_GROUP, GPU_FLUID_BASIN_GROUP, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const int2 v = int2(dispatchThreadId.xy);
+  const int2 corners = int2(BASIN_CONST(GpuFluidBasinDims).xy) + 1;
+  if (any(v >= corners))
+    return;
+
+  const float dx = BASIN_CONST(GpuFluidBasinGrid).x;
+  const float level = BASIN_CONST(GpuFluidBasinLevel).x;
+  const float h = CornerHeight(v);
+
+  // Central differences of the corner heights (one-sided at the edges).
+  const int2 lo = max(v - 1, int2(0, 0));
+  const int2 hi = min(v + 1, corners - 1);
+  const float dhdx = (CornerHeight(int2(hi.x, v.y)) - CornerHeight(int2(lo.x, v.y))) / max((float)(hi.x - lo.x) * dx, 1.0e-4);
+  const float dhdy = (CornerHeight(int2(v.x, hi.y)) - CornerHeight(int2(v.x, lo.y))) / max((float)(hi.y - lo.y) * dx, 1.0e-4);
+  const float3 normal = normalize(float3(-dhdx, -dhdy, 1.0));
+
+  const uint index = (uint)v.x + (uint)corners.x * (uint)v.y;
+  GpuFluidBasinVertices.Store4(index * GPU_FLUID_BASIN_VERTEX_BYTES, asuint(float4(float2(v) * dx, level + h, 1.0)));
+  GpuFluidBasinVertices.Store4(index * GPU_FLUID_BASIN_VERTEX_BYTES + 16, asuint(float4(normal, 0.0)));
+}

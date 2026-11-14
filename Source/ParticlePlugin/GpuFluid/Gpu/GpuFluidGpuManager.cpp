@@ -194,6 +194,16 @@ void plGpuFluidGpuManager::DestroyVolume(plGpuFluidVolumeId id)
 {
   PL_LOCK(m_Mutex);
 
+  plUniquePtr<BasinVolume> pBasin;
+  if (m_Basins.Remove(id, &pBasin) && pBasin != nullptr)
+  {
+    // Render data naming its mesh can still be waiting to render.
+    RetiredBasin& retired = m_RetiredBasins.ExpandAndGetRef();
+    retired.m_pVolume = std::move(pBasin);
+    retired.m_uiDestroyAtFrame = plRenderWorld::GetFrameCounter() + s_uiRetireFrames;
+    return;
+  }
+
   plUniquePtr<LiquidVolume> pLiquid;
   if (m_LiquidVolumes.Remove(id, &pLiquid) && pLiquid != nullptr)
   {
@@ -304,10 +314,84 @@ plUInt32 plGpuFluidGpuManager::GetGasCapacity(plGpuFluidVolumeId id) const
   return (*pVolume)->m_uiCapacity;
 }
 
+plGpuFluidVolumeId plGpuFluidGpuManager::CreateBasin(const plVec2U32& vColumns, float fColumnSize)
+{
+  PL_LOCK(m_Mutex);
+
+  plUniquePtr<BasinVolume> pVolume = PL_DEFAULT_NEW(BasinVolume);
+  pVolume->m_vColumns = vColumns;
+  pVolume->m_fColumnSize = fColumnSize;
+  const plGpuFluidVolumeId id = m_NextId++;
+  m_Basins.Insert(id, std::move(pVolume));
+  return id;
+}
+
+void plGpuFluidGpuManager::SetBasinFrameInput(plGpuFluidVolumeId id, const plGpuFluidBasinFrameInput& input)
+{
+  PL_LOCK(m_Mutex);
+
+  plUniquePtr<BasinVolume>* pVolume = nullptr;
+  if (!m_Basins.TryGetValue(id, pVolume))
+    return;
+
+  const plUInt32 uiIndex = plRenderWorld::GetDataIndexForExtraction();
+  (*pVolume)->m_Input[uiIndex] = input;
+  (*pVolume)->m_bInputValid[uiIndex] = true;
+}
+
+bool plGpuFluidGpuManager::GetBasinPublish(plGpuFluidVolumeId id, plGpuFluidBasinPublish& out_publish) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plUniquePtr<BasinVolume>* pVolume = nullptr;
+  if (!m_Basins.TryGetValue(id, pVolume) || !(*pVolume)->m_bPublishable)
+    return false;
+
+  out_publish = (*pVolume)->m_Publish;
+  return true;
+}
+
+void plGpuFluidGpuManager::RecordBasins(plRenderGraph& ref_graph, bool& inout_bAnyPass)
+{
+  const plUInt32 uiInputIndex = plRenderWorld::GetDataIndexForRendering();
+
+  for (auto it : m_Basins)
+  {
+    BasinVolume& volume = *it.Value();
+    if (!volume.m_bResourcesCreated)
+    {
+      volume.m_bResourcesCreated = true; // a failure is not retried every frame
+      volume.m_Solver.Create(volume.m_vColumns, volume.m_fColumnSize);
+    }
+
+    if (volume.m_bInputValid[uiInputIndex])
+    {
+      volume.m_LastInput = volume.m_Input[uiInputIndex];
+      volume.m_bInputValid[uiInputIndex] = false;
+      volume.m_bHasLastInput = true;
+    }
+
+    if (!volume.m_Solver.IsCreated() || !volume.m_bHasLastInput)
+    {
+      volume.m_bPublishable = false;
+      continue;
+    }
+
+    inout_bAnyPass = volume.m_Solver.Record(ref_graph, volume.m_LastInput) || inout_bAnyPass;
+
+    // Drawn from the next extraction on: the mesh it names is written by this frame's graph, before the views.
+    if (volume.m_Solver.HasRecorded())
+    {
+      volume.m_Solver.GetPublish(volume.m_Publish);
+      volume.m_bPublishable = true;
+    }
+  }
+}
+
 plUInt32 plGpuFluidGpuManager::GetNumVolumes() const
 {
   PL_LOCK(m_Mutex);
-  return m_GasVolumes.GetCount() + m_LiquidVolumes.GetCount();
+  return m_GasVolumes.GetCount() + m_LiquidVolumes.GetCount() + m_Basins.GetCount();
 }
 
 plGpuFluidVolumeId plGpuFluidGpuManager::CreateLiquidVolume(const plGpuFluidLiquidSettings& settings)
@@ -549,6 +633,13 @@ void plGpuFluidGpuManager::DestroyAll()
   m_RetiredLiquid.Clear();
   m_LiquidShaders.Release();
 
+  for (auto it : m_Basins)
+    it.Value()->m_Solver.Destroy();
+  m_Basins.Clear();
+  for (RetiredBasin& retired : m_RetiredBasins)
+    retired.m_pVolume->m_Solver.Destroy();
+  m_RetiredBasins.Clear();
+
   m_pGraph.Clear();
 }
 
@@ -656,7 +747,16 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     }
   }
 
-  if (m_GasVolumes.IsEmpty() && m_LiquidVolumes.IsEmpty())
+  for (plUInt32 i = m_RetiredBasins.GetCount(); i-- > 0;)
+  {
+    if (m_RetiredBasins[i].m_uiDestroyAtFrame <= uiFrame)
+    {
+      m_RetiredBasins[i].m_pVolume->m_Solver.Destroy();
+      m_RetiredBasins.RemoveAtAndSwap(i);
+    }
+  }
+
+  if (m_GasVolumes.IsEmpty() && m_LiquidVolumes.IsEmpty() && m_Basins.IsEmpty())
     return;
 
   if (!m_hAnalyticSphereShader.IsValid())
@@ -849,6 +949,7 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
   }
 
   RecordLiquidVolumes(graph, uiFrame, bAnyPass);
+  RecordBasins(graph, bAnyPass);
 
   if (bAnyPass)
     plRenderGraphManager::EnqueueRenderGraph(m_pGraph);
