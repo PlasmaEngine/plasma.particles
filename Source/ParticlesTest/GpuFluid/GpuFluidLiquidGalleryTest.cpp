@@ -2234,10 +2234,11 @@ plResult plGameEngineTestGpuFluidLiquidGallery::SetupFloodingRoom(bool bVideo)
   m_fDomainCellSize = s_fFloodCellSize;
   const float fX0 = m_vDomainMin.x, fX1 = -m_vDomainMin.x, fY0 = m_vDomainMin.y, fY1 = -m_vDomainMin.y;
 
-  // Sun high over the back wall: the back wall shades the back of the rooms, the window lets a patch through. Floor
-  // tiles of 32 cm for the refraction to show.
-  const plVec3 vToSun = plVec3(0.35f, -0.75f, 0.95f).GetNormalized();
-  m_pOwnApplication->AddSunAndSky(vToSun, TuningFloat("FLOOD_SUN", 8.0f));
+  // Sun high over the low front and left walls, from the camera's side, so it lights the floor and the water (from over
+  // the back wall it left the rooms in shadow and the water all but invisible). Floor tiles of 32 cm for the
+  // refraction to show.
+  const plVec3 vToSun = plVec3(TuningFloat("FLOOD_SUN_X", -0.45f), TuningFloat("FLOOD_SUN_Y", 0.55f), TuningFloat("FLOOD_SUN_Z", 1.1f)).GetNormalized();
+  m_pOwnApplication->AddSunAndSky(vToSun, TuningFloat("FLOOD_SUN", 3.0f));
   m_pOwnApplication->AddBox("Ground", plVec3(0.0f, 0.0f, -0.1f), plVec3(60.0f, 60.0f, 0.2f), plColor(0.20f, 0.20f, 0.19f));
   m_pOwnApplication->AddBox("Floor", plVec3(0.0f, 0.0f, 0.0005f), plVec3(vRoom.x, vRoom.y, 0.001f), plColor(0.28f, 0.22f, 0.16f));
   {
@@ -2345,8 +2346,8 @@ plResult plGameEngineTestGpuFluidLiquidGallery::SetupFloodingRoom(bool bVideo)
   // and the flood level is checked against the simulated time).
   pLiquid->m_uiMaxSubsteps = 5;
   pLiquid->m_fDebugTopSpeed = 4.0f;
-  // Flood water: a little murky.
-  pLiquid->m_vAbsorption = plVec3(TuningFloat("ABS_R", 0.9f), TuningFloat("ABS_G", 0.38f), TuningFloat("ABS_B", 0.28f));
+  // Flood water: murky enough that 20 cm of it reads as water over the tiles.
+  pLiquid->m_vAbsorption = plVec3(TuningFloat("ABS_R", 2.5f), TuningFloat("ABS_G", 1.0f), TuningFloat("ABS_B", 0.7f));
   pLiquid->m_ScatterColor = plColor(0.035f, 0.075f, 0.075f);
   ApplyTuningOverrides(pLiquid, true);
   m_vDomainCells = pLiquid->GetCells();

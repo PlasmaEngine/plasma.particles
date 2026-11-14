@@ -96,12 +96,14 @@ The items flagged on the Mac (typed RGBA16F 3D UAV loads, push-constant blocks, 
   - Finding 2 root cause: the gas data was intact. The brick view's edge emission, summed over every brick edge a ray crosses, tinted the dark gas until it read as transparent. Fixed with a dimmer default (`GpuFluid.Debug.BrickGlow` 0.04).
   - PC timings are not valid yet: the user's editor shared the GPU (~44% busy), so the PC CSVs are indicative only.
 - **P8A major finding: root cause found.** The render graph names the n-th pass of a name `<name> #n`, so every substep after the first was timed as `Sort #2`, `P2G #3` and so on. The liquid tests summed only the plain names, so they counted one substep. They now sum the repeats and clear stale ones (`GetPassMs` / `RemovePassStats`). Medium Room Substep Cost passes.
-- **P8 stage B: in progress** (the WIP from `wip/gpu-fluid-p8b-flood`, now built). Fixed: `triangle` keyword in LiquidSolidsBake, static boxes rotated after creation, the Static Solids triangle expectation, float-mode macros on the new kernels.
-  - Passing: Open Side Outflow, Sleep And Wake, No Liquid, Medium Room Substep Cost.
-  - Failing:
-    - Static Solids: 82.6% of the expected solid cells.
-    - Flooding Room: level +18% at 6 s and -32% at 12 s; 77% of the water left 20 s after the drain opens; P2G 125 ms a frame, which points to over-packed cells; the scene is too dark to show the water.
-    - Random-seed tanks: Quarter is marginal at 1.1 cm/s; Three Quarter boils at 12 cm/s.
+- **P8 stage B: working, one open bug.** Video `P8-flooding-room.mp4`.
+  - Root cause of the broken flood: domain-corner cells read as air (the level set's wall mirroring puts the particles' mean on the corner), so they gathered up to 40K particles. That made P2G cost 125 ms a frame and kept the water from draining. Fix: a cell with twice its share of particles is liquid.
+  - Now: volume ratio 1.00 throughout; settled level 0.953 of the poured volume over the free floor (limit +-5%); drain discharge coefficient 0.60 (Torricelli; a sharp-edged orifice is about 0.6); P2G 2.1 ms.
+  - Open:
+    - The static SDF bake misses solid cells: Static Solids 83%, Flooding Room 97% (both tests fail on it). The cause is not found yet; it is not culling or the sign pass.
+    - Random-seed tanks at quarter and three-quarter fill (P8A minor).
+    - The liquid costs about 18 ms a frame at up to 5 substeps.
+- **Next (user, 2026-11-14): a large performance pass to get game ready.** A research agent writes `Docs/GpuFluid/PerfResearch.md`. Time on an idle GPU (ask the user to close the editor).
 
 ## Open review findings: P2 (fixed in `2e6eb3e`; kept for reference)
 
