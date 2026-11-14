@@ -20,6 +20,10 @@ ALL
 // dissipation, the speed clamp, and no flow through closed domain faces on the -side (the +side faces are apron
 // texels, which GasHalo sets).
 //
+// Both guards count before they sanitise: every interior texel whose scalars, and every cell whose new face velocities,
+// came out NaN or infinite adds one to GPU_FLUID_STAT_NAN (GasAdvect passes a NaN on instead of dropping it), and every
+// face the speed clamp cut adds one to GPU_FLUID_STAT_SPEED_CLAMPED.
+//
 // Params: 0 up direction xyz (unit), alpha (m/s^2 per unit temperature)
 //         1 beta (m/s^2 per unit density), ambient temperature, cooling (1/s), density dissipation (1/s)
 //         2 density clamp, velocity dissipation (1/s), fuel dissipation (1/s), edge fade width (voxels, 0 = off)
@@ -28,6 +32,10 @@ ALL
 Texture3D<float4> GpuFluidScalarIn;         // advected scalars, apron filled
 RWTexture3D<float4> GpuFluidScalarOut;      // the current side, all 10 cubed texels
 RWTexture3D<float4> GpuFluidVelocityTarget; // the next velocity side, interior faces in place
+RWByteAddressBuffer GpuFluidStats;
+
+groupshared uint gs_uiNaN;
+groupshared uint gs_uiSpeedClamped;
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -35,6 +43,13 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   const uint slot = GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
+
+  if (groupIndex == 0)
+  {
+    gs_uiNaN = 0;
+    gs_uiSpeedClamped = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
 
   const float4 step = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep);
   const float4 p0 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
@@ -62,7 +77,12 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
       float4 s = GpuFluidScalarIn[base + stored];
       if (!GpuFluidIsFinite(s))
-        s = float4(0.0, 0.0, 0.0, 0.0); // counted by Finalize; never let it reach the march
+      {
+        // Counted once, at the interior texel; the apron texels are copies of other bricks' interiors.
+        if (all(stored >= GPU_FLUID_BRICK_APRON) && all(stored < GPU_FLUID_BRICK_APRON + GPU_FLUID_BRICK_SIZE))
+          InterlockedAdd(gs_uiNaN, 1u);
+        s = float4(0.0, 0.0, 0.0, 0.0); // never let it reach the march
+      }
 
       // Edge fade: gas thins out as it nears an open face, so what leaves the box fades away instead of being cut off
       // along the box's straight edge.
@@ -114,9 +134,19 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
     float4 velocity = GpuFluidVelocityTarget[texel];
     velocity.xyz = (velocity.xyz + dt * lift * p0.xyz) * exp(-p2.y * dt);
-    velocity.xyz = clamp(velocity.xyz, -GPU_FLUID_MAX_SPEED, GPU_FLUID_MAX_SPEED);
+    velocity.w = 0.0;
+
+    // Before the clamp, which would turn a NaN into a bound.
     if (!GpuFluidIsFinite(velocity))
+    {
+      InterlockedAdd(gs_uiNaN, 1u);
       velocity = float4(0.0, 0.0, 0.0, 0.0);
+    }
+
+    const uint uiClamped = (abs(velocity.x) > GPU_FLUID_MAX_SPEED ? 1u : 0u) + (abs(velocity.y) > GPU_FLUID_MAX_SPEED ? 1u : 0u) + (abs(velocity.z) > GPU_FLUID_MAX_SPEED ? 1u : 0u);
+    if (uiClamped > 0)
+      InterlockedAdd(gs_uiSpeedClamped, uiClamped);
+    velocity.xyz = clamp(velocity.xyz, -GPU_FLUID_MAX_SPEED, GPU_FLUID_MAX_SPEED);
 
     [unroll] for (uint axis = 0; axis < 3; ++axis)
     {
@@ -124,7 +154,16 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
         velocity[axis] = 0.0; // the wall itself
     }
 
-    velocity.w = 0.0;
     GpuFluidVelocityTarget[texel] = velocity;
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0)
+  {
+    if (gs_uiNaN > 0)
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);
+    if (gs_uiSpeedClamped > 0)
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_SPEED_CLAMPED * 4, gs_uiSpeedClamped);
   }
 }

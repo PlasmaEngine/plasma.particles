@@ -302,6 +302,8 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_uiActiveBricks = pWords[GPU_FLUID_STAT_ACTIVE_BRICKS];
   stats.m_uiDeniedBricks = pWords[GPU_FLUID_STAT_DENIED];
   stats.m_uiNaNCount = pWords[GPU_FLUID_STAT_NAN];
+  stats.m_uiOverflowCount = pWords[GPU_FLUID_STAT_OVERFLOW];
+  stats.m_uiSpeedClamped = pWords[GPU_FLUID_STAT_SPEED_CLAMPED];
   stats.m_vBoundsMinBrick.Set(pWords[GPU_FLUID_STAT_BOUNDS_MIN + 0], pWords[GPU_FLUID_STAT_BOUNDS_MIN + 1], pWords[GPU_FLUID_STAT_BOUNDS_MIN + 2]);
   stats.m_vBoundsMaxBrick.Set(pWords[GPU_FLUID_STAT_BOUNDS_MAX + 0], pWords[GPU_FLUID_STAT_BOUNDS_MAX + 1], pWords[GPU_FLUID_STAT_BOUNDS_MAX + 2]);
   stats.m_fMass = static_cast<float>(static_cast<double>(pWords[GPU_FLUID_STAT_MASS]) / GPU_FLUID_MASS_SCALE);
@@ -330,6 +332,8 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   plStats::SetStat("GpuFluid/Gas/ActiveBricks", stats.m_uiActiveBricks);
   plStats::SetStat("GpuFluid/Gas/BricksDenied", stats.m_uiDeniedBricks);
   plStats::SetStat("GpuFluid/Gas/NaNCount", stats.m_uiNaNCount);
+  plStats::SetStat("GpuFluid/Gas/OverflowCount", stats.m_uiOverflowCount);
+  plStats::SetStat("GpuFluid/Gas/SpeedClamped", stats.m_uiSpeedClamped);
 }
 
 void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)

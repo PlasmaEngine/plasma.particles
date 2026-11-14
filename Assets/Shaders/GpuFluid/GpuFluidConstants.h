@@ -53,7 +53,7 @@
 // maxima are stored as asuint of a non-negative float, which orders like the float.
 #define GPU_FLUID_STAT_SLOTS_REQUESTED 0 // bricks that asked for an atlas slot; allocated = min(this, capacity)
 #define GPU_FLUID_STAT_DENIED 1          // bricks that found the pool full
-#define GPU_FLUID_STAT_NAN 2             // texels that came out NaN or infinite and were zeroed
+#define GPU_FLUID_STAT_NAN 2             // interior values that came out NaN or infinite, counted by the guard that zeroed them
 #define GPU_FLUID_STAT_BOUNDS_MIN 3      // 3 words: smallest brick with content per axis (0xFFFFFFFF when none)
 #define GPU_FLUID_STAT_BOUNDS_MAX 6      // 3 words: largest brick with content per axis
 #define GPU_FLUID_STAT_MASS 9            // sum of interior density, fixed point GPU_FLUID_MASS_SCALE
@@ -67,6 +67,8 @@
 #define GPU_FLUID_STAT_ACTIVE_BRICKS 19  // bricks the solver ran on
 #define GPU_FLUID_STAT_DIV_PRE_SUM 20    // sum of |div u| before the last projection, fixed point GPU_FLUID_DIV_SCALE
 #define GPU_FLUID_STAT_DIV_POST_SUM 21   // sum of |div u| after it, fixed point GPU_FLUID_DIV_SCALE
+#define GPU_FLUID_STAT_OVERFLOW 22       // fixed-point contributions that were clamped to their range, or sums that wrapped
+#define GPU_FLUID_STAT_SPEED_CLAMPED 23  // face velocities GasForces clamped to GPU_FLUID_MAX_SPEED (summed over the frame's ticks)
 #define GPU_FLUID_STAT_WORD_COUNT 64
 #define GPU_FLUID_STATS_BYTES (GPU_FLUID_STAT_WORD_COUNT * 4)
 
@@ -76,5 +78,7 @@
 // Fixed point of the per-brick mean density in groupshared memory: 512 cells of density <= 64 stay below 2^32.
 #define GPU_FLUID_MEAN_SCALE 65536.0
 
-// Every face velocity is clamped to this, so a blow-up stays finite and the backtrace stays inside a few bricks.
+// GasForces clamps every face velocity to this before the projection, and GasEmit every source velocity, so a blow-up
+// stays finite. The projection can push a face past it again (about 60 m/s under Gas Safety's 48 m/s source); the next
+// tick's GasForces clamps it back. Backtraces of any length are safe: GpuFluidLocate goes through the page table.
 #define GPU_FLUID_MAX_SPEED 32.0

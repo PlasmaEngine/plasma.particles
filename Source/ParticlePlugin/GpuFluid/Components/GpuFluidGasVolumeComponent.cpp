@@ -10,6 +10,7 @@
 #include <RendererCore/Pipeline/RenderDataManager.h>
 
 plCVarFloat cvar_GpuFluidDebugStepTime("GpuFluid.Debug.StepTime", 0.0f, plCVarFlags::Default, "Overrides the gas solver's fixed tick, in seconds (0: 1/60 s, 1/30 s on Low).");
+plCVarBool cvar_GpuFluidDebugInjectNaN("GpuFluid.Debug.InjectNaN", false, plCVarFlags::Default, "Test hook: the next simulated gas tick writes one NaN into the density at its source's centre, then this turns itself off.");
 plCVarBool cvar_GpuFluidDebugSemiLagrangian("GpuFluid.Debug.SemiLagrangian", false, plCVarFlags::Default, "Advects the gas scalars semi-Lagrangian only, without the MacCormack correction, whatever the quality.");
 
 // clang-format off
@@ -364,6 +365,13 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
     emitter.m_bDriveVelocity = true;
     emitter.m_fNoiseStrength = m_fEmitterNoise;
     emitter.m_fNoiseFrequency = fVoxel / plMath::Max(m_fEmitterNoiseScale, 0.01f);
+
+    // One shot, on a frame that runs a tick.
+    if (uiTicks > 0 && cvar_GpuFluidDebugInjectNaN.GetValue())
+    {
+      sim.m_bInjectNaN = true;
+      cvar_GpuFluidDebugInjectNaN = false;
+    }
   }
 }
 

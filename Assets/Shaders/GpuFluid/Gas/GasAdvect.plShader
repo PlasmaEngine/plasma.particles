@@ -21,6 +21,9 @@ ALL
 //   the range of the eight texels the backtrace interpolated between, so it cannot overshoot. In place on the next
 //   scalars (each thread its own texel).
 //
+// No mode sanitises: a NaN or infinite value is written as NaN, so GasForces, the scalars' next writer, counts it in
+// GPU_FLUID_STAT_NAN before it zeroes it.
+//
 // Semi-Lagrangian smears the scalars by about a quarter voxel squared every tick, several voxels over a few hundred
 // ticks; the correction removes most of that, which is what keeps smoke edges and puffs crisp.
 
@@ -79,7 +82,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
     const float4 forward = GpuFluidScalarOut[texel];
     const float4 corrected = forward + 0.5 * (GpuFluidScalarIn.Load(int4(texel, 0)) - GpuFluidScratch[texel]);
-    GpuFluidScalarOut[texel] = max(clamp(corrected, lower, upper), 0.0);
+    // clamp and max would drop a NaN; it is carried on to GasForces, which counts and zeroes it.
+    GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(clamp(corrected, lower, upper), 0.0), corrected, lower, upper);
     return;
   }
 
@@ -87,7 +91,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   {
     const float3 from = Trace(centre, timeStepVoxels);
     const float4 value = GpuFluidSampleAtlas(GpuFluidScalarIn, GpuFluidLinearClamp, from - 0.5, noGas);
-    GpuFluidScalarOut[texel] = max(value, 0.0);
+    GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(value, 0.0), value, value, value);
   }
 
   // Each velocity component at its own face centre.

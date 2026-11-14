@@ -234,7 +234,9 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         plGpuFluidGasConstants& c = emitters.ExpandAndGetRef();
         c = base;
         const plUInt32 uiShape = emitter.m_Shape == plGpuFluidEmitterShape::Box ? GPU_FLUID_EMITTER_BOX : GPU_FLUID_EMITTER_SPHERE;
-        c.GpuFluidGasPass = plVec4U32(0, uiShape, 0, emitter.m_bDriveVelocity ? 1u : 0u);
+        // Test hook: the first source of the frame's first tick writes one NaN (GpuFluid.Debug.InjectNaN).
+        const bool bInjectNaN = sim.m_bInjectNaN && uiTick == 0 && emitters.GetCount() == 1;
+        c.GpuFluidGasPass = plVec4U32(0, uiShape, 0, (emitter.m_bDriveVelocity ? 1u : 0u) | (bInjectNaN ? 2u : 0u));
         c.GpuFluidGasParams0 = plVec4(emitter.m_vCenterVoxels.x, emitter.m_vCenterVoxels.y, emitter.m_vCenterVoxels.z, emitter.m_fRadiusVoxels);
         c.GpuFluidGasParams1 = plVec4(emitter.m_vHalfExtentsVoxels.x, emitter.m_vHalfExtentsVoxels.y, emitter.m_vHalfExtentsVoxels.z, emitter.m_fSoftnessVoxels);
         c.GpuFluidGasParams2 = plVec4(emitter.m_fDensityRate, emitter.m_fTemperature, emitter.m_fFuelRate, emitter.m_fNoiseStrength);
@@ -335,6 +337,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
       pass.ReadTexture(hScalar1, {}, plGALResourceState::ComputeShaderRead);
       pass.WriteTexture(hScalar0);
       pass.WriteTexture(hVelocityNext);
+      pass.WriteBuffer(hStats);
       pass.HasSideEffects();
       pass.SetExecuteCallback([=, hForces = m_hForcesShader, hHalo = m_hHaloShader](const plRenderGraphContext& ctx)
         {
@@ -345,6 +348,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
           bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalar1));
           bindGroup.BindTexture("GpuFluidScalarOut", ctx.ResolveTexture(hScalar0));
           bindGroup.BindTexture("GpuFluidVelocityTarget", hVelocityGAL);
+          bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
           DispatchPerBrick(ctx, gridGraph, hForces, forces);
 
           UavBarrier(pEncoder, hVelocityGAL);

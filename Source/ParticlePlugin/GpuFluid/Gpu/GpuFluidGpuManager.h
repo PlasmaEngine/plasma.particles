@@ -57,7 +57,9 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   plUInt32 m_uiAllocatedBricks = 0; ///< bricks with content: kept by the analytic source, above the threshold for the solver
   plUInt32 m_uiActiveBricks = 0;    ///< bricks the solver ran on
   plUInt32 m_uiDeniedBricks = 0;    ///< the ones that found the pool full
-  plUInt32 m_uiNaNCount = 0;        ///< texels that came out NaN or infinite and were zeroed
+  plUInt32 m_uiNaNCount = 0;        ///< interior values that came out NaN or infinite, counted where they were zeroed
+  plUInt32 m_uiOverflowCount = 0;   ///< fixed-point stat contributions that were clamped, or sums that wrapped
+  plUInt32 m_uiSpeedClamped = 0;    ///< face velocities the solver clamped to 32 m/s, over the frame's ticks
 
   /// Bricks with content span these, inclusive. Min > max on an axis when there are none.
   plVec3U32 m_vBoundsMinBrick = plVec3U32::MakeZero();

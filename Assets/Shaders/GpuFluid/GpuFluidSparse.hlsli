@@ -89,9 +89,42 @@ bool GpuFluidFaceOpen(uint axis, int side)
   return (GpuFluidOpenFaces() & bit) != 0;
 }
 
+/// NaN or infinite, by the exponent bits, so no compiler float mode can fold the test away.
+bool GpuFluidIsNonFinite(float x)
+{
+  return (asuint(x) & 0x7F800000u) == 0x7F800000u;
+}
+
 bool GpuFluidIsFinite(float4 v)
 {
-  return all(!isnan(v)) && all(!isinf(v));
+  return !GpuFluidIsNonFinite(v.x) && !GpuFluidIsNonFinite(v.y) && !GpuFluidIsNonFinite(v.z) && !GpuFluidIsNonFinite(v.w);
+}
+
+float GpuFluidNaN()
+{
+  return asfloat(0x7FC00000u);
+}
+
+/// result, except that every component which is NaN or infinite in any of the sources stays NaN. min, max and clamp
+/// drop a NaN operand; this keeps a non-finite value alive past them, so the guard that zeroes it also counts it.
+float4 GpuFluidKeepNonFinite(float4 result, float4 a, float4 b, float4 c)
+{
+  [unroll] for (uint i = 0; i < 4; ++i)
+  {
+    if (GpuFluidIsNonFinite(a[i]) || GpuFluidIsNonFinite(b[i]) || GpuFluidIsNonFinite(c[i]))
+      result[i] = GpuFluidNaN();
+  }
+  return result;
+}
+
+/// InterlockedAdd into a stats word that counts one more overflow when the sum wraps. The first wrap is always seen,
+/// which is all the overflow check needs.
+void GpuFluidStatAdd(RWByteAddressBuffer stats, uint word, uint value, inout uint io_overflow)
+{
+  uint original;
+  stats.InterlockedAdd(word * 4, value, original);
+  if (original + value < original)
+    io_overflow += 1;
 }
 
 #if !defined(GPU_FLUID_SPARSE_WRITABLE)

@@ -64,6 +64,10 @@ struct plGpuFluidGasSimulation
   /// always semi-Lagrangian in P1.
   bool m_bMacCormack = true;
 
+  /// Test hook (GpuFluid.Debug.InjectNaN): the first source writes NaN into one density texel on the frame's first
+  /// tick, so a test can see the NaN guards count.
+  bool m_bInjectNaN = false;
+
   float m_fAllocThreshold = 1e-3f; ///< a brick with a smaller peak is empty for the march
   float m_fMeanFloor = 1e-4f;      ///< smallest brick mean a brick with content gets in the brick table
 
@@ -87,7 +91,7 @@ struct plGpuFluidGasSimulation
 /// - Gas/Emit: GasEmit per source, in place.
 /// - Gas/Advect: GasAdvect (RK2 semi-Lagrangian, hardware trilinear), GasHalo of the scalars; with MacCormack the
 ///   reverse trace into Scratch, the limited correction and GasHalo again.
-/// - Gas/Forces: GasForces (buoyancy, cooling, dissipation, clamp), GasHalo of the velocity.
+/// - Gas/Forces: GasForces (buoyancy, cooling, dissipation, clamp; counts NaN and clamped faces), GasHalo of the velocity.
 /// - Gas/Pressure: GasDivergence, red-black SOR sweeps, GasProject, GasHalo of the velocity (keep mode).
 /// Once per frame, Gas/Finalize: GasFinalize (NaN guard, brick table, stats).
 ///
