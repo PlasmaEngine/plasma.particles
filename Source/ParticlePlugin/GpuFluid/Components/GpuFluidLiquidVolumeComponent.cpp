@@ -286,14 +286,11 @@ bool plGpuFluidLiquidVolumeComponent::GetStats(plGpuFluidLiquidStats& out_stats)
 plUInt32 plGpuFluidLiquidVolumeComponent::GetTierMaxSubsteps(plGpuFluidQuality::Enum quality)
 {
   // Plan amendment A2: Medium at most 3 substeps; beyond that the tick simulates less time (slow motion) instead of
-  // breaking the CFL number. Low keeps the plan's single substep.
+  // breaking the CFL number. Low keeps the plan's single substep, High and Ultra the plan's 3.
   switch (quality)
   {
     case plGpuFluidQuality::Low:
       return 1;
-    case plGpuFluidQuality::High:
-    case plGpuFluidQuality::Ultra:
-      return 4;
     default:
       return 3;
   }
@@ -301,7 +298,10 @@ plUInt32 plGpuFluidLiquidVolumeComponent::GetTierMaxSubsteps(plGpuFluidQuality::
 
 plUInt32 plGpuFluidLiquidVolumeComponent::GetTierPressureIterations(plGpuFluidQuality::Enum quality)
 {
-  // MGPCG iterations per substep, one multigrid V-cycle each (plan amendment A2: a small fixed count, measured in P8).
+  // MGPCG iterations per substep, one multigrid V-cycle each (plan amendment A2: a small fixed count, measured in P8;
+  // see plGpuFluidLiquidFrameInput::m_bPcg). Medium 4: median relative residual 2e-4 at the Medium room, 95th
+  // percentile 7e-4. High 6: the first count that kept every tick below 1e-3 in both the room and the dam break.
+  // Low 3 and Ultra 8 are not measured on their own tiers.
   switch (quality)
   {
     case plGpuFluidQuality::Low:
