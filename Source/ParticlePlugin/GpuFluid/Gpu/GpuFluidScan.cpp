@@ -92,7 +92,9 @@ void plGpuFluidScan::RecordExclusiveScan(plRenderContext* pContext, plGALCommand
   auto Blocks = [&](plUInt32 uiCount, plGALBufferHandle hIn, plUInt32 uiIn, plGALBufferHandle hOut, plUInt32 uiOut, plUInt32 uiSums)
   {
     plGpuFluidScanConstants constants = {};
+    // "= {}" leaves the pl vector members uninitialised in Release builds: every member is set.
     constants.GpuFluidScanRange = plVec4U32(uiCount, uiIn, uiOut, uiSums);
+    constants.GpuFluidScanArgs = plVec4U32(0, 0, 0, 0);
     pContext->SetPushConstants("plGpuFluidScanConstants", constants);
     pContext->BindShader(m_hBlocksShader);
 
@@ -108,6 +110,7 @@ void plGpuFluidScan::RecordExclusiveScan(plRenderContext* pContext, plGALCommand
   {
     plGpuFluidScanConstants constants = {};
     constants.GpuFluidScanRange = plVec4U32(uiCount, 0, uiOut, uiSums);
+    constants.GpuFluidScanArgs = plVec4U32(0, 0, 0, 0);
     pContext->SetPushConstants("plGpuFluidScanConstants", constants);
     pContext->BindShader(m_hAddShader);
 
@@ -140,6 +143,7 @@ void plGpuFluidScan::RecordExclusiveScan(plRenderContext* pContext, plGALCommand
 void plGpuFluidScan::RecordIndirectArgs(plRenderContext* pContext, plGALBufferHandle hCount, plUInt32 uiCountOffset, plUInt32 uiItemsPerGroup, plGALBufferHandle hArgs, plUInt32 uiArgsOffset) const
 {
   plGpuFluidScanConstants constants = {};
+  constants.GpuFluidScanRange = plVec4U32(0, 0, 0, 0);
   constants.GpuFluidScanArgs = plVec4U32(uiCountOffset, plMath::Max(uiItemsPerGroup, 1u), uiArgsOffset, 0);
   pContext->SetPushConstants("plGpuFluidScanConstants", constants);
   pContext->BindShader(m_hArgsShader);

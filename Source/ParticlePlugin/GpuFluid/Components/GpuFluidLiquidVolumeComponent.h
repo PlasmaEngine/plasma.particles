@@ -150,8 +150,8 @@ public:
   plDynamicArray<plGpuFluidLiquidInflow> m_Inflows;                     // [ property ]
 
   float m_fFlipBlend = 0.1f;                                            // [ property ]
-  plUInt32 m_uiMaxSubsteps = 4;                                         // [ property ]
-  plUInt32 m_uiPressureCycles = 8;                                      // [ property ] V-cycles per substep (MGPCG: one per iteration)
+  plUInt32 m_uiMaxSubsteps = 0;                                         // [ property ] 0: the quality tier's (GetTierMaxSubsteps)
+  plUInt32 m_uiPressureCycles = 0;                                      // [ property ] MGPCG iterations per substep, one V-cycle each; 0: the tier's
   float m_fWallFriction = 0.0f;                                         // [ property ]
   bool m_bAlwaysSimulate = true;                                        // [ property ]
 
@@ -178,6 +178,11 @@ public:
 
   /// World position of the domain's minimum corner.
   plVec3 GetDomainOrigin() const;
+
+  /// Substep cap of a quality tier, when MaxSubsteps is 0.
+  static plUInt32 GetTierMaxSubsteps(plGpuFluidQuality::Enum quality);
+  /// MGPCG iterations per substep of a quality tier (one multigrid V-cycle each), when PressureCycles is 0.
+  static plUInt32 GetTierPressureIterations(plGpuFluidQuality::Enum quality);
 
   /// What the GPU counted, two to three frames late. False until the first readback of the current simulation.
   bool GetStats(plGpuFluidLiquidStats& out_stats) const;

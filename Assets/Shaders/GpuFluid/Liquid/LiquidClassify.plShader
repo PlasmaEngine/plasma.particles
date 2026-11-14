@@ -9,9 +9,11 @@ ALL
 #define GPU_FLUID_LIQUID_USE_SHAPES
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
-// Cell types: solid when the centre is inside an analytic solid (the domain walls are faces, not cells); liquid when
-// the cell holds particles or, with the level set (GPU_FLUID_LIQUID_FLAG_LEVEL_SET), when phi < 0 at its centre, so an
-// empty cell inside the pool is liquid and not a hole of air the pressure drives a jet into; air otherwise.
+// Cell types: solid when the centre is inside an analytic solid (the domain walls are faces, not cells); liquid, with
+// the level set (GPU_FLUID_LIQUID_FLAG_LEVEL_SET), when phi < tau at its centre (or, in the P7 union mode, when it holds
+// particles or phi < 0), so an empty cell inside the pool is liquid and not a hole of air the pressure drives a jet
+// into, and a stray particle on a resting surface is not a cell of its own; without the level set when it holds
+// particles; air otherwise.
 //
 // A liquid cell's type word also holds the free surface's theta towards each air neighbour (GpuFluidLiquidConstants.h):
 // theta = phi_i / (phi_i - phi_j) from the level set, at least the dispatch's minimum, which is also what a cell with
@@ -42,18 +44,35 @@ float PhiAt(int3 c)
   return asfloat(GpuFluidLiqPhi.Load(LiqCellIndex(c) * 4));
 }
 
-/// Whether the non-solid cell c inside the domain is liquid. GpuFluidLiqPassF.z > 0 (with the level set): phi < 0
-/// alone, so particles outside the surface (loose ones on a resting surface, spray) are not cells of their own that
-/// the pressure has to hold up, and move with the velocity extrapolated from the liquid.
+/// Whether the non-solid cell c inside the domain is liquid (with the level set): phi < tau (GpuFluidLiqPassF.y,
+/// cells), or it holds at least GpuFluidLiqPass.y particles and phi < sigma (GpuFluidLiqPassF.z, cells; -1e3 when the
+/// level set alone decides). Particles outside (loose ones on a resting surface, spray) are then not cells of their
+/// own that the pressure has to hold up, and fly ballistically.
+///
+/// Next to an analytic solid a cell holding particles is liquid whatever phi says. The level set mirrors the particles at
+/// the domain walls but not at solids, so beside a solid the mean particle position is pulled away from it and phi
+/// reads too high: a pool's cells along the foot of a glass wall would be air, with the free surface's zero pressure
+/// at the bottom of the pool, and the pressure would drive jets into them that carry particles through the wall.
 bool IsLiquidCell(int3 c, uint count, float phi)
 {
   if (!LiqLevelSetEnabled())
     return count > 0;
-  if (LIQ_CONST(GpuFluidLiqPassF).z > 0.0)
-    return phi < 0.0;
-  // GpuFluidLiqPassF.w: a cell with particles counts only while its centre lies less than this (cells) outside the
-  // surface; strays further out are in air and take the extrapolated velocity.
-  return (count > 0 && phi < LIQ_CONST(GpuFluidLiqPassF).w) || phi < 0.0;
+  if (phi < LIQ_CONST(GpuFluidLiqPassF).y || (count >= max(LIQ_CONST(GpuFluidLiqPass).y, 1u) && phi < LIQ_CONST(GpuFluidLiqPassF).z))
+    return true;
+  if (count == 0 || LiqShapeCount() == 0)
+    return false;
+  [unroll] for (uint n = 0; n < 6; ++n)
+  {
+    if (IsSolidCell(c + LiqNeighbourOffset(n)))
+      return true;
+  }
+  return false;
+}
+
+/// phi relative to the pressure's free surface, phi = tau.
+float SurfacePhi(float phi)
+{
+  return phi - LIQ_CONST(GpuFluidLiqPassF).y;
 }
 
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
@@ -77,10 +96,11 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     const bool bLevelSet = LiqLevelSetEnabled();
     const float phi = bLevelSet ? PhiAt(cell) : 0.0;
     // GpuFluidLiqPassF.x: the smallest theta (a free surface right at a cell centre would make 1 / theta, and the
-    // pressure's sensitivity to the particles' noise, unbounded); y > 0: theta from the level set at all, else the
-    // constant.
+    // pressure's sensitivity to the particles' noise, unbounded); GpuFluidLiqPass.x bit 0: theta from the level set at
+    // all, else the constant.
     const float thetaMin = clamp(LIQ_CONST(GpuFluidLiqPassF).x, 1.0 / GPU_FLUID_LIQUID_THETA_STEPS, 1.0);
-    const bool bLevelSetTheta = bLevelSet && LIQ_CONST(GpuFluidLiqPassF).y > 0.0;
+    const bool bLevelSetTheta = bLevelSet && (LIQ_CONST(GpuFluidLiqPass).x & 1u) != 0;
+    const float surfacePhi = SurfacePhi(phi);
 
     uint type = GPU_FLUID_LIQUID_CELL_AIR;
     if (bSolid)
@@ -91,9 +111,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     uint word = type;
 
     // The volume measure keeps its own liquid cells, every cell holding particles plus the empty ones inside the level
-    // set, whatever the pressure's cells are. With phi < 0 alone for the pressure (GpuFluidLiqPassF.z > 0) the
-    // measure's surface cells would be the noisy band the level set's radius adds above the particles, and the control
-    // would hold a pool that a splash had loosened at that looser packing.
+    // set, whatever the pressure's cells are. With phi < tau alone for the pressure the measure's surface cells would
+    // be the band tau adds above the particles, and the control would hold a pool at the wrong packing.
     const bool bMeasureLiquid = !bSolid && (count > 0 || (bLevelSet && phi < 0.0));
     const bool bLiquid = type == GPU_FLUID_LIQUID_CELL_LIQUID;
 
@@ -120,8 +139,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
           if (bLevelSetTheta && !bNbSolid && !bNbLiquid)
           {
-            // nbPhi >= 0 here (an air cell). The surface lies theta of the way from this centre to the neighbour's.
-            const float theta = phi < 0.0 ? phi / min(phi - nbPhi, -1.0e-6) : 0.0;
+            // The neighbour is air. The surface lies theta of the way from this centre to the neighbour's.
+            const float nbSurfacePhi = SurfacePhi(nbPhi);
+            const float theta = surfacePhi < 0.0 ? surfacePhi / min(surfacePhi - nbSurfacePhi, -1.0e-6) : 0.0;
             const float t = clamp(theta, thetaMin, 1.0);
             code = clamp((uint)round(t * GPU_FLUID_LIQUID_THETA_STEPS), 1u, (uint)GPU_FLUID_LIQUID_THETA_STEPS);
           }

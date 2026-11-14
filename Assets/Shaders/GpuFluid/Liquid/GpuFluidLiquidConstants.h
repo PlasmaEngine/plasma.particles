@@ -76,6 +76,8 @@
 
 // Speeds summed into the stats in mm/s.
 #define GPU_FLUID_LIQUID_SPEED_SUM_SCALE 1000.0
+// Squared speeds summed in (cm/s)^2: a group of 256 at the 32 m/s clamp stays below 2^32.
+#define GPU_FLUID_LIQUID_SPEED_SQ_SCALE 10000.0
 
 #define GPU_FLUID_LIQUID_MAX_SHAPES 8
 #define GPU_FLUID_LIQUID_SHAPE_BOX 0u
@@ -160,6 +162,8 @@
 #define GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES 33  // surface vertices written this frame (Liquid/Surface)
 #define GPU_FLUID_LIQUID_STAT_SURFACE_QUADS 34     // surface quads written this frame
 #define GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW 35  // vertices and quads that did not fit
+#define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM 36      // sum of squared speeds, GPU_FLUID_LIQUID_SPEED_SQ_SCALE per (m/s)^2, low 32 bits
+#define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM_HI 37   // and the carries out of it (high 32 bits)
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024
 #define GPU_FLUID_LIQUID_STAT_WORD_COUNT (GPU_FLUID_LIQUID_STAT_HIST + GPU_FLUID_LIQUID_HIST_BINS)

@@ -82,7 +82,8 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   // A particle in an air cell (outside the level set's surface: spray, a stray above a resting surface) has no pressure
   // holding it up, and the grid velocity there is extrapolated from the liquid, without gravity: it flies ballistic.
-  const bool bBallistic = (GpuFluidLiqCellType.Load(LiqCellIndex(LiqParticleCell(x)) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_AIR;
+  // GpuFluidLiqPass.x = 0 turns this off (the particle takes the extrapolated velocity).
+  const bool bBallistic = LIQ_CONST(GpuFluidLiqPass).x != 0 && (GpuFluidLiqCellType.Load(LiqCellIndex(LiqParticleCell(x)) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_AIR;
   if (bBallistic)
   {
     v = vOld + LiqGravity() * dt;

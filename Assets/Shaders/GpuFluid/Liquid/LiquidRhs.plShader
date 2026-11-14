@@ -6,26 +6,42 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_BRICK_DISPATCH
-#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
 // Right-hand side of the pressure solve. The unknown is phi = p * dt / (rho * dx) (m/s), so a face's projection is
 // u -= phi(i) - phi(i - 1) and the equation of a liquid cell is sum over its open faces of (phi_i - phi_nb) =
 // dx * D_target - F, with F the cell's net outflux (m/s) and D_target the divergence the solve aims for:
-// - local density correction k * clamp(n / n0 - 1, 0, 1), k in 1/s and at most 0.5 / dt: crowded cells push their
-//   particles apart. A rate, not the plan's k / dt: with a share per substep the packing the correction settles at
-//   moves with the substep count, and a pool breathes every time that count changes;
+// - local density correction k * e, k in 1/s (at most 0.5 / dt), e = rho / rho0 - 1 the density error of the cell.
+//   rho is a smooth particle density: the quadratic B-spline kernel at the cell centre, summed over the particles of
+//   the liquid cells of the 3x3x3 block around it and normalised by the kernel mass of those cells (so walls, solids
+//   and air around do not read as missing particles). A smooth measure, unlike a particle count, changes little when
+//   a particle crosses a face, so a pool the correction has evened out stays at rest.
+//   Two-sided (dense cells push out, sparse ones pull in) in deep cells, whose 3x3x3 block holds no air; one-sided
+//   (only crowding is corrected) near the free surface, where a cell is only partly liquid and reads sparse. The
+//   equilibrium is e = 0 in the deep liquid whatever dt and the substep count, so the rest packing does not follow
+//   them.
 // - global volume control c * (V_target - V) / V_target with c in 1/s, V_target = (seeded - drained) / n0
-//   cells, V the measure of LiquidClassify. A rate, not a share per substep, so the correction per second does not
-//   follow the substep count. The relative error is clamped to +-25%.
+//   cells, V the measure of LiquidClassify. The relative error is clamped to +-25%.
 // Also rescales the warm start by the dt ratio (exact for the hydrostatic part of phi) and zeroes phi outside the
 // liquid.
+//
+// GpuFluidLiqPassF: x dead zone on |e| (0: none), y > 0 two-sided in deep cells, z the largest |e| corrected.
 
 ByteAddressBuffer GpuFluidLiqCellCount;
+ByteAddressBuffer GpuFluidLiqCellStart;
+ByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqCellType;
 RWByteAddressBuffer GpuFluidLiqVel;
 RWByteAddressBuffer GpuFluidLiqPressure;
 RWByteAddressBuffer GpuFluidLiqRhs;
 RWByteAddressBuffer GpuFluidLiqCounters;
+
+/// Quadratic B-spline at offset t (cells).
+float BSpline2(float t)
+{
+  const float a = abs(t);
+  return a < 0.5 ? 0.75 - a * a : (a < 1.5 ? 0.5 * (1.5 - a) * (1.5 - a) : 0.0);
+}
 
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
@@ -50,33 +66,63 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   }
 
   const float4 solve = LIQ_CONST(GpuFluidLiqSolve);
+  const float4 params = LIQ_CONST(GpuFluidLiqPassF);
   const float dt = max(LiqDt(), 1e-6);
   const float n0 = LiqParticlesPerCell();
+  const uint3 cells = LiqCells();
+  const float3 centre = float3(cell) + 0.5;
+  const float invDx = LiqInvDx();
 
-  // Crowding is measured on the mean count of the 3x3x3 cells around (inside the domain): a single cell's count jumps
-  // by a whole particle whenever one crosses a face, and a one-sided correction of that noise would inflate the liquid.
-  float countSum = 0.0;
-  float cellsInside = 0.0;
+  // Kernel mass of a cell at offset o from the centre, per axis: 2/3 for the cell itself, 1/6 for each side.
+  float density = 0.0;
+  float mass = 0.0;
+  bool bDeep = true;
   for (int z = -1; z <= 1; ++z)
   {
     for (int y = -1; y <= 1; ++y)
     {
       for (int x = -1; x <= 1; ++x)
       {
-        const int3 nb = cell + int3(x, y, z);
-        if (!LiqInside(nb))
+        const int3 o = int3(x, y, z);
+        const int3 nb = cell + o;
+        const uint t = LiqTypeAt(GpuFluidLiqCellType, nb, cells, true);
+        if (t == GPU_FLUID_LIQUID_CELL_AIR)
+          bDeep = false;
+        if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
+        {
+          // An open side is air beyond the domain; a wall is solid.
+          [unroll] for (uint a = 0; a < 3; ++a)
+          {
+            if (o[a] != 0 && (nb[a] < 0 || nb[a] >= (int)cells[a]) && LiqNeighbourSideOpen(a * 2 + (o[a] > 0 ? 1u : 0u)))
+              bDeep = false;
+          }
+        }
+        if (t != GPU_FLUID_LIQUID_CELL_LIQUID)
           continue;
-        countSum += float(GpuFluidLiqCellCount.Load(LiqCellIndex(nb) * 4));
-        cellsInside += 1.0;
+
+        const float3 share = float3(abs(o.x) == 0 ? 2.0 / 3.0 : 1.0 / 6.0, abs(o.y) == 0 ? 2.0 / 3.0 : 1.0 / 6.0, abs(o.z) == 0 ? 2.0 / 3.0 : 1.0 / 6.0);
+        mass += share.x * share.y * share.z;
+
+        const uint nbIndex = LiqCellIndex(nb);
+        const uint count = GpuFluidLiqCellCount.Load(nbIndex * 4);
+        const uint start = GpuFluidLiqCellStart.Load(nbIndex * 4);
+        for (uint k = 0; k < count; ++k)
+        {
+          const float3 d = asfloat(GpuFluidLiqPositions.Load3((start + k) * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx - centre;
+          density += BSpline2(d.x) * BSpline2(d.y) * BSpline2(d.z);
+        }
       }
     }
   }
-  const float n = countSum / max(cellsInside, 1.0);
-  // GpuFluidLiqPassF.x: a dead zone on top of n0. Particles scattered at random keep the Poisson spread of their counts
-  // however they move (they do not repel each other), so without it a settled pool is pushed apart and pulled back by
-  // the volume control everywhere, all the time, and never comes to rest.
-  const float excess = clamp(n / n0 - 1.0 - max(LIQ_CONST(GpuFluidLiqPassF).x, 0.0), 0.0, 1.0);
-  float target = min(solve.y, 0.5 / dt) * excess;
+
+  // Density error. GpuFluidLiqPassF.x: a dead zone on |e| (0 by default); z: the largest |e| a step corrects.
+  const float rho = density / max(mass * n0, 1e-6);
+  float e = rho - 1.0;
+  const float deadZone = max(params.x, 0.0);
+  e = sign(e) * max(abs(e) - deadZone, 0.0);
+  const bool bTwoSided = params.y > 0.0 && bDeep;
+  e = clamp(e, bTwoSided ? -params.z : 0.0, params.z);
+  float target = min(solve.y, 0.5 / dt) * e;
 
   const float seeded = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));
   const float drained = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_DRAINED * 4));

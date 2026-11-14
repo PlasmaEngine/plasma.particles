@@ -20,6 +20,7 @@ RWByteAddressBuffer GpuFluidLiqStats;
 
 groupshared uint gs_uiMaxSpeed;
 groupshared uint gs_uiSpeedSum;
+groupshared uint gs_uiSpeedSqSum;
 groupshared uint gs_uiAbove1cm;
 groupshared uint gs_uiAbove1mm;
 groupshared uint gs_uiMin[3];
@@ -33,6 +34,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   {
     gs_uiMaxSpeed = 0;
     gs_uiSpeedSum = 0;
+    gs_uiSpeedSqSum = 0;
     gs_uiAbove1cm = 0;
     gs_uiAbove1mm = 0;
     [unroll] for (uint i = 0; i < 3; ++i)
@@ -58,6 +60,8 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
     InterlockedMax(gs_uiMaxSpeed, asuint(speed));
     InterlockedAdd(gs_uiSpeedSum, (uint)round(min(speed, GPU_FLUID_LIQUID_MAX_SPEED) * GPU_FLUID_LIQUID_SPEED_SUM_SCALE));
+    const float clampedSpeed = min(speed, GPU_FLUID_LIQUID_MAX_SPEED);
+    InterlockedAdd(gs_uiSpeedSqSum, (uint)round(clampedSpeed * clampedSpeed * GPU_FLUID_LIQUID_SPEED_SQ_SCALE));
     if (speed > 0.01)
       InterlockedAdd(gs_uiAbove1cm, 1u);
     if (speed > 0.001)
@@ -88,6 +92,10 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_SPEED_SUM * 4, gs_uiSpeedSum);
     GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_ABOVE_1CM * 4, gs_uiAbove1cm);
     GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_ABOVE_1MM * 4, gs_uiAbove1mm);
+    uint sqBefore;
+    GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM * 4, gs_uiSpeedSqSum, sqBefore);
+    if (sqBefore + gs_uiSpeedSqSum < sqBefore)
+      GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM_HI * 4, 1u);
     [unroll] for (uint a = 0; a < 3; ++a)
     {
       GpuFluidLiqStats.InterlockedMin((GPU_FLUID_LIQUID_STAT_BOUNDS_MIN + a) * 4, gs_uiMin[a]);

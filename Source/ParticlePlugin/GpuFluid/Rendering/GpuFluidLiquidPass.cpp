@@ -75,6 +75,12 @@ plStatus plGpuFluidLiquidPass::AddRenderPasses(const plViewData& viewData, const
   outputs[m_PinColor.m_uiOutputIndex].m_TextureHandle = hColor;
   outputs[m_PinDepthStencil.m_uiOutputIndex].m_TextureHandle = hDepthStencil;
 
+  // No liquid surface was extracted for this view (recently): no targets, no clears, no copies. The pass is injected
+  // into every pipeline with a transparent pass once the package is loaded, so a scene without liquid must not pay for
+  // it. The content flags are part of the graph's fingerprint, so the graph is rebuilt when liquid comes into view.
+  if ((GetPipeline()->GetContentFlags() & PL_GPUFLUID_CONTENT_FLAG_LIQUID) == 0)
+    return plStatus(PL_SUCCESS);
+
   const plGALTextureCreationDescription colorDesc = ref_graph.GetTextureDesc(hColor);
   if (ref_graph.GetTextureDesc(hDepthStencil).m_SampleCount != colorDesc.m_SampleCount)
     return plStatus(plFmt("GpuFluidLiquidPass: DepthStencil sample count must match the Color target"));
