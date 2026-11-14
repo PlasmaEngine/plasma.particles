@@ -4,6 +4,7 @@
 #include <Foundation/IO/FileSystem/FileSystem.h>
 #include <Foundation/Strings/StringBuilder.h>
 #include <Foundation/System/EnvironmentVariableUtils.h>
+#include <ParticlesTest/GpuFluid/GpuFluidGalleryTest.h>
 #include <ParticlesTest/ParticleTests.h>
 #include <RendererCore/Textures/TextureUtils.h>
 #include <TestFramework/Framework/TestFramework.h>
@@ -25,6 +26,9 @@ PL_TESTFRAMEWORK_ENTRY_POINT_BEGIN("GameEngineTest", "Particle Tests")
   // this package's plugin; PL_PARTICLESTEST_PLUGIN_DIRS adds others the test project loads
   // (plJoltPlugin), separated by ';'
   plGameEngineTestApplication_Particles::AddPluginSearchRoot(PL_PARTICLESTEST_STRINGIZE(PL_PARTICLESTEST_PLUGIN_DIR));
+
+  // the GpuFluid shaders are package assets, which an install would mount
+  plGpuFluidGalleryApplication::SetPackageAssetsDirectory(PL_PARTICLESTEST_STRINGIZE(PL_PARTICLESTEST_ASSETS_DIR));
 
   plStringBuilder sExtraDirs = plEnvironmentVariableUtils::GetValueString("PL_PARTICLESTEST_PLUGIN_DIRS");
   plHybridArray<plStringView, 4> extraDirs;

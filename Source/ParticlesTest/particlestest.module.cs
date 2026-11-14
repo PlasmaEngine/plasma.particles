@@ -35,5 +35,8 @@ public class ParticlesTestModule : ModuleRules
         // so these paths must not contain spaces.
         PrivateDefinitions.Add($"PL_PARTICLESTEST_SDK_ROOT={PlasmaPackageSdk.Root.Replace('\\', '/')}");
         PrivateDefinitions.Add($"PL_PARTICLESTEST_PLUGIN_DIR={PlasmaPackageSdk.PackageBinaryDirectory(context).Replace('\\', '/')}");
+
+        // The package's Assets folder (the GpuFluid shaders), mounted by the GpuFluid gallery as "plasma.particles".
+        PrivateDefinitions.Add($"PL_PARTICLESTEST_ASSETS_DIR={Path.Combine(context.ProjectRoot, "Assets").Replace('\\', '/')}");
     }
 }
