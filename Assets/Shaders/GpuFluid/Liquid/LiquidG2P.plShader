@@ -115,9 +115,40 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     clamped = 1;
   }
 
-  // RK2 (midpoint) through the projected grid velocity.
-  const float3 gMid = g + 0.5 * dt * uNew * invDx;
-  float3 xNew = x + dt * (bBallistic ? v : SampleVelocity(GpuFluidLiqVelNew, gMid));
+  // RK2 (midpoint) through the projected grid velocity. GpuFluidLiqPass.y (a float): the most cells a particle may
+  // move in one RK2 step; a substep that moves it further takes several (up to 4), each through the same grid, so the
+  // substep itself can be longer than a particle's step (0: one step).
+  float3 xNew;
+  if (bBallistic)
+  {
+    xNew = x + dt * v;
+  }
+  else
+  {
+    const float stepCells = asfloat(LIQ_CONST(GpuFluidLiqPass).y);
+    uint steps = 1;
+    if (stepCells > 0.0)
+      steps = clamp((uint)ceil(length(uNew) * dt * invDx / stepCells), 1u, 4u);
+    if (steps == 1)
+    {
+      const float3 gMid = g + 0.5 * dt * uNew * invDx;
+      xNew = x + dt * SampleVelocity(GpuFluidLiqVelNew, gMid);
+    }
+    else
+    {
+      const float h = dt / (float)steps;
+      float3 gStep = g;
+      float3 uStep = uNew;
+      for (uint s = 0; s < steps; ++s)
+      {
+        if (s > 0)
+          uStep = SampleVelocity(GpuFluidLiqVelNew, gStep);
+        const float3 gMid = gStep + 0.5 * h * uStep * invDx;
+        gStep += h * SampleVelocity(GpuFluidLiqVelNew, gMid) * invDx;
+      }
+      xNew = gStep * dx;
+    }
+  }
 
   const float4 wall = LIQ_CONST(GpuFluidLiqWall);
   const float margin = wall.x * dx;
@@ -197,8 +228,11 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     v = float3(0, 0, 0);
     cx = cy = cz = float3(0, 0, 0);
   }
-  if (sleepSpeed >= GPU_FLUID_LIQUID_SLEEP_SPEED)
-    GpuFluidLiqBrickSpeed.Store(brick * 4, 1u);
+  // GpuFluidLiqPass.z (a float): the sleep speed, 0 for GPU_FLUID_LIQUID_SLEEP_SPEED. The brick counts its particles
+  // faster than it (LiquidSleep compares the count with its minimum).
+  const float sleepThreshold = asfloat(LIQ_CONST(GpuFluidLiqPass).z) > 0.0 ? asfloat(LIQ_CONST(GpuFluidLiqPass).z) : GPU_FLUID_LIQUID_SLEEP_SPEED;
+  if (sleepSpeed >= sleepThreshold)
+    GpuFluidLiqBrickSpeed.InterlockedAdd(brick * 4, 1u);
 
   GpuFluidLiqPositions.Store3(index * GPU_FLUID_LIQUID_POSITION_BYTES, asuint(xNew));
   GpuFluidLiqVelocities.Store3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES, asuint(v));

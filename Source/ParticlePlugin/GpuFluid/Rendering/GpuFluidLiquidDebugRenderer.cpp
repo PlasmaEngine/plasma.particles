@@ -46,7 +46,7 @@ void plGpuFluidLiquidDebugRenderer::RenderBatch(const plRenderViewContext& rende
     pContext->BindShader(m_hShader);
 
     plGpuFluidLiquidDebugConstants constants = {}; // the one member is set: "= {}" does not zero pl vectors
-    constants.GpuFluidDebugParams = plVec4(pRenderData->m_fRadius, pRenderData->m_fTopSpeed, 0.0f, 0.0f);
+    constants.GpuFluidDebugParams = plVec4(pRenderData->m_fRadius, pRenderData->m_fTopSpeed, pRenderData->m_bSleepColours ? 1.0f : 0.0f, 0.0f);
     pContext->SetPushConstants("plGpuFluidLiquidDebugConstants", constants);
 
     plBindGroupBuilder& bindGroup = pContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);

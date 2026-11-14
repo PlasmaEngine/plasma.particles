@@ -6,6 +6,6 @@
 
 BEGIN_PUSH_CONSTANTS(plGpuFluidLiquidDebugConstants)
 {
-  FLOAT4(GpuFluidDebugParams); // x: point radius (m), y: speed that maps to the top of the colour ramp (m/s), zw: unused
+  FLOAT4(GpuFluidDebugParams); // x: point radius (m), y: speed that maps to the top of the colour ramp (m/s), z: 1 colour by sleep instead of speed, w: unused
 }
 END_PUSH_CONSTANTS(plGpuFluidLiquidDebugConstants)

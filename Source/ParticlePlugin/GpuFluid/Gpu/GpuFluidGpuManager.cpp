@@ -243,6 +243,7 @@ bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPub
 
   out_publish.m_bBrickView = volume.m_bPublishBrickView;
   out_publish.m_hAtlas = volume.m_bPublishBrickView ? volume.m_Solver.GetBrickViewAtlas() : volume.m_Solver.GetScalarAtlas();
+  out_publish.m_hScalarAtlas = volume.m_Solver.GetScalarAtlas();
   out_publish.m_hIndirection = volume.m_Grid.GetIndirection();
   out_publish.m_vBrickGrid = volume.m_Settings.m_vBrickGrid;
   out_publish.m_vAtlasBricks = volume.m_Grid.GetAtlasBricks();
@@ -378,6 +379,9 @@ void plGpuFluidGpuManager::ReadLiquidStats(LiquidVolume& ref_volume)
   plStats::SetStat("GpuFluid/Liquid/ActiveBricks", ref_volume.m_Stats.m_uiActiveBricks);
   plStats::SetStat("GpuFluid/Liquid/Substeps", ref_volume.m_Stats.m_uiSubsteps);
   plStats::SetStat("GpuFluid/Liquid/NaNCount", ref_volume.m_Stats.m_uiNaN);
+  plStats::SetStat("GpuFluid/Liquid/AwakeBricks", ref_volume.m_Stats.m_uiAwakeBricks);
+  plStats::SetStat("GpuFluid/Liquid/SleepingBricks", ref_volume.m_Stats.m_uiSleepingBricks);
+  plStats::SetStat("GpuFluid/Liquid/SolidCells", ref_volume.m_Stats.m_uiSolidCells);
 }
 
 void plGpuFluidGpuManager::RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt64 uiFrame, bool& inout_bAnyPass)
@@ -433,6 +437,7 @@ void plGpuFluidGpuManager::RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt6
       // The CPU's own numbers, current: whether the volume sleeps, and the static solids on the GPU.
       volume.m_Stats.m_bVolumeAsleep = volume.m_Solver.IsAsleep();
       volume.m_Stats.m_uiTicksAsleep = volume.m_Solver.GetTicksAsleep();
+      volume.m_Stats.m_uiFramesBanked = volume.m_Solver.GetFramesBanked();
       volume.m_Stats.m_uiSolidTriangles = volume.m_Solver.GetSolidTriangles();
       volume.m_Stats.m_uiSolidBakes = volume.m_Solver.GetSolidBakes();
 

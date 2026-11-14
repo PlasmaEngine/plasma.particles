@@ -5,7 +5,12 @@
 #include <Core/WorldSerializer/WorldReader.h>
 #include <Core/WorldSerializer/WorldWriter.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidVolumeComponent.h>
+#include <Foundation/Algorithm/HashingUtils.h>
 #include <Foundation/Configuration/CVar.h>
+#include <ParticlePlugin/GpuFluid/Components/GpuFluidColliderComponent.h>
+#include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidModifierComponents.h>
+#include <RendererCore/Debug/DebugRenderer.h>
+#include <RendererCore/Pipeline/View.h>
 #include <Foundation/Threading/DelegateTask.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidDebugRenderer.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidPass.h>
@@ -92,14 +97,9 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 4, plComponentMode::Sta
     PL_MEMBER_PROPERTY("MaxParticles", m_uiMaxParticles)->AddAttributes(new plDefaultValueAttribute(1024 * 1024), new plClampValueAttribute(256, 16 * 1024 * 1024)),
     PL_ENUM_MEMBER_PROPERTY("Quality", plGpuFluidQuality, m_Quality),
     PL_BITFLAGS_MEMBER_PROPERTY("OpenFaces", plGpuFluidDomainFaces, m_OpenFaces),
-    PL_ARRAY_MEMBER_PROPERTY("FillBoxes", m_FillBoxes),
-    PL_ARRAY_MEMBER_PROPERTY("Obstacles", m_Obstacles),
-    PL_ARRAY_MEMBER_PROPERTY("Inflows", m_Inflows),
-    PL_ARRAY_MEMBER_PROPERTY("Drains", m_Drains),
     PL_MEMBER_PROPERTY("BakeStaticSolids", m_bBakeStaticSolids)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_MEMBER_PROPERTY("AllowSleep", m_bAllowSleep)->AddAttributes(new plDefaultValueAttribute(true)),
-    PL_ENUM_MEMBER_PROPERTY("RenderMode", plGpuFluidLiquidRenderMode, m_RenderMode)->AddAttributes(new plGroupAttribute("Look")),
-    PL_MEMBER_PROPERTY("Absorption", m_vAbsorption)->AddAttributes(new plDefaultValueAttribute(plVec3(0.45f, 0.07f, 0.04f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" 1/m")),
+    PL_MEMBER_PROPERTY("Absorption", m_vAbsorption)->AddAttributes(new plGroupAttribute("Look"), new plDefaultValueAttribute(plVec3(0.45f, 0.07f, 0.04f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" 1/m")),
     PL_MEMBER_PROPERTY("ScatterColor", m_ScatterColor)->AddAttributes(new plDefaultValueAttribute(plColor(0.03f, 0.09f, 0.11f))),
     PL_MEMBER_PROPERTY("SurfaceRoughness", m_fSurfaceRoughness)->AddAttributes(new plDefaultValueAttribute(0.04f), new plClampValueAttribute(0.02f, 1.0f)),
     PL_MEMBER_PROPERTY("RefractionStrength", m_fRefractionStrength)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 2.0f)),
@@ -108,8 +108,6 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 4, plComponentMode::Sta
     PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 32)),
     PL_MEMBER_PROPERTY("WallFriction", m_fWallFriction)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("AlwaysSimulate", m_bAlwaysSimulate)->AddAttributes(new plDefaultValueAttribute(true)),
-    PL_MEMBER_PROPERTY("DebugPointRadius", m_fDebugPointRadius)->AddAttributes(new plGroupAttribute("Debug"), new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("DebugTopSpeed", m_fDebugTopSpeed)->AddAttributes(new plDefaultValueAttribute(3.0f), new plClampValueAttribute(0.01f, plVariant()), new plSuffixAttribute(" m/s")),
   }
   PL_END_PROPERTIES;
   PL_BEGIN_MESSAGEHANDLERS
@@ -128,7 +126,11 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 4, plComponentMode::Sta
 PL_END_COMPONENT_TYPE
 // clang-format on
 
-plCVarBool cvar_GpuFluidLiquidShowPoints("GpuFluid.Liquid.ShowPoints", false, plCVarFlags::Default, "Draws every liquid volume's particles as well, whatever its RenderMode.");
+plCVarInt cvar_GpuFluidLiquidRenderMode("GpuFluid.Liquid.RenderMode", 0, plCVarFlags::Default, "How every liquid volume is drawn: 0 the surface, 1 the particles coloured by speed instead (the surface is not built), 2 both. The viewport's Fluid render modes do the same for one view.");
+plCVarBool cvar_GpuFluidLiquidShowSleep("GpuFluid.Liquid.ShowSleep", false, plCVarFlags::Default, "Draws every liquid volume's particles coloured by brick state: orange awake, blue asleep (the LiquidSleep view does it for one view).");
+plCVarBool cvar_GpuFluidLiquidShowSolids("GpuFluid.Liquid.ShowSolids", false, plCVarFlags::Default, "Draws the triangles each liquid volume's static solids bake caught (the LiquidStaticSolids view does it for one view).");
+plCVarFloat cvar_GpuFluidLiquidDebugTopSpeed("GpuFluid.Liquid.DebugTopSpeed", 0.0f, plCVarFlags::Default, "Speed (m/s) at the top of the particles' colour ramp; 0: 3 m/s (or what the volume was given from code).");
+plCVarFloat cvar_GpuFluidLiquidDebugPointRadius("GpuFluid.Liquid.DebugPointRadius", 0.0f, plCVarFlags::Default, "Radius (m) the particles are drawn with; 0: from the cell size and particles per cell.");
 plCVarInt cvar_GpuFluidLiquidSurfaceDebug("GpuFluid.Liquid.SurfaceDebug", 0, plCVarFlags::Default, "Liquid surface debug view: 0 off, 1 normals, 2 path length through the liquid.");
 plCVarInt cvar_GpuFluidRebake("GpuFluid.Rebake", 0, plCVarFlags::Default, "Change the value to bake the static solids of every liquid volume again from the world's collision meshes.");
 
@@ -438,6 +440,23 @@ void plGpuFluidLiquidVolumeComponent::UpdateStaticSolids()
     m_bSolidsDirty = true;
   }
 
+  // A static collider added, removed, moved or resized: bake again (the other collision meshes need the cvar).
+  plUInt64 uiColliderHash = 0;
+  if (const plGpuFluidColliderComponentManager* pColliders = GetWorld()->GetComponentManager<plGpuFluidColliderComponentManager>())
+  {
+    for (auto it = pColliders->GetComponents(); it.IsValid(); ++it)
+    {
+      const plUInt64 uiHash = it->GetBakeHash();
+      if (uiHash != 0)
+        uiColliderHash = plHashingUtils::xxHash64(&uiHash, sizeof(uiHash), uiColliderHash);
+    }
+  }
+  if (uiColliderHash != m_uiColliderHash)
+  {
+    m_uiColliderHash = uiColliderHash;
+    m_bSolidsDirty = true;
+  }
+
   if (!m_bSolidsDirty || m_BakeTaskGroup.IsValid())
     return;
 
@@ -513,10 +532,13 @@ void plGpuFluidLiquidVolumeComponent::Update()
   input.m_fWallFriction = m_fWallFriction;
   input.m_uiOpenFaces = m_OpenFaces.GetValue();
 
+  plHybridArray<plGpuFluidLiquidFillBox, 8> fills;
+  GatherModifiers(input, fills);
+
   // Fill boxes: across x and y the cells whose centre is inside. Up the z axis the cells from the first whose centre
   // is inside to the box top, the last of them partly filled when the top lies inside a cell (so the surface does
   // not snap to a cell face).
-  for (const plGpuFluidLiquidFillBox& box : m_FillBoxes)
+  for (const plGpuFluidLiquidFillBox& box : fills)
   {
     const plVec3 vMin = (box.m_vCenter - box.m_vHalfExtents + vHalf) / fDx;
     const plVec3 vMax = (box.m_vCenter + box.m_vHalfExtents + vHalf) / fDx;
@@ -561,34 +583,143 @@ void plGpuFluidLiquidVolumeComponent::Update()
     shape.Size = bSphere ? plVec4(obstacle.m_fRadius, 0, 0, 0) : plVec4(obstacle.m_vHalfExtents.x, obstacle.m_vHalfExtents.y, obstacle.m_vHalfExtents.z, 0.0f);
   }
 
-  input.m_Sources.Clear();
+  input.m_pSolidBake = m_pSolidBake;
+  input.m_bAllowSleep = m_bAllowSleep && m_Tuning.m_bAllowSleep;
+  // The surface is built unless every view draws only the particles (the views showing particles alone still skip it).
+  input.m_bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points && cvar_GpuFluidLiquidRenderMode.GetValue() != 1;
+
+  m_pManager->SetLiquidFrameInput(m_VolumeId, input);
+
+  if (cvar_GpuFluidLiquidShowSolids.GetValue())
+    DrawStaticSolids(GetWorld());
+}
+
+void plGpuFluidLiquidVolumeComponent::GatherModifiers(plGpuFluidLiquidFrameInput& inout_input, plDynamicArray<plGpuFluidLiquidFillBox>& out_fills)
+{
+  // The solver takes four sources (plGpuFluidLiquidSolver::s_uiMaxSources).
+  constexpr plUInt32 s_uiMaxLiquidSources = 4;
+
+  const plVec3 vOrigin = GetDomainOrigin();
+  const plVec3 vSize = GetDomainSize();
+  const plVec3 vHalf = vSize * 0.5f;
+  const plVec3 vCenter = vOrigin + vHalf;
+  const plBoundingBox domain = plBoundingBox::MakeFromMinMax(vOrigin, vOrigin + vSize);
+  const plWorld& world = *GetWorld();
+
+  // Sources: the code-set inflows (centred on the volume), then the source components whose disc centre is inside.
+  inout_input.m_Sources.Clear();
   for (const plGpuFluidLiquidInflow& inflow : m_Inflows)
   {
-    if (input.m_Sources.GetCount() >= 4)
+    if (inout_input.m_Sources.GetCount() >= s_uiMaxLiquidSources)
       break;
-    plGpuFluidLiquidSource& source = input.m_Sources.ExpandAndGetRef();
+    plGpuFluidLiquidSource& source = inout_input.m_Sources.ExpandAndGetRef();
     source.m_vCenter = inflow.m_vCenter + vHalf;
     source.m_vVelocity = inflow.m_vVelocity;
     source.m_fRadius = inflow.m_fRadius;
     source.m_fFlowRate = inflow.m_fFlowRate * 1.0e-3f;
   }
-
-  input.m_Drains.Clear();
-  for (const plGpuFluidLiquidDrain& drain : m_Drains)
+  if (const plGpuFluidLiquidSourceComponentManager* pSources = world.GetComponentManager<plGpuFluidLiquidSourceComponentManager>())
   {
-    if (!drain.m_bOpen || input.m_Drains.GetCount() >= GPU_FLUID_LIQUID_MAX_DRAINS)
-      continue;
-    plGpuFluidLiquidShape& box = input.m_Drains.ExpandAndGetRef();
-    const plVec3 vCenter = drain.m_vCenter + vHalf;
-    box.CenterType = plVec4(vCenter.x, vCenter.y, vCenter.z, static_cast<float>(GPU_FLUID_LIQUID_SHAPE_BOX));
-    box.Size = plVec4(drain.m_vHalfExtents.x, drain.m_vHalfExtents.y, drain.m_vHalfExtents.z, 0.0f);
+    for (auto it = pSources->GetComponents(); it.IsValid(); ++it)
+    {
+      if (!it->IsActiveAndInitialized() || !it->m_bFlowing || !domain.Contains(it->GetWorldCenter()))
+        continue;
+      if (inout_input.m_Sources.GetCount() >= s_uiMaxLiquidSources)
+        break;
+      plGpuFluidLiquidSource& source = inout_input.m_Sources.ExpandAndGetRef();
+      source.m_vCenter = it->GetWorldCenter() - vOrigin;
+      source.m_vVelocity = it->GetWorldVelocity();
+      source.m_fRadius = it->GetWorldRadius();
+      source.m_fFlowRate = it->m_fFlowRate * 1.0e-3f;
+    }
   }
 
-  input.m_pSolidBake = m_pSolidBake;
-  input.m_bAllowSleep = m_bAllowSleep && m_Tuning.m_bAllowSleep;
-  input.m_bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points;
+  // Drains: the open ones, as boxes from the domain's corner.
+  inout_input.m_Drains.Clear();
+  auto AddDrain = [&](const plVec3& vDomainCenter, const plVec3& vHalfExtents)
+  {
+    if (inout_input.m_Drains.GetCount() >= GPU_FLUID_LIQUID_MAX_DRAINS)
+      return;
+    plGpuFluidLiquidShape& box = inout_input.m_Drains.ExpandAndGetRef();
+    box.CenterType = plVec4(vDomainCenter.x, vDomainCenter.y, vDomainCenter.z, static_cast<float>(GPU_FLUID_LIQUID_SHAPE_BOX));
+    box.Size = plVec4(vHalfExtents.x, vHalfExtents.y, vHalfExtents.z, 0.0f);
+  };
+  for (const plGpuFluidLiquidDrain& drain : m_Drains)
+  {
+    if (drain.m_bOpen)
+      AddDrain(drain.m_vCenter + vHalf, drain.m_vHalfExtents);
+  }
+  if (const plGpuFluidLiquidDrainComponentManager* pDrains = world.GetComponentManager<plGpuFluidLiquidDrainComponentManager>())
+  {
+    for (auto it = pDrains->GetComponents(); it.IsValid(); ++it)
+    {
+      if (!it->IsActiveAndInitialized() || !it->m_bOpen)
+        continue;
+      const plBoundingBox box = it->GetWorldBox();
+      if (domain.Overlaps(box))
+        AddDrain(box.GetCenter() - vOrigin, box.GetHalfExtents());
+    }
+  }
 
-  m_pManager->SetLiquidFrameInput(m_VolumeId, input);
+  // Fills, centred on the volume like the code-set ones. A change to the fill components restarts the simulation, so
+  // what the editor shows is what the scene starts with.
+  out_fills = m_FillBoxes;
+  plUInt64 uiFillHash = 0;
+  if (const plGpuFluidLiquidFillComponentManager* pFills = world.GetComponentManager<plGpuFluidLiquidFillComponentManager>())
+  {
+    for (auto it = pFills->GetComponents(); it.IsValid(); ++it)
+    {
+      if (!it->IsActiveAndInitialized())
+        continue;
+      const plBoundingBox box = it->GetWorldBox();
+      if (!domain.Overlaps(box))
+        continue;
+      plGpuFluidLiquidFillBox& fill = out_fills.ExpandAndGetRef();
+      fill.m_vCenter = box.GetCenter() - vCenter;
+      fill.m_vHalfExtents = box.GetHalfExtents();
+      fill.m_vVelocity = it->GetWorldVelocity();
+      fill.m_fJitter = it->m_fJitter;
+      fill.m_bStratified = it->m_bStratified;
+      const plVec4 key[3] = {plVec4(fill.m_vCenter.x, fill.m_vCenter.y, fill.m_vCenter.z, fill.m_fJitter), plVec4(fill.m_vHalfExtents.x, fill.m_vHalfExtents.y, fill.m_vHalfExtents.z, fill.m_bStratified ? 1.0f : 0.0f),
+        plVec4(fill.m_vVelocity.x, fill.m_vVelocity.y, fill.m_vVelocity.z, 0.0f)};
+      uiFillHash = plHashingUtils::xxHash64(key, sizeof(key), uiFillHash);
+    }
+  }
+  if (uiFillHash != m_uiFillHash)
+  {
+    m_uiFillHash = uiFillHash;
+    ResetSimulation();
+  }
+}
+
+void plGpuFluidLiquidVolumeComponent::DrawStaticSolids(const plDebugRendererContext& context) const
+{
+  if (m_pSolidBake == nullptr)
+    return;
+
+  // The bake's triangles (domain-relative), tinted per object so neighbours stay apart, capped for huge levels.
+  constexpr plUInt32 uiMaxTriangles = 65536;
+  const plUInt32 uiCount = plMath::Min(m_pSolidBake->GetTriangleCount(), uiMaxTriangles);
+  const float* pData = m_pSolidBake->m_Triangles.GetData();
+  const plVec3 vOrigin = m_vBakedDomainOrigin;
+
+  plDynamicArray<plDebugRenderer::Triangle> triangles;
+  triangles.Reserve(uiCount);
+  for (plUInt32 i = 0; i < uiCount; ++i)
+  {
+    const float* t = pData + i * plGpuFluidLiquidSolidBake::s_uiFloatsPerTriangle;
+    // 5 mm out along the face normal, so the triangle does not fight the mesh it came from for depth.
+    const plVec3 vPush = vOrigin + plVec3(t[9], t[10], t[11]) * 0.005f;
+    plDebugRenderer::Triangle& tri = triangles.ExpandAndGetRef();
+    tri.m_position[0] = vPush + plVec3(t[0], t[1], t[2]);
+    tri.m_position[1] = vPush + plVec3(t[3], t[4], t[5]);
+    tri.m_position[2] = vPush + plVec3(t[6], t[7], t[8]);
+    const plUInt32 uiObject = *reinterpret_cast<const plUInt32*>(t + 30);
+    tri.m_color = plColorScheme::LightUI(static_cast<plColorScheme::Enum>(uiObject % 12));
+    tri.m_color.a = 0.55f;
+  }
+  plDebugRenderer::DrawSolidTriangles(context, triangles, plColor::White);
+  plDebugRenderer::DrawLineBox(context, plBoundingBox::MakeFromMinMax(vOrigin, vOrigin + GetDomainSize()), plColorScheme::LightUI(plColorScheme::Blue));
 }
 
 void plGpuFluidLiquidVolumeComponent::OnUpdateLocalBounds(plMsgUpdateLocalBounds& msg)
@@ -618,8 +749,36 @@ void plGpuFluidLiquidVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderD
 
   m_bPublished = true;
 
-  const bool bPoints = m_RenderMode != plGpuFluidLiquidRenderMode::Surface || cvar_GpuFluidLiquidShowPoints;
-  const bool bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points && publish.m_bHasSurface;
+  // What this view draws: its render mode, else the cvars, else what the volume was given from code.
+  plViewRenderMode::Enum viewMode = plViewRenderMode::None;
+  if (msg.m_pView != nullptr)
+    viewMode = msg.m_pView->GetViewRenderMode();
+  const plInt32 iGlobalMode = cvar_GpuFluidLiquidRenderMode.GetValue();
+  bool bPoints = m_RenderMode != plGpuFluidLiquidRenderMode::Surface || iGlobalMode == 1 || iGlobalMode == 2 || cvar_GpuFluidLiquidShowSleep.GetValue();
+  bool bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points && iGlobalMode != 1;
+  bool bSleepColours = cvar_GpuFluidLiquidShowSleep.GetValue();
+  switch (viewMode)
+  {
+    case plViewRenderMode::LiquidParticles:
+      bPoints = true;
+      bSurface = false;
+      break;
+    case plViewRenderMode::LiquidParticlesAndSurface:
+      bPoints = true;
+      bSurface = true;
+      break;
+    case plViewRenderMode::LiquidSleep:
+      bPoints = true;
+      bSurface = false;
+      bSleepColours = true;
+      break;
+    default:
+      break;
+  }
+  bSurface = bSurface && publish.m_bHasSurface;
+
+  if (viewMode == plViewRenderMode::LiquidStaticSolids && msg.m_pView != nullptr)
+    DrawStaticSolids(msg.m_pView->GetHandle());
 
   // Both are rewritten on the GPU every tick, so never cached.
   if (bSurface)
@@ -651,8 +810,10 @@ void plGpuFluidLiquidVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderD
     pRenderData->m_hPoints = publish.m_hPoints;
     pRenderData->m_hDrawArgs = publish.m_hDrawArgs;
     pRenderData->m_uiMaxParticles = publish.m_uiMaxParticles;
-    pRenderData->m_fRadius = m_fDebugPointRadius > 0.0f ? m_fDebugPointRadius : 0.45f * m_ActiveSettings.m_fCellSize / plMath::Pow(static_cast<float>(plMath::Max(1u, m_ActiveSettings.m_uiParticlesPerCell)), 1.0f / 3.0f);
-    pRenderData->m_fTopSpeed = m_fDebugTopSpeed;
+    const float fRadius = cvar_GpuFluidLiquidDebugPointRadius.GetValue() > 0.0f ? cvar_GpuFluidLiquidDebugPointRadius.GetValue() : m_fDebugPointRadius;
+    pRenderData->m_fRadius = fRadius > 0.0f ? fRadius : 0.45f * m_ActiveSettings.m_fCellSize / plMath::Pow(static_cast<float>(plMath::Max(1u, m_ActiveSettings.m_uiParticlesPerCell)), 1.0f / 3.0f);
+    pRenderData->m_fTopSpeed = cvar_GpuFluidLiquidDebugTopSpeed.GetValue() > 0.0f ? cvar_GpuFluidLiquidDebugTopSpeed.GetValue() : m_fDebugTopSpeed;
+    pRenderData->m_bSleepColours = bSleepColours;
 
     msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::SimpleOpaque, plRenderData::Caching::Never);
     msg.AddDependency(publish.m_hPoints, plDefaultRenderDataCategories::SimpleOpaque, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);

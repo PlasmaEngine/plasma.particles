@@ -7,6 +7,7 @@
 
 struct plMsgUpdateLocalBounds;
 struct plMsgExtractRenderData;
+class plDebugRendererContext;
 
 using plGpuFluidLiquidVolumeComponentManager = plComponentManagerSimple<class plGpuFluidLiquidVolumeComponent, plComponentUpdateType::Always>;
 
@@ -127,9 +128,14 @@ PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidObstacle);
 /// gravity always points the same way through it). It spans Extents rounded up to whole bricks of 8 cells of
 /// CellSize. The fill boxes are seeded when the component activates and on ResetSimulation().
 ///
+/// The liquid comes and goes through the modifier components in the domain (plGpuFluidLiquidSourceComponent,
+/// plGpuFluidLiquidDrainComponent, plGpuFluidLiquidFillComponent); static solids are the world's collision meshes, static
+/// plGpuFluidColliderComponent objects among them. The arrays below do the same from code (the tests use them).
+///
 /// The surface is extracted on the GPU every frame (surface nets on a smoothed level set) and drawn by
-/// plGpuFluidLiquidPass in front of the transparent pass. RenderMode (or the cvar GpuFluid.Liquid.ShowPoints) also or
-/// instead draws the particles as small spheres coloured by speed (plGpuFluidLiquidDebugRenderer).
+/// plGpuFluidLiquidPass in front of the transparent pass. The viewport's Fluid render modes (or the cvars
+/// GpuFluid.Liquid.RenderMode, ShowSleep and ShowSolids) draw the particles as small spheres coloured by speed or by
+/// sleep (plGpuFluidLiquidDebugRenderer), or the triangles the static solids bake caught.
 class PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidVolumeComponent final : public plComponent
 {
   PL_DECLARE_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, plComponent, plGpuFluidLiquidVolumeComponentManager);
@@ -158,10 +164,12 @@ public:
   plUInt32 m_uiMaxParticles = 1024 * 1024;                              // [ property ]
   plEnum<plGpuFluidQuality> m_Quality;                                  // [ property ]
   plBitflags<plGpuFluidDomainFaces> m_OpenFaces;                        // [ property ] closed by default
-  plDynamicArray<plGpuFluidLiquidFillBox> m_FillBoxes;                  // [ property ]
-  plDynamicArray<plGpuFluidLiquidObstacle> m_Obstacles;                 // [ property ]
-  plDynamicArray<plGpuFluidLiquidInflow> m_Inflows;                     // [ property ]
-  plDynamicArray<plGpuFluidLiquidDrain> m_Drains;                       // [ property ]
+
+  /// Modifiers set from code, in the volume's space, on top of the modifier components in the domain.
+  plDynamicArray<plGpuFluidLiquidFillBox> m_FillBoxes;
+  plDynamicArray<plGpuFluidLiquidObstacle> m_Obstacles;
+  plDynamicArray<plGpuFluidLiquidInflow> m_Inflows;
+  plDynamicArray<plGpuFluidLiquidDrain> m_Drains;
 
   /// Static solids from the world's collision meshes (plWorldGeoExtractionUtil, CollisionMesh: Jolt static actors, or
   /// any component answering plMsgExtractGeometry), baked into a distance field on activation, when the domain
@@ -177,14 +185,16 @@ public:
   float m_fWallFriction = 0.0f;                                         // [ property ]
   bool m_bAlwaysSimulate = true;                                        // [ property ]
 
-  plEnum<plGpuFluidLiquidRenderMode> m_RenderMode;                      // [ property ]
   plVec3 m_vAbsorption = plVec3(0.45f, 0.07f, 0.04f);                   // [ property ] sigma_a per colour, 1/m (clear water)
   plColor m_ScatterColor = plColor(0.03f, 0.09f, 0.11f);                // [ property ] the water's own glow from its depth
   float m_fSurfaceRoughness = 0.04f;                                    // [ property ]
   float m_fRefractionStrength = 1.0f;                                 // [ property ] how far the bent ray is followed, per m of thickness
 
-  float m_fDebugPointRadius = 0.0f;                                     // [ property ] 0: from the cell size
-  float m_fDebugTopSpeed = 3.0f;                                        // [ property ] m/s at the top of the colour ramp
+  /// Debug look set from code (the tests): the views and cvars (GpuFluid.Liquid.RenderMode, DebugPointRadius,
+  /// DebugTopSpeed) take over when set.
+  plEnum<plGpuFluidLiquidRenderMode> m_RenderMode;
+  float m_fDebugPointRadius = 0.0f;                                     // 0: from the cell size
+  float m_fDebugTopSpeed = 3.0f;                                        // m/s at the top of the colour ramp
 
   /// Solver tuning that is not a property yet (tests set it).
   plGpuFluidLiquidFrameInput m_Tuning;
@@ -234,6 +244,16 @@ private:
   void EnsureVolume();
   void ReleaseVolume();
   void UpdateStaticSolids();
+
+  /// The modifier components in the domain, into the frame's input (domain-relative), with the code-set arrays.
+  void GatherModifiers(plGpuFluidLiquidFrameInput& inout_input, plDynamicArray<plGpuFluidLiquidFillBox>& out_fills);
+
+  /// The bake's triangles over the scene (the LiquidStaticSolids view and GpuFluid.Liquid.ShowSolids).
+  void DrawStaticSolids(const plDebugRendererContext& context) const;
+
+  // What restarts the simulation (the fill components) and what bakes the solids again (the static colliders).
+  plUInt64 m_uiFillHash = 0;
+  plUInt64 m_uiColliderHash = 0;
 
   // Static solids: the bake in use, the one a task is building (with the meshes it reads), and what asks for a new one.
   plSharedPtr<plGpuFluidLiquidSolidBake> m_pSolidBake;

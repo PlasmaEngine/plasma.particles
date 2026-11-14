@@ -37,8 +37,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
       for (int x = -1; x <= 1; ++x)
       {
         const int3 nb = b + int3(x, y, z);
-        if (LiqInsideDims(nb, bricks))
-          bActive = bActive || GpuFluidLiqBrickOccupied.Load(LiqCellIndexIn(nb, bricks) * 4) != 0;
+        if (!LiqInsideDims(nb, bricks))
+          continue;
+        // Brick b is needed by neighbour nb when nb's particles come within the margin of every face of nb that
+        // looks toward b (one face across a face, two across an edge, three across a corner).
+        const uint occ = GpuFluidLiqBrickOccupied.Load(LiqCellIndexIn(nb, bricks) * 4);
+        const int3 toB = -int3(x, y, z);
+        uint need = GPU_FLUID_LIQUID_OCC_HELD;
+        [unroll] for (uint a = 0; a < 3; ++a)
+          need |= toB[a] < 0 ? (2u << (2 * a)) : (toB[a] > 0 ? (4u << (2 * a)) : 0u);
+        bActive = bActive || (occ & need) == need;
       }
     }
   }

@@ -63,6 +63,21 @@ struct plGpuFluidLiquidFrameInput
   plUInt32 m_uiMinSubsteps = 1;
   /// 3 cells per substep: the liquid gallery (the Medium room, the P8 flood) passes at it as at 2.5.
   float m_fCflNumber = 3.0f;
+  /// Tick rate by activity: a frame is banked (simulated with the next one) while the two still fit in one substep
+  /// filled to m_fTickFill of the CFL distance, up to m_fMaxTickInterval seconds per tick. 0 (the default) ticks every
+  /// frame: at 1/15 s the Pour Into Glass water left the glass in 2 of 6 runs on Vulkan (cause not found).
+  float m_fMaxTickInterval = 0.0f;
+  float m_fTickFill = 0.9f;
+  /// The most cells a liquid particle moves in one RK2 step of G2P; a substep moving it further takes several (up to
+  /// 4) through the same grid, so m_fCflNumber can be larger than this. 0: one step per substep.
+  float m_fParticleStepCells = 0.0f;
+  /// How much of g * (age of the newest speed readback) the substep count adds to the read max speed: 1 assumes the
+  /// fastest particle fell freely since it was read.
+  float m_fSpeedAgeSlack = 1.0f;
+  /// Sleep: a particle faster than m_fSleepSpeed (0: GPU_FLUID_LIQUID_SLEEP_SPEED) counts as moving, and a brick with at
+  /// least m_uiSleepMinFast moving particles keeps itself and its neighbours awake (0 or 1: any one).
+  float m_fSleepSpeed = 0.0f;
+  plUInt32 m_uiSleepMinFast = 1;
   /// Fine-level smoothing: every sweep of a smoothing call in one launch per brick (block Gauss-Seidel in groupshared
   /// memory, LiquidSmoothBricksBlock) instead of one launch per colour and sweep.
   bool m_bBlockSmooth = true;
@@ -94,6 +109,10 @@ struct plGpuFluidLiquidFrameInput
   /// The restriction between dense levels per 8^3 block, a thread per fine cell (LiquidRestrictBlock), instead of a
   /// thread per coarse cell. The same sums.
   bool m_bBlockRestrict = true;
+  /// Cells from a brick face within which a particle activates the neighbour brick across that face (LiquidBricks). 3
+  /// covers every stencil that reaches past the particles (G2P and P2G 2 cells, the level set 1.5); 0 activates the
+  /// whole shell of bricks around every occupied brick.
+  plUInt32 m_uiActiveMargin = 3;
   plUInt32 m_uiSpeedHistory = 8;
   plUInt32 m_uiSubstepHoldTicks = 15;
   float m_fSubstepDownMargin = 0.95f;
@@ -284,6 +303,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
   // Filled on the CPU, current (not read back):
   bool m_bVolumeAsleep = false;     ///< the volume does not simulate (nothing awake, nothing to wake it)
   plUInt64 m_uiTicksAsleep = 0;     ///< ticks skipped asleep since the last reset
+  plUInt64 m_uiFramesBanked = 0;    ///< frames simulated together with the next one (tick rate by activity)
   plUInt32 m_uiSolidTriangles = 0;  ///< triangles of the static solids bake on the GPU (0: none)
   plUInt32 m_uiSolidBakes = 0;      ///< bakes run since the volume was created
 };
@@ -397,6 +417,8 @@ public:
 
   bool IsAsleep() const { return m_bAsleep; }
   plUInt64 GetTicksAsleep() const { return m_uiTicksAsleep; }
+  /// Frames simulated together with the next one (m_fMaxTickInterval) since the volume was created.
+  plUInt64 GetFramesBanked() const { return m_uiFramesBanked; }
   plUInt32 GetSolidTriangles() const { return m_bHasSolidSdf ? m_uiSolidTriangles : 0u; }
   plUInt32 GetSolidBakes() const { return m_uiSolidBakes; }
 
@@ -509,6 +531,8 @@ private:
   plUInt32 m_uiLastResetCounter = 0xFFFFFFFFu;
   plUInt64 m_uiLastTick = 0;
   plUInt32 m_uiTicksSinceReset = 0;
+  float m_fBankedDt = 0.0f;          ///< time of the frames banked for the next tick
+  plUInt64 m_uiFramesBanked = 0;
   bool m_bHasTick = false;
   float m_fLastSubstepDt = 0.0f;
   plUInt32 m_uiLastSubsteps = 0;

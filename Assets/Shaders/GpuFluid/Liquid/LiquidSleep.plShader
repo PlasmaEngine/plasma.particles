@@ -39,6 +39,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   }
 
   const int3 b = int3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y));
+  // GpuFluidLiqPass.z: how many particles faster than the sleep speed keep a brick and its neighbours awake (0: one).
+  const uint minFast = max(LIQ_CONST(GpuFluidLiqPass).z, 1u);
   bool bWake = false;
   for (int z = -1; z <= 1; ++z)
   {
@@ -48,7 +50,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
       {
         const int3 nb = b + int3(x, y, z);
         if (LiqInsideDims(nb, bricks))
-          bWake = bWake || GpuFluidLiqBrickSpeed.Load(LiqCellIndexIn(nb, bricks) * 4) != 0;
+          bWake = bWake || GpuFluidLiqBrickSpeed.Load(LiqCellIndexIn(nb, bricks) * 4) >= minFast;
       }
     }
   }

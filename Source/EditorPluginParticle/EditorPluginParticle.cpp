@@ -5,6 +5,7 @@
 #include <EditorFramework/Actions/ViewActions.h>
 #include <EditorFramework/Actions/ViewLightActions.h>
 #include <EditorPluginParticle/Actions/ParticleActions.h>
+#include <EditorPluginParticle/GpuFluid/GpuFluidPropertyMetaState.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectAsset.h>
 #include <EditorPluginParticle/ParticleEffectAsset/ParticleEffectShellPanels.h>
 #include <GuiFoundation/Action/CommandHistoryActions.h>
@@ -47,6 +48,7 @@ void OnLoadPlugin()
 
   plParticleActions::RegisterActions();
   plParticleEffectShellPanels::Register();
+  plGpuFluidPropertyMetaState::Register();
 
   // Particle Effect
   {
@@ -82,6 +84,7 @@ void OnLoadPlugin()
 
 void OnUnloadPlugin()
 {
+  plGpuFluidPropertyMetaState::Unregister();
   plParticleEffectShellPanels::Unregister();
   plParticleActions::UnregisterActions();
   plPropertyMetaState::GetSingleton()->m_Events.RemoveEventHandler(plParticleEffectAssetDocument::PropertyMetaStateEventHandler);

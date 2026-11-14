@@ -13,9 +13,12 @@ ALL
 // (max and summed speed, how many still move, bounds, centroid, and the front histogram along +x of the particles
 // below the front height). The stats are reduced per group in groupshared memory first, so the device atomics are
 // one per group, not one per particle. GpuFluidLiqPassF.xyz: world position of the domain's minimum corner.
+// GpuFluidLiqPass.z: 1 when bricks may sleep; the point of a particle in a sleeping brick then stores -1 - speed, so
+// the sleep view can tell it apart (the speed view reads it back).
 
 ByteAddressBuffer GpuFluidLiqPositions;
 ByteAddressBuffer GpuFluidLiqVelocities;
+ByteAddressBuffer GpuFluidLiqBrickCalm;
 RWByteAddressBuffer GpuFluidLiqPoints;
 RWByteAddressBuffer GpuFluidLiqStats;
 
@@ -59,7 +62,15 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     const float speed = length(v);
     const float3 origin = LIQ_CONST(GpuFluidLiqPassF).xyz;
 
-    GpuFluidLiqPoints.Store4(index * 16, asuint(float4(origin + x, speed)));
+    const int3 cell = LiqParticleCell(x);
+    bool bAsleep = false;
+    if (LIQ_CONST(GpuFluidLiqPass).z != 0)
+    {
+      const uint3 bricks = LiqBricks();
+      const uint3 brick = min(uint3(max(cell, 0)) / GPU_FLUID_LIQUID_BRICK, bricks - 1);
+      bAsleep = GpuFluidLiqBrickCalm.Load(LiqCellIndexIn(int3(brick), bricks) * 4) >= GPU_FLUID_LIQUID_SLEEP_STEPS;
+    }
+    GpuFluidLiqPoints.Store4(index * 16, asuint(float4(origin + x, bAsleep ? -1.0 - speed : speed)));
 
     InterlockedMax(gs_uiMaxSpeed, asuint(speed));
     InterlockedAdd(gs_uiSpeedSum, (uint)round(min(speed, GPU_FLUID_LIQUID_MAX_SPEED) * GPU_FLUID_LIQUID_SPEED_SUM_SCALE));
@@ -70,7 +81,6 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     if (speed > 0.001)
       InterlockedAdd(gs_uiAbove1mm, 1u);
 
-    const int3 cell = LiqParticleCell(x);
     [unroll] for (uint a = 0; a < 3; ++a)
     {
       InterlockedMin(gs_uiMin[a], (uint)cell[a]);

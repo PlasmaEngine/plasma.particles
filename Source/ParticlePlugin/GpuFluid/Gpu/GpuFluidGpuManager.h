@@ -143,6 +143,9 @@ struct plGpuFluidGasPublish
   /// The atlas is the brick view (GpuFluid.Debug.Bricks): temperature is the bucket of the brick's edges, to be drawn as
   /// emission.
   bool m_bBrickView = false;
+
+  /// While m_bBrickView: the gas without the brick edges, for the views not showing bricks.
+  plGALTextureHandle m_hScalarAtlas;
 };
 
 /// \brief Owns the GPU side of every GpuFluid volume of one render world and records their work.

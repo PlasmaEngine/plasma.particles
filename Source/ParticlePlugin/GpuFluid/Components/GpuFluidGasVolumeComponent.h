@@ -17,9 +17,10 @@ using plGpuFluidGasVolumeComponentManager = plComponentManagerSimple<class plGpu
 /// plVDBVolumeGpuRenderData, with no resource and no copy in between.
 ///
 /// The gas solver (plGpuFluidGasSolver) steps at a fixed tick of 1/60 s, at most two ticks a frame, with buoyancy
-/// against the physics world's gravity (or -Z without physics). P1 allocates every brick of the box (up to MaxBricks);
-/// the volume's own source (Emitter*) feeds it. The analytic debug source replaces the simulation with a known sphere,
-/// which checks the hand-off against a baked volume.
+/// against the physics world's gravity (or -Z without physics). The gas comes from plGpuFluidGasEmitterComponent
+/// objects inside the box (and the volume's own source, set from code). The analytic debug source replaces the
+/// simulation with a known sphere, which checks the hand-off against a baked volume. The viewport's GasBricks view (or
+/// the cvar GpuFluid.Debug.Bricks) draws the allocated bricks.
 class PL_PARTICLEPLUGIN_DLL plGpuFluidGasVolumeComponent final : public plComponent
 {
   PL_DECLARE_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, plComponent, plGpuFluidGasVolumeComponentManager);
@@ -65,17 +66,18 @@ public:
   float m_fWindInfluence = 1.0f;                                      // [ property ] how much of the world's wind the gas takes as its ambient velocity
   bool m_bPhysicsBodies = true;                                       // [ property ] dynamic physics bodies in the box act as moving solids (their bounds)
 
-  // The volume's own source.
-  plEnum<plGpuFluidEmitterShape> m_EmitterShape;                      // [ property ]
-  plVec3 m_vEmitterOffset = plVec3(0.0f, 0.0f, -1.4f);                // [ property ] metres, from the box centre
-  float m_fEmitterRadius = 0.5f;                                      // [ property ] metres (sphere)
-  plVec3 m_vEmitterHalfExtents = plVec3(0.4f, 0.4f, 0.2f);            // [ property ] metres (box)
-  float m_fEmitterSoftness = 0.2f;                                    // [ property ] metres from full strength to none
-  float m_fEmissionRate = 5.0f;                                       // [ property ] density per second
-  float m_fEmitterTemperature = 1.0f;                                 // [ property ] 0..1
-  plVec3 m_vEmitterVelocity = plVec3(0.0f, 0.0f, 2.0f);               // [ property ] m/s, volume space
-  float m_fEmitterNoise = 0.9f;                                       // [ property ] 0..1
-  float m_fEmitterNoiseScale = 0.3f;                                  // [ property ] metres, size of the puffs
+  /// A source of the volume's own, set from code (the tests); off by default. Placed sources are
+  /// plGpuFluidGasEmitterComponent. The noise settings also apply to the debug extra sources.
+  plEnum<plGpuFluidEmitterShape> m_EmitterShape = plGpuFluidEmitterShape::None;
+  plVec3 m_vEmitterOffset = plVec3(0.0f, 0.0f, -1.4f);                // metres, from the box centre
+  float m_fEmitterRadius = 0.5f;                                      // metres (sphere)
+  plVec3 m_vEmitterHalfExtents = plVec3(0.4f, 0.4f, 0.2f);            // metres (box)
+  float m_fEmitterSoftness = 0.2f;                                    // metres from full strength to none
+  float m_fEmissionRate = 5.0f;                                       // density per second
+  float m_fEmitterTemperature = 1.0f;                                 // 0..1
+  plVec3 m_vEmitterVelocity = plVec3(0.0f, 0.0f, 2.0f);               // m/s, volume space
+  float m_fEmitterNoise = 0.9f;                                       // 0..1
+  float m_fEmitterNoiseScale = 0.3f;                                  // metres, size of the puffs
 
   plEnum<plGpuFluidDebugSource> m_DebugSource;                        // [ property ]
   float m_fSphereRadius = 1.4f;                                       // [ property ] metres
@@ -110,6 +112,9 @@ public:
 
   /// The box the grid actually covers: the extents rounded up to whole bricks.
   plVec3 GetGridExtents() const;
+
+  /// Whether a world position is inside the grid's box (rotation and scale applied).
+  bool ContainsPoint(const plVec3& vGlobalPosition) const;
 
   /// What the GPU counted, two to three frames late. False until the first readback.
   bool GetStats(plGpuFluidGasStats& out_stats) const;
@@ -193,6 +198,10 @@ private:
   /// The grid extents the owner's local bounds were last computed from; a change to Extents or VoxelSize refreshes them.
   plVec3 m_vBoundsExtents = plVec3::MakeZero();
   mutable bool m_bPublished = false;
+
+  /// Render frame a view in the GasBricks render mode last drew this volume: the solver keeps the brick view up while
+  /// one does.
+  mutable plUInt64 m_uiBrickViewFrame = 0;
 
   /// Last frame's global transform of every collider and physics body seen, for their velocities.
   plHashTable<plUInt64, plTransform> m_SolidTransforms;

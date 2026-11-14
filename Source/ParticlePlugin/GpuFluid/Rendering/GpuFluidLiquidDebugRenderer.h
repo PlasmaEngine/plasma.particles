@@ -20,6 +20,7 @@ public:
   plUInt32 m_uiMaxParticles = 0;
   float m_fRadius = 0.01f;
   float m_fTopSpeed = 3.0f; ///< speed shown at the top of the colour ramp
+  bool m_bSleepColours = false; ///< orange awake, blue asleep, instead of the speed ramp
 };
 
 /// \brief Draws plGpuFluidLiquidDebugRenderData in the simple opaque category: depth tested and written, unlit by the

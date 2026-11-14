@@ -7,10 +7,13 @@
 #include <Core/WorldSerializer/WorldWriter.h>
 #include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidColliderComponent.h>
+#include <ParticlePlugin/GpuFluid/Components/GpuFluidGasEmitterComponent.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
 #include <RendererCore/Debug/DebugRenderer.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
+#include <RendererCore/Pipeline/View.h>
+#include <RendererCore/RenderWorld/RenderWorld.h>
 #include <Shaders/GpuFluid/GpuFluidGasConstants.h>
 
 plCVarFloat cvar_GpuFluidDebugStepTime("GpuFluid.Debug.StepTime", 0.0f, plCVarFlags::Default, "Overrides the gas solver's fixed tick, in seconds (0: the volume's TickRate, by default its quality's: 1/30 s on Low and Medium, 1/60 s from High up).");
@@ -74,16 +77,6 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 4, plComponentMode::Static
     PL_MEMBER_PROPERTY("Vorticity", m_fVorticity)->AddAttributes(new plDefaultValueAttribute(0.3f), new plClampValueAttribute(0.0f, 10.0f)),
     PL_MEMBER_PROPERTY("WindInfluence", m_fWindInfluence)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 10.0f)),
     PL_MEMBER_PROPERTY("PhysicsBodies", m_bPhysicsBodies)->AddAttributes(new plDefaultValueAttribute(true)),
-    PL_ENUM_MEMBER_PROPERTY("EmitterShape", plGpuFluidEmitterShape, m_EmitterShape)->AddAttributes(new plGroupAttribute("Source")),
-    PL_MEMBER_PROPERTY("EmitterOffset", m_vEmitterOffset)->AddAttributes(new plDefaultValueAttribute(plVec3(0.0f, 0.0f, -1.4f)), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("EmitterRadius", m_fEmitterRadius)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("EmitterHalfExtents", m_vEmitterHalfExtents)->AddAttributes(new plDefaultValueAttribute(plVec3(0.4f, 0.4f, 0.2f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("EmitterSoftness", m_fEmitterSoftness)->AddAttributes(new plDefaultValueAttribute(0.2f), new plClampValueAttribute(0.001f, plVariant()), new plSuffixAttribute(" m")),
-    PL_MEMBER_PROPERTY("EmissionRate", m_fEmissionRate)->AddAttributes(new plDefaultValueAttribute(5.0f), new plClampValueAttribute(0.0f, 1000.0f), new plSuffixAttribute(" 1/s")),
-    PL_MEMBER_PROPERTY("EmitterTemperature", m_fEmitterTemperature)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 1.0f)),
-    PL_MEMBER_PROPERTY("EmitterVelocity", m_vEmitterVelocity)->AddAttributes(new plDefaultValueAttribute(plVec3(0.0f, 0.0f, 2.0f)), new plSuffixAttribute(" m/s")),
-    PL_MEMBER_PROPERTY("EmitterNoise", m_fEmitterNoise)->AddAttributes(new plDefaultValueAttribute(0.9f), new plClampValueAttribute(0.0f, 1.0f)),
-    PL_MEMBER_PROPERTY("EmitterNoiseScale", m_fEmitterNoiseScale)->AddAttributes(new plDefaultValueAttribute(0.3f), new plClampValueAttribute(0.01f, plVariant()), new plSuffixAttribute(" m")),
     PL_ENUM_MEMBER_PROPERTY("DebugSource", plGpuFluidDebugSource, m_DebugSource)->AddAttributes(new plGroupAttribute("Debug Source")),
     PL_MEMBER_PROPERTY("SphereRadius", m_fSphereRadius)->AddAttributes(new plDefaultValueAttribute(1.4f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
     PL_MEMBER_PROPERTY("SphereSoftness", m_fSphereSoftness)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.001f, plVariant()), new plSuffixAttribute(" m")),
@@ -275,6 +268,13 @@ plVec3 plGpuFluidGasVolumeComponent::GetGridExtents() const
   return plVec3(static_cast<float>(vGrid.x), static_cast<float>(vGrid.y), static_cast<float>(vGrid.z)) * fBrick;
 }
 
+bool plGpuFluidGasVolumeComponent::ContainsPoint(const plVec3& vGlobalPosition) const
+{
+  const plVec3 vLocal = GetOwner()->GetGlobalTransform().GetInverse().TransformPosition(vGlobalPosition);
+  const plVec3 vHalf = GetGridExtents() * 0.5f;
+  return plMath::Abs(vLocal.x) <= vHalf.x && plMath::Abs(vLocal.y) <= vHalf.y && plMath::Abs(vLocal.z) <= vHalf.z;
+}
+
 bool plGpuFluidGasVolumeComponent::GetStats(plGpuFluidGasStats& out_stats) const
 {
   return m_pManager != nullptr && m_VolumeId != 0 && m_pManager->GetGasStats(m_VolumeId, out_stats);
@@ -419,7 +419,9 @@ void plGpuFluidGasVolumeComponent::Update()
 
   input.m_bAllocateAll = m_bAllocateAll;
   input.m_bDebugGrid = m_bDebugGridReadback || cvar_GpuFluidDebugBrickLines.GetValue();
-  input.m_Simulation.m_bBrickView = cvar_GpuFluidDebugBricks.GetValue();
+  // The brick view: everywhere with the cvar, else while a view in the GasBricks render mode draws the volume.
+  const bool bBrickViewWanted = m_uiBrickViewFrame != 0 && m_uiBrickViewFrame + 3 >= plRenderWorld::GetFrameCounter();
+  input.m_Simulation.m_bBrickView = cvar_GpuFluidDebugBricks.GetValue() || bBrickViewWanted;
   input.m_bDebugGridVirtual = m_bDebugGridReadback;
   input.m_bHashState = m_bDebugHashState;
   input.m_bReverseSlots = m_bDebugReverseSlots;
@@ -575,6 +577,37 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
     {
       sim.m_bInjectNaN = true;
       cvar_GpuFluidDebugInjectNaN = false;
+    }
+  }
+
+  // The emitter components inside the box, in the volume's voxels. Their rotation turns only their velocity: the
+  // shapes are axis aligned in the volume's space.
+  if (const plGpuFluidGasEmitterComponentManager* pEmitters = GetWorld()->GetComponentManager<plGpuFluidGasEmitterComponentManager>())
+  {
+    const plTransform toLocal = GetOwner()->GetGlobalTransform().GetInverse();
+    const plQuat qToLocal = GetOwner()->GetGlobalRotation().GetInverse();
+    for (auto it = pEmitters->GetComponents(); it.IsValid(); ++it)
+    {
+      const plGpuFluidGasEmitterComponent& source = *it;
+      if (!source.IsActiveAndInitialized() || !source.m_bEmitting || source.m_Shape == plGpuFluidEmitterShape::None || !ContainsPoint(source.GetOwner()->GetGlobalPosition()))
+        continue;
+      if (sim.m_Emitters.GetCount() >= sim.m_Emitters.GetCapacity())
+        break;
+
+      const plVec3 vScale = source.GetOwner()->GetGlobalScaling();
+      plGpuFluidGasEmitter& emitter = sim.m_Emitters.ExpandAndGetRef();
+      emitter.m_Shape = source.m_Shape;
+      emitter.m_vCenterVoxels = vGridVoxels * 0.5f + toLocal.TransformPosition(source.GetOwner()->GetGlobalPosition()) / fVoxel;
+      emitter.m_fRadiusVoxels = source.m_fRadius * plMath::Max(vScale.x, vScale.y, vScale.z) / fVoxel;
+      emitter.m_vHalfExtentsVoxels = source.m_vHalfExtents.CompMul(vScale.Abs()) / fVoxel;
+      emitter.m_fSoftnessVoxels = plMath::Max(source.m_fSoftness / fVoxel, 1e-3f);
+      emitter.m_fDensityRate = source.m_fRate;
+      emitter.m_fTemperature = source.m_fTemperature;
+      emitter.m_fFuelRate = 0.0f;
+      emitter.m_vVelocity = qToLocal * (source.GetOwner()->GetGlobalRotation() * source.m_vVelocity);
+      emitter.m_bDriveVelocity = true;
+      emitter.m_fNoiseStrength = source.m_fNoise;
+      emitter.m_fNoiseFrequency = fVoxel / plMath::Max(source.m_fNoiseScale, 0.01f);
     }
   }
 
@@ -892,6 +925,17 @@ void plGpuFluidGasVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderData
     // A fresh volume has nothing on the GPU yet.
     m_bPublished = false;
     return;
+  }
+
+  // The brick view is shown with the cvar, or in a view in the GasBricks render mode; the other views draw the gas
+  // without it.
+  const bool bBrickViewMode = msg.m_pView != nullptr && msg.m_pView->GetViewRenderMode() == plViewRenderMode::GasBricks;
+  if (bBrickViewMode)
+    m_uiBrickViewFrame = plRenderWorld::GetFrameCounter();
+  if (publish.m_bBrickView && !bBrickViewMode && !cvar_GpuFluidDebugBricks.GetValue())
+  {
+    publish.m_bBrickView = false;
+    publish.m_hAtlas = publish.m_hScalarAtlas;
   }
 
   auto pRenderData = msg.m_pRenderDataManager->CreateRenderDataForThisFrame<plVDBVolumeGpuRenderData>(GetOwner());

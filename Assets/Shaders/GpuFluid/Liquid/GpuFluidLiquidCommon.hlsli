@@ -134,6 +134,30 @@ uint LiqBrickIndex(int3 cell)
   return b.x + bricks.x * (b.y + bricks.y * b.z);
 }
 
+// Brick occupancy (LiquidCount, LiquidBricks): bit 0 the brick holds particles; bits 1..6 a particle is within the
+// activation margin of its -x, +x, -y, +y, -z, +z face, so the neighbour across that face must be active.
+#define GPU_FLUID_LIQUID_OCC_HELD 1u
+#define GPU_FLUID_LIQUID_OCC_ALL_FACES 0x7Eu
+
+/// The occupancy bits a particle in cell sets for its brick. A margin of 0 marks every face (the whole shell around
+/// the brick is active).
+uint LiqBrickOccupancyBits(int3 cell, uint margin)
+{
+  if (margin == 0)
+    return GPU_FLUID_LIQUID_OCC_HELD | GPU_FLUID_LIQUID_OCC_ALL_FACES;
+
+  const int3 local = cell % GPU_FLUID_LIQUID_BRICK;
+  const int near = (int)margin;
+  const int far = GPU_FLUID_LIQUID_BRICK - (int)margin;
+  uint bits = GPU_FLUID_LIQUID_OCC_HELD;
+  [unroll] for (uint a = 0; a < 3; ++a)
+  {
+    bits |= local[a] < near ? (2u << (2 * a)) : 0u;
+    bits |= local[a] >= far ? (4u << (2 * a)) : 0u;
+  }
+  return bits;
+}
+
 /// Grid coordinates of a particle (cell units) and its cell, clamped into the grid.
 float3 LiqGridPosition(float3 position) { return position * LiqInvDx(); }
 

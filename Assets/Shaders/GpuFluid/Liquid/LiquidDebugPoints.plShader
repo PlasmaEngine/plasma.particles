@@ -81,12 +81,25 @@ float4 main(PS_IN Input) : SV_Target
   const float diffuse = saturate(dot(n, normalize(float3(-0.45, 0.55, 0.7))));
   const float shade = 0.3 + 0.7 * diffuse;
 
-  // Speed ramp: deep blue at rest, cyan, then white at the top speed.
-  const float t = saturate(Input.CornerSpeed.z / max(GET_PUSH_CONSTANT(plGpuFluidLiquidDebugConstants, GpuFluidDebugParams).y, 1e-3));
-  const float3 slow = float3(0.03, 0.16, 0.55);
-  const float3 mid = float3(0.05, 0.62, 0.95);
-  const float3 fast = float3(0.95, 0.98, 1.0);
-  const float3 colour = t < 0.5 ? lerp(slow, mid, t * 2.0) : lerp(mid, fast, t * 2.0 - 1.0);
+  // A particle in a sleeping brick carries -1 - speed (LiquidRenderPrep).
+  const bool bAsleep = Input.CornerSpeed.z < 0.0;
+  const float speed = bAsleep ? -1.0 - Input.CornerSpeed.z : Input.CornerSpeed.z;
+
+  float3 colour;
+  if (GET_PUSH_CONSTANT(plGpuFluidLiquidDebugConstants, GpuFluidDebugParams).z > 0.5)
+  {
+    // Sleep view: orange awake, blue asleep.
+    colour = bAsleep ? float3(0.10, 0.30, 0.95) : float3(1.0, 0.45, 0.08);
+  }
+  else
+  {
+    // Speed ramp: deep blue at rest, cyan, then white at the top speed.
+    const float t = saturate(speed / max(GET_PUSH_CONSTANT(plGpuFluidLiquidDebugConstants, GpuFluidDebugParams).y, 1e-3));
+    const float3 slow = float3(0.03, 0.16, 0.55);
+    const float3 mid = float3(0.05, 0.62, 0.95);
+    const float3 fast = float3(0.95, 0.98, 1.0);
+    colour = t < 0.5 ? lerp(slow, mid, t * 2.0) : lerp(mid, fast, t * 2.0 - 1.0);
+  }
 
   return float4(colour * shade, 1.0);
 }

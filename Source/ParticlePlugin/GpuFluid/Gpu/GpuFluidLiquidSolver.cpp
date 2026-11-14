@@ -625,6 +625,37 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     m_uiAsleepKey = uiKey; // the key of the last simulated tick
   }
 
+  // Tick rate by activity: a frame whose time, with the next frame's, still fits in one substep (the CFL distance at
+  // the speed the water can have reached by then) is banked instead of simulated, and the next tick simulates both.
+  // Slow water then ticks every second to fourth frame (at most m_fMaxTickInterval apart), fast water every frame as
+  // before. A banked frame records nothing; the last surface stays drawn.
+  const float fFrameDt = input.m_fDt;
+  float fTickDt = fFrameDt;
+  if (bStep)
+  {
+    fTickDt = m_fBankedDt + fFrameDt;
+    m_fBankedDt = 0.0f;
+
+    const plUInt32 uiBankHistory = plMath::Min(m_uiSpeedCount, plMath::Clamp<plUInt32>(input.m_uiSpeedHistory, 1, s_uiMaxSpeedHistory));
+    if (!bReset && !m_bWakePending && input.m_fMaxTickInterval > fFrameDt && uiBankHistory > 0 && m_uiTicksSinceReset >= input.m_uiStartupTicks)
+    {
+      float fRecent = 0.0f;
+      for (plUInt32 k = 0; k < uiBankHistory; ++k)
+        fRecent = plMath::Max(fRecent, m_SpeedHistory[(m_uiSpeedNext + s_uiMaxSpeedHistory - 1 - k) % s_uiMaxSpeedHistory]);
+
+      const float fNextDt = fTickDt + fFrameDt;
+      const float fGravityBank = input.m_vGravity.GetLength();
+      const float fSpeedThen = fRecent + fGravityBank * (input.m_fSpeedAgeSlack * fFrameDt * static_cast<float>(plMath::Min<plUInt64>(uiStatsAge, 8)) + fNextDt);
+      const float fOneSubstep = plMath::Max(input.m_fCflNumber, 0.1f) * m_fDx * plMath::Clamp(input.m_fTickFill, 0.1f, 1.0f);
+      if (fNextDt <= input.m_fMaxTickInterval && fSpeedThen * fNextDt <= fOneSubstep)
+      {
+        m_fBankedDt = fTickDt;
+        ++m_uiFramesBanked;
+        return false;
+      }
+    }
+  }
+
   // Analytic solids: rare edits, so the buffer is recreated with the new content instead of updated in place.
   {
     const plUInt32 uiShapes = plMath::Min<plUInt32>(input.m_Shapes.GetCount(), GPU_FLUID_LIQUID_MAX_SHAPES);
@@ -805,14 +836,14 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   }
 
   const float fGravity = input.m_vGravity.GetLength();
-  float fSpeed = fGravity * input.m_fDt;
+  float fSpeed = fGravity * fTickDt;
   const plUInt32 uiHistory = plMath::Min(m_uiSpeedCount, plMath::Clamp<plUInt32>(input.m_uiSpeedHistory, 1, s_uiMaxSpeedHistory));
   if (!bReset && uiHistory > 0)
   {
     float fRecent = 0.0f;
     for (plUInt32 k = 0; k < uiHistory; ++k)
       fRecent = plMath::Max(fRecent, m_SpeedHistory[(m_uiSpeedNext + s_uiMaxSpeedHistory - 1 - k) % s_uiMaxSpeedHistory]);
-    fSpeed += fRecent + fGravity * input.m_fDt * static_cast<float>(plMath::Min<plUInt64>(uiStatsAge, 8));
+    fSpeed += fRecent + input.m_fSpeedAgeSlack * fGravity * fFrameDt * static_cast<float>(plMath::Min<plUInt64>(uiStatsAge, 8));
   }
 
   const float fCflDistance = plMath::Max(input.m_fCflNumber, 0.1f) * m_fDx;
@@ -825,7 +856,7 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   float fSimDt = 0.0f;
   if (bStep)
   {
-    const float fNeeded = fSpeed * input.m_fDt / fCflDistance;
+    const float fNeeded = fSpeed * fTickDt / fCflDistance;
     uiSubsteps = plMath::Clamp<plUInt32>(static_cast<plUInt32>(plMath::Ceil(fNeeded)), uiMinSubsteps, uiMaxSubsteps);
 
     // Up at once; down by one only after one fewer would have done with a margin (m_fSubstepDownMargin of its
@@ -855,9 +886,9 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
     // Over the cap the tick simulates less time (slow motion), down to a quarter tick; beyond that the CFL number
     // gives way.
-    fSimDt = input.m_fDt;
+    fSimDt = fTickDt;
     if (fNeeded > static_cast<float>(uiSubsteps))
-      fSimDt = input.m_fDt * plMath::Max(static_cast<float>(uiSubsteps) / fNeeded, 0.25f);
+      fSimDt = fTickDt * plMath::Max(static_cast<float>(uiSubsteps) / fNeeded, 0.25f);
 
     m_uiLastSubsteps = uiSubsteps;
   }
@@ -1061,6 +1092,9 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     for (plGALBufferHandle h : {hPos, hVel, hAff, hArgs, hRank, hCellCount, hCellStart, hScratch, hCounters, hBrickOcc, hBrickActive, hBrickList, hBrickArgs, hBrickSpeed, hBrickCalm, hLevelRegion})
       pass.WriteBuffer(G(h));
     pass.HasSideEffects();
+    // Count marks which faces of each brick particles come near, Bricks activates only the neighbours across those.
+    plGpuFluidLiquidConstants occConstants = c;
+    occConstants.GpuFluidLiqPass = plVec4U32(plMath::Min(input.m_uiActiveMargin, GPU_FLUID_LIQUID_BRICK / 2u), 0, 0, 0);
     pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
       {
         Recorder rec(ctx);
@@ -1068,7 +1102,7 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
           {W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqBrickSpeed", hBrickSpeed), W("GpuFluidLiqBrickCalm", hBrickCalm),
             W("GpuFluidLiqCounters", hCounters)});
 
-        rec.RunIndirect(pShaders->m_hCount, c, hSrcArgs,
+        rec.RunIndirect(pShaders->m_hCount, occConstants, hSrcArgs,
           {R("GpuFluidLiqParticleArgs", hSrcArgs), R("GpuFluidLiqPositions", hSrcPos), R("GpuFluidLiqRegions", hRegions), W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqRank", hRank),
             W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqCounters", hCounters)});
 
@@ -1081,7 +1115,7 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             W("GpuFluidLiqRank", hRank), W("GpuFluidLiqCellStart", hCellStart), W("GpuFluidLiqPositionsOut", hPos), W("GpuFluidLiqVelocitiesOut", hVel),
             W("GpuFluidLiqAffineOut", hAff)});
 
-        rec.Run(pShaders->m_hBricks, c, LinearGroups(uiBrickCount, 256),
+        rec.Run(pShaders->m_hBricks, occConstants, LinearGroups(uiBrickCount, 256),
           {W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqBrickActive", hBrickActive), W("GpuFluidLiqBrickListOut", hBrickList), W("GpuFluidLiqCounters", hCounters)});
 
         pShaders->m_Scan.RecordIndirectArgs(rec.m_pContext, hCounters, GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS * 4, 1, hBrickArgs, 0);
@@ -1601,10 +1635,10 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
         pass.WriteBuffer(G(h));
       pass.HasSideEffects();
       plGpuFluidLiquidConstants g2pConstants = c;
-      g2pConstants.GpuFluidLiqPass = plVec4U32((input.m_bBallisticAir ? 1u : 0u) | (input.m_bBallisticClearOfSurface ? 2u : 0u), 0, 0, 0);
+      g2pConstants.GpuFluidLiqPass = plVec4U32((input.m_bBallisticAir ? 1u : 0u) | (input.m_bBallisticClearOfSurface ? 2u : 0u), *reinterpret_cast<const plUInt32*>(&input.m_fParticleStepCells), *reinterpret_cast<const plUInt32*>(&input.m_fSleepSpeed), 0);
       // Brick sleep after G2P: the wake boxes and whether bricks may fall asleep at all.
       plGpuFluidLiquidConstants sleepConstants = c;
-      sleepConstants.GpuFluidLiqPass = plVec4U32(uiWakeBoxCount, input.m_bAllowSleep ? 1u : 0u, 0, 0);
+      sleepConstants.GpuFluidLiqPass = plVec4U32(uiWakeBoxCount, input.m_bAllowSleep ? 1u : 0u, input.m_uiSleepMinFast, 0);
       pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
         {
           Recorder rec(ctx);
@@ -1630,10 +1664,15 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     c.GpuFluidLiqPass = plVec4U32(uiSubsteps, static_cast<plUInt32>(plMath::Round(fSimDt * 1.0e6f)), 0, 0);
     c.GpuFluidLiqPassF = plVec4(input.m_vDomainOrigin.x, input.m_vDomainOrigin.y, input.m_vDomainOrigin.z, 0.0f);
 
+    // The points of particles in sleeping bricks are marked for the sleep view.
+    plGpuFluidLiquidConstants prepConstants = c;
+    prepConstants.GpuFluidLiqPass.z = input.m_bAllowSleep ? 1u : 0u;
+
     auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Render");
     pass.ReadBuffer(G(hArgs), indirect);
     pass.ReadBuffer(G(hPos), plGALResourceState::ComputeShaderRead);
     pass.ReadBuffer(G(hVel), plGALResourceState::ComputeShaderRead);
+    pass.ReadBuffer(G(hBrickCalm), plGALResourceState::ComputeShaderRead);
     const plGALBufferHandle hProbePhi = m_hPhiRaw;
     const bool bProbes = !input.m_Probes.IsEmpty() && input.m_bLevelSet;
     if (bProbes)
@@ -1655,8 +1694,9 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
       {
         Recorder rec(ctx);
-        rec.RunIndirect(pShaders->m_hRenderPrep, c, hArgs,
-          {R("GpuFluidLiqParticleArgs", hArgs), R("GpuFluidLiqPositions", hPos), R("GpuFluidLiqVelocities", hVel), W("GpuFluidLiqPoints", hPoints), W("GpuFluidLiqStats", hStats)});
+        rec.RunIndirect(pShaders->m_hRenderPrep, prepConstants, hArgs,
+          {R("GpuFluidLiqParticleArgs", hArgs), R("GpuFluidLiqPositions", hPos), R("GpuFluidLiqVelocities", hVel), R("GpuFluidLiqBrickCalm", hBrickCalm), W("GpuFluidLiqPoints", hPoints),
+            W("GpuFluidLiqStats", hStats)});
         rec.Run(pShaders->m_hFrameEnd, c, plVec3U32(1, 1, 1),
           {R("GpuFluidLiqParticleArgs", hArgs), W("GpuFluidLiqCounters", hCounters), W("GpuFluidLiqStats", hStats), W("GpuFluidLiqDrawArgs", hDrawArgs)});
         if (bProbes)

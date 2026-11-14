@@ -222,6 +222,13 @@ namespace
     pLiquid->m_Tuning.m_bFuseProlong = TuningFloat("FUSE_PROLONG", pLiquid->m_Tuning.m_bFuseProlong ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_bFusePcg = TuningFloat("FUSE_PCG", pLiquid->m_Tuning.m_bFusePcg ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_bBlockRestrict = TuningFloat("BLOCK_RESTRICT", pLiquid->m_Tuning.m_bBlockRestrict ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_uiActiveMargin = static_cast<plUInt32>(TuningFloat("ACTIVE_MARGIN", static_cast<float>(pLiquid->m_Tuning.m_uiActiveMargin)));
+    pLiquid->m_Tuning.m_fMaxTickInterval = TuningFloat("MAX_TICK_INTERVAL", pLiquid->m_Tuning.m_fMaxTickInterval);
+    pLiquid->m_Tuning.m_fTickFill = TuningFloat("TICK_FILL", pLiquid->m_Tuning.m_fTickFill);
+    pLiquid->m_Tuning.m_fParticleStepCells = TuningFloat("PARTICLE_STEP", pLiquid->m_Tuning.m_fParticleStepCells);
+    pLiquid->m_Tuning.m_fSpeedAgeSlack = TuningFloat("SPEED_SLACK", pLiquid->m_Tuning.m_fSpeedAgeSlack);
+    pLiquid->m_Tuning.m_fSleepSpeed = TuningFloat("SLEEP_SPEED", pLiquid->m_Tuning.m_fSleepSpeed);
+    pLiquid->m_Tuning.m_uiSleepMinFast = static_cast<plUInt32>(TuningFloat("SLEEP_MIN_FAST", static_cast<float>(pLiquid->m_Tuning.m_uiSleepMinFast)));
     pLiquid->m_Tuning.m_uiCoarsePasses = static_cast<plUInt32>(TuningFloat("COARSE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiCoarsePasses)));
     pLiquid->m_Tuning.m_uiCoarseSweeps = static_cast<plUInt32>(TuningFloat("COARSE_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiCoarseSweeps)));
 
@@ -2581,6 +2588,8 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateFloodingRoom()
     "Flooding Room: %u ticks, pour from tick %u to %u (%.3f s simulated, seeded %.4f of Q t), peak %u particles, %u left at tick %u (%.4f; drained %u), solid cells %u against %u from the boxes (%.4f), substeps up to %u; N5 mismatches %u, lost %u, NaN %u, N9 %u",
     m_uiLastTick, uiFirstSeedTick, uiLastSeedTick, fPourSeconds, fSeededRatio, m_uiPeakAlive, pLast ? pLast->m_uiAlive : 0, m_uiLastTick, fLeft, pLast ? pLast->m_uiDrained : 0, uiSolidCells,
     m_uiExpectedSolidCells, fSolidRatio, uiMaxSubsteps, m_uiN5Mismatches, uiMaxLost, uiMaxNaN, uiMaxInSolid);
+  plTestFramework::Output(plTestOutput::Message, "Flooding Room cost: %u substeps over %u simulated ticks in %u frames (%llu frames banked by the tick rate)", m_LastStats.m_uiSubstepsTotal,
+    m_LastStats.m_uiTicks, m_uiLastTick, static_cast<unsigned long long>(m_LastStats.m_uiFramesBanked));
   PL_TEST_INT(m_uiN5Mismatches, 0);
   PL_TEST_INT(uiMaxLost, 0);
   PL_TEST_INT(uiMaxNaN, 0);
