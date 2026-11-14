@@ -31,7 +31,7 @@ float SurfPhiStored(int3 s)
 
 bool SurfInSolid(int3 s)
 {
-  return LiqShapeCount() > 0 && LiqShapeDistance((float3(s) + 0.5) * LiqDx()) < 0.0;
+  return LiqHasSolids() && LiqSolidDistanceAtCell(s) < 0.0;
 }
 
 /// The surface level set at sample s (cell units), mirrored at walls and solids.

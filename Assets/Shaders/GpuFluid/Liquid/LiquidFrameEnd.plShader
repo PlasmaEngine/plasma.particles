@@ -48,6 +48,10 @@ void main()
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_RESIDUAL_MAX * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_RESIDUAL_MAX * 4));
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_OCCUPIED * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_OCCUPIED * 4));
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SUBSTEPS * 4, substeps);
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_AWAKE * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_AWAKE * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SLEEPING * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SLEEPING * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_IN_SOLID * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_IN_SOLID * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SOLID_CELLS * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SOLID_CELLS * 4));
 
   const float4 wall = LIQ_CONST(GpuFluidLiqWall);
   const uint bins = wall.w > 0.0 ? min((uint)ceil(float(LiqCells().x) * LiqDx() / wall.w), (uint)GPU_FLUID_LIQUID_HIST_BINS) : 0u;

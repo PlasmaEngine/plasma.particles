@@ -6,12 +6,13 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#define GPU_FLUID_LIQUID_USE_REGIONS
 #include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Counting sort, step 1: each particle takes a rank inside its cell. A particle outside the domain is removed: it
-// counts as drained when it left through an open face, as lost otherwise (it escaped a wall, or it is NaN). Marks
-// the bricks that hold particles.
+// counts as drained when it left through an open face, as lost otherwise (it escaped a wall, or it is NaN). A particle
+// inside an open drain is removed and counted as drained. Marks the bricks that hold particles.
 
 ByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqCellCount;
@@ -47,6 +48,10 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     sides |= g.z < 0.0 ? GPU_FLUID_LIQUID_OPEN_NEG_Z : (g.z >= n.z ? GPU_FLUID_LIQUID_OPEN_POS_Z : 0u);
     const bool bDrained = (sides & LiqOpenMask()) != 0;
     GpuFluidLiqCounters.InterlockedAdd((bDrained ? GPU_FLUID_LIQUID_CTR_DRAINED : GPU_FLUID_LIQUID_CTR_LOST) * 4, 1u);
+  }
+  else if (LiqDrainCount() > 0 && LiqInsideDrain(position))
+  {
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_DRAINED * 4, 1u);
   }
   else
   {

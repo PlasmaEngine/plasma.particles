@@ -1,0 +1,83 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// Water level probes (the flood-level check), one thread per probe column (x, y), GpuFluidLiqPass.xyzw: the probes'
+// cells x | y << 16 (GPU_FLUID_LIQUID_NO_PROBE: none). Two depths in metres above the domain floor:
+// - from the particles: the count of the 3 x 3 cell column around the probe over n0 per cell, the volume they stand for
+//   spread over the column (the last substep's sort; independent of where the level set puts the surface);
+// - from the level set: walking up from the floor, the height where the last substep's phi first crosses zero
+//   (interpolated), 0 where the floor is dry. A cell of an inactive brick reads as air.
+
+ByteAddressBuffer GpuFluidLiqPhi;
+ByteAddressBuffer GpuFluidLiqCellCount;
+RWByteAddressBuffer GpuFluidLiqStats;
+
+float ProbePhi(int3 c)
+{
+  if (GpuFluidLiqBrickActive.Load(LiqBrickIndex(c) * 4) == 0)
+    return 1.0e3;
+  return asfloat(GpuFluidLiqPhi.Load(LiqCellIndex(c) * 4));
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_LIQUID_MAX_PROBES, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint i = dispatchThreadId.x;
+  if (i >= GPU_FLUID_LIQUID_MAX_PROBES)
+    return;
+
+  const uint4 probes = LIQ_CONST(GpuFluidLiqPass);
+  const uint probe = i == 0 ? probes.x : (i == 1 ? probes.y : (i == 2 ? probes.z : probes.w));
+  float level = 0.0;
+  float particleLevel = 0.0;
+  if (probe != GPU_FLUID_LIQUID_NO_PROBE)
+  {
+    const int2 column = int2(probe & 0xFFFFu, probe >> 16);
+    const uint3 cells = LiqCells();
+    if (all(column >= 0) && column.x < (int)cells.x && column.y < (int)cells.y)
+    {
+      float below = ProbePhi(int3(column, 0));
+      if (below < 0.0)
+      {
+        level = (float)cells.z;
+        for (uint z = 1; z < cells.z; ++z)
+        {
+          const float phi = ProbePhi(int3(column, z));
+          if (phi >= 0.0)
+          {
+            level = float(z) - 0.5 + below / (below - phi);
+            break;
+          }
+          below = phi;
+        }
+      }
+
+      uint count = 0;
+      uint columns = 0;
+      for (int y = -1; y <= 1; ++y)
+      {
+        for (int x = -1; x <= 1; ++x)
+        {
+          const int2 c = column + int2(x, y);
+          if (any(c < 0) || c.x >= (int)cells.x || c.y >= (int)cells.y)
+            continue;
+          ++columns;
+          for (uint z = 0; z < cells.z; ++z)
+            count += GpuFluidLiqCellCount.Load(LiqCellIndex(int3(c, z)) * 4);
+        }
+      }
+      particleLevel = float(count) / (max(float(columns), 1.0) * LiqParticlesPerCell());
+    }
+  }
+  GpuFluidLiqStats.Store((GPU_FLUID_LIQUID_STAT_PROBES + i) * 4, asuint(particleLevel * LiqDx()));
+  GpuFluidLiqStats.Store((GPU_FLUID_LIQUID_STAT_PROBES_PHI + i) * 4, asuint(level * LiqDx()));
+}

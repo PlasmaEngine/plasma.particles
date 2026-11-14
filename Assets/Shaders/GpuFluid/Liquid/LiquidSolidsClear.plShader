@@ -1,0 +1,27 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Start of the static solids bake: every cell unknown (farther than the band from every triangle), and the count of
+// solid cells (LiquidSolidsSign) back to zero.
+
+RWByteAddressBuffer GpuFluidLiqSolidSdfOut;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint3 cells = LiqCells();
+  if (dispatchThreadId.x < cells.x * cells.y * cells.z)
+    GpuFluidLiqSolidSdfOut.Store(dispatchThreadId.x * 4, asuint((float)GPU_FLUID_LIQUID_SDF_UNKNOWN));
+  if (dispatchThreadId.x == 0)
+    GpuFluidLiqCounters.Store(GPU_FLUID_LIQUID_CTR_SOLID_CELLS * 4, 0u);
+}

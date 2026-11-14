@@ -6,6 +6,7 @@
 #include <Core/WorldSerializer/WorldWriter.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidVolumeComponent.h>
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/Threading/DelegateTask.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidDebugRenderer.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidPass.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidSurfaceRenderer.h>
@@ -63,13 +64,25 @@ PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidInflow, plNoBase, 1, plRTTIDefaul
 }
 PL_END_STATIC_REFLECTED_TYPE
 
+PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidDrain, plNoBase, 1, plRTTIDefaultAllocator<plGpuFluidLiquidDrain>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Center", m_vCenter),
+    PL_MEMBER_PROPERTY("HalfExtents", m_vHalfExtents)->AddAttributes(new plDefaultValueAttribute(plVec3(0.1f, 0.1f, 0.05f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" m")),
+    PL_MEMBER_PROPERTY("Open", m_bOpen)->AddAttributes(new plDefaultValueAttribute(true)),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_STATIC_REFLECTED_TYPE
+
 PL_BEGIN_STATIC_REFLECTED_ENUM(plGpuFluidLiquidRenderMode, 1)
   PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::Surface),
   PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::Points),
   PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::SurfaceAndPoints),
 PL_END_STATIC_REFLECTED_ENUM;
 
-PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 3, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 4, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -82,6 +95,9 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 3, plComponentMode::Sta
     PL_ARRAY_MEMBER_PROPERTY("FillBoxes", m_FillBoxes),
     PL_ARRAY_MEMBER_PROPERTY("Obstacles", m_Obstacles),
     PL_ARRAY_MEMBER_PROPERTY("Inflows", m_Inflows),
+    PL_ARRAY_MEMBER_PROPERTY("Drains", m_Drains),
+    PL_MEMBER_PROPERTY("BakeStaticSolids", m_bBakeStaticSolids)->AddAttributes(new plDefaultValueAttribute(true)),
+    PL_MEMBER_PROPERTY("AllowSleep", m_bAllowSleep)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_ENUM_MEMBER_PROPERTY("RenderMode", plGpuFluidLiquidRenderMode, m_RenderMode)->AddAttributes(new plGroupAttribute("Look")),
     PL_MEMBER_PROPERTY("Absorption", m_vAbsorption)->AddAttributes(new plDefaultValueAttribute(plVec3(0.45f, 0.07f, 0.04f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" 1/m")),
     PL_MEMBER_PROPERTY("ScatterColor", m_ScatterColor)->AddAttributes(new plDefaultValueAttribute(plColor(0.03f, 0.09f, 0.11f))),
@@ -114,6 +130,7 @@ PL_END_COMPONENT_TYPE
 
 plCVarBool cvar_GpuFluidLiquidShowPoints("GpuFluid.Liquid.ShowPoints", false, plCVarFlags::Default, "Draws every liquid volume's particles as well, whatever its RenderMode.");
 plCVarInt cvar_GpuFluidLiquidSurfaceDebug("GpuFluid.Liquid.SurfaceDebug", 0, plCVarFlags::Default, "Liquid surface debug view: 0 off, 1 normals, 2 path length through the liquid.");
+plCVarInt cvar_GpuFluidRebake("GpuFluid.Rebake", 0, plCVarFlags::Default, "Change the value to bake the static solids of every liquid volume again from the world's collision meshes.");
 
 plGpuFluidLiquidVolumeComponent::plGpuFluidLiquidVolumeComponent() = default;
 plGpuFluidLiquidVolumeComponent::~plGpuFluidLiquidVolumeComponent() = default;
@@ -171,6 +188,17 @@ void plGpuFluidLiquidVolumeComponent::SerializeComponent(plWorldWriter& inout_st
   s << m_ScatterColor;
   s << m_fSurfaceRoughness;
   s << m_fRefractionStrength;
+
+  // Version 4.
+  s << m_Drains.GetCount();
+  for (const plGpuFluidLiquidDrain& drain : m_Drains)
+  {
+    s << drain.m_vCenter;
+    s << drain.m_vHalfExtents;
+    s << drain.m_bOpen;
+  }
+  s << m_bBakeStaticSolids;
+  s << m_bAllowSleep;
 }
 
 void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_stream)
@@ -234,6 +262,20 @@ void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_
     s >> m_fSurfaceRoughness;
     s >> m_fRefractionStrength;
   }
+
+  if (uiVersion >= 4)
+  {
+    s >> uiCount;
+    m_Drains.SetCount(uiCount);
+    for (plGpuFluidLiquidDrain& drain : m_Drains)
+    {
+      s >> drain.m_vCenter;
+      s >> drain.m_vHalfExtents;
+      s >> drain.m_bOpen;
+    }
+    s >> m_bBakeStaticSolids;
+    s >> m_bAllowSleep;
+  }
 }
 
 void plGpuFluidLiquidVolumeComponent::OnActivated()
@@ -244,10 +286,20 @@ void plGpuFluidLiquidVolumeComponent::OnActivated()
   EnsureVolume();
   ResetSimulation();
   GetOwner()->UpdateLocalBounds();
+
+  // Gathered on the first update: the solids around may be created after this component.
+  m_bSolidsDirty = true;
+  m_iLastRebakeCVar = cvar_GpuFluidRebake.GetValue();
 }
 
 void plGpuFluidLiquidVolumeComponent::OnDeactivated()
 {
+  if (m_BakeTaskGroup.IsValid())
+    plTaskSystem::WaitForGroup(m_BakeTaskGroup);
+  m_BakeTaskGroup.Invalidate();
+  m_pBakeJob = nullptr;
+  m_pSolidBake = nullptr;
+
   ReleaseVolume();
   GetOwner()->UpdateLocalBounds();
 
@@ -351,6 +403,66 @@ void plGpuFluidLiquidVolumeComponent::ReleaseVolume()
   m_bPublished = false;
 }
 
+void plGpuFluidLiquidVolumeComponent::UpdateStaticSolids()
+{
+  if (!m_bBakeStaticSolids)
+  {
+    m_pSolidBake = nullptr;
+    return;
+  }
+
+  // A finished task hands over its bake. One built for another domain (changed while it ran) is dropped.
+  if (m_BakeTaskGroup.IsValid() && plTaskSystem::IsTaskGroupFinished(m_BakeTaskGroup))
+  {
+    m_BakeTaskGroup.Invalidate();
+    if (m_pBakeJob != nullptr && m_pBakeJob->m_pResult != nullptr)
+    {
+      m_pSolidBake = m_pBakeJob->m_pResult;
+      ++m_uiSolidBakesBuilt;
+      plLog::Dev("GpuFluid: static solids of '{}': {} mesh objects, {} of {} triangles in the domain, {} bricks to bake (up to {} triangles each), binned in {} ms", GetOwner()->GetName(),
+        m_pSolidBake->m_uiMeshObjects, m_pSolidBake->GetTriangleCount(), m_pSolidBake->m_uiSourceTriangles, m_pSolidBake->m_BakeBricks.GetCount(), m_pSolidBake->m_uiMaxBinCount,
+        plArgF(m_pSolidBake->m_fBuildMs, 2));
+    }
+    m_pBakeJob = nullptr;
+  }
+
+  // The domain moved or was resized: the old bake no longer fits.
+  const plVec3 vOrigin = GetDomainOrigin();
+  const plVec3U32 vCells = m_ActiveSettings.m_vCells;
+  if (!(vCells == m_vBakedCells) || m_ActiveSettings.m_fCellSize != m_fBakedCellSize || !(vOrigin - m_vBakedDomainOrigin).IsZero(1e-4f))
+    m_bSolidsDirty = true;
+
+  if (cvar_GpuFluidRebake.GetValue() != m_iLastRebakeCVar)
+  {
+    m_iLastRebakeCVar = cvar_GpuFluidRebake.GetValue();
+    m_bSolidsDirty = true;
+  }
+
+  if (!m_bSolidsDirty || m_BakeTaskGroup.IsValid())
+    return;
+
+  m_bSolidsDirty = false;
+  m_vBakedCells = vCells;
+  m_fBakedCellSize = m_ActiveSettings.m_fCellSize;
+  m_vBakedDomainOrigin = vOrigin;
+
+  // The extraction sends plMsgExtractGeometry to every object and the CPU meshes are read here, on the update thread;
+  // welding, pseudonormals and binning run on a task.
+  plWorldGeoExtractionUtil::MeshObjectList objects;
+  plWorldGeoExtractionUtil::ExtractWorldGeometry(objects, *GetWorld(), plWorldGeoExtractionUtil::ExtractionMode::CollisionMesh);
+
+  m_pBakeJob = PL_DEFAULT_NEW(plGpuFluidLiquidSolidBakeJob);
+  m_pBakeJob->m_vDomainOrigin = vOrigin;
+  m_pBakeJob->m_vCells = vCells;
+  m_pBakeJob->m_fCellSize = m_fBakedCellSize;
+  const plVec3 vSize = GetDomainSize();
+  plGpuFluidLiquidSolidBake::GatherSourceMeshes(objects, vOrigin, vOrigin + vSize, GPU_FLUID_LIQUID_SDF_BAND_CELLS * m_fBakedCellSize, m_pBakeJob->m_Meshes);
+
+  plGpuFluidLiquidSolidBakeJob* pJob = m_pBakeJob.Borrow();
+  plSharedPtr<plTask> pTask = PL_DEFAULT_NEW(plDelegateTask<void>, "GpuFluid Static Solids", plTaskNesting::Never, [pJob]() { pJob->Run(); });
+  m_BakeTaskGroup = plTaskSystem::StartSingleTask(pTask, plTaskPriority::LongRunning);
+}
+
 void plGpuFluidLiquidVolumeComponent::Update()
 {
   if (m_pManager == nullptr)
@@ -359,6 +471,8 @@ void plGpuFluidLiquidVolumeComponent::Update()
   EnsureVolume();
   if (m_VolumeId == 0)
     return;
+
+  UpdateStaticSolids();
 
   if (GetDomainSize() != m_vBoundsSize)
     GetOwner()->UpdateLocalBounds();
@@ -459,6 +573,19 @@ void plGpuFluidLiquidVolumeComponent::Update()
     source.m_fFlowRate = inflow.m_fFlowRate * 1.0e-3f;
   }
 
+  input.m_Drains.Clear();
+  for (const plGpuFluidLiquidDrain& drain : m_Drains)
+  {
+    if (!drain.m_bOpen || input.m_Drains.GetCount() >= GPU_FLUID_LIQUID_MAX_DRAINS)
+      continue;
+    plGpuFluidLiquidShape& box = input.m_Drains.ExpandAndGetRef();
+    const plVec3 vCenter = drain.m_vCenter + vHalf;
+    box.CenterType = plVec4(vCenter.x, vCenter.y, vCenter.z, static_cast<float>(GPU_FLUID_LIQUID_SHAPE_BOX));
+    box.Size = plVec4(drain.m_vHalfExtents.x, drain.m_vHalfExtents.y, drain.m_vHalfExtents.z, 0.0f);
+  }
+
+  input.m_pSolidBake = m_pSolidBake;
+  input.m_bAllowSleep = m_bAllowSleep && m_Tuning.m_bAllowSleep;
   input.m_bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points;
 
   m_pManager->SetLiquidFrameInput(m_VolumeId, input);

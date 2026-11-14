@@ -17,10 +17,10 @@ ALL
 //   the liquid cells of the 3x3x3 block around it and normalised by the kernel mass of those cells (so walls, solids
 //   and air around do not read as missing particles). A smooth measure, unlike a particle count, changes little when
 //   a particle crosses a face, so a pool the correction has evened out stays at rest.
-//   Two-sided (dense cells push out, sparse ones pull in) in deep cells, whose 3x3x3 block holds no air; one-sided
-//   (only crowding is corrected) near the free surface, where a cell is only partly liquid and reads sparse. The
-//   equilibrium is e = 0 in the deep liquid whatever dt and the substep count, so the rest packing does not follow
-//   them.
+//   Two-sided (dense cells push out, sparse ones pull in) in deep cells, whose 3x3x3 block holds no air and no solid;
+//   one-sided (only crowding is corrected) near the free surface, where a cell is only partly liquid and reads sparse,
+//   and beside solids, whose faces cut cells (P8: two-sided there packed the settled pour 2% tighter). The equilibrium
+//   is e = 0 in the deep liquid whatever dt and the substep count, so the rest packing does not follow them.
 // - global volume control c * (V_target - V) / V_target with c in 1/s, V_target = (seeded - drained) / n0
 //   cells, V the measure of LiquidClassify. The relative error is clamped to +-25%.
 // Also rescales the warm start by the dt ratio (exact for the hydrostatic part of phi) and zeroes phi outside the
@@ -89,7 +89,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         const int3 o = int3(x, y, z);
         const int3 nb = cell + o;
         const uint t = LiqTypeAt(GpuFluidLiqCellType, nb, cells, true);
-        if (t == GPU_FLUID_LIQUID_CELL_AIR)
+        // Beside a solid the cells are only partly free for particles (a solid's face does not lie on a cell face), and
+        // read sparse at the right packing: the sparse side is not corrected there either.
+        if (t == GPU_FLUID_LIQUID_CELL_AIR || t == GPU_FLUID_LIQUID_CELL_SOLID)
           bDeep = false;
         if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
         {
@@ -115,6 +117,21 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
           density += BSpline2(d.x) * BSpline2(d.y) * BSpline2(d.z);
         }
       }
+    }
+  }
+
+  // A cell whose 3x3x3 block holds a surface cell (one with air beside it) reads sparse too: the kernel reaches into
+  // that cell, which is only part full, while its mass counts it whole. Under a 3/4-full top layer that read the layer
+  // below 2-3% sparse, and the two-sided correction drew a steady flow through the whole pool (P8, the random-seed
+  // tank at 16.75 cells). The surface lies above or beside, so the cells two away along each axis are checked as well.
+  if (bDeep)
+  {
+    [unroll] for (uint n = 0; n < 6; ++n)
+    {
+      const int3 o = 2 * LiqNeighbourOffset(n);
+      const uint t = LiqTypeAt(GpuFluidLiqCellType, cell + o, cells, true);
+      if (t == GPU_FLUID_LIQUID_CELL_AIR || (t == GPU_FLUID_LIQUID_CELL_OUTSIDE && LiqNeighbourSideOpen(n)))
+        bDeep = false;
     }
   }
 

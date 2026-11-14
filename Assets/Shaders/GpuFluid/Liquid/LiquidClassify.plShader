@@ -7,6 +7,7 @@ ALL
 
 #define GPU_FLUID_LIQUID_BRICK_DISPATCH
 #define GPU_FLUID_LIQUID_USE_SHAPES
+#define GPU_FLUID_LIQUID_USE_REGIONS
 #include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
@@ -32,9 +33,16 @@ RWByteAddressBuffer GpuFluidLiqCounters;
 groupshared uint gs_uiVolume;
 groupshared uint gs_uiLiquid;
 
+/// Solid when the cell centre is inside an analytic shape or the baked static solids (binary: no face fractions).
 bool IsSolidCell(int3 c)
 {
-  return LiqShapeCount() > 0 && LiqShapeDistance((float3(c) + 0.5) * LiqDx()) < 0.0;
+  return LiqHasSolids() && LiqInside(c) && LiqSolidDistanceAtCell(c) < 0.0;
+}
+
+/// A cell whose centre is inside an open drain is air: the free surface's zero pressure there draws the liquid in.
+bool IsDrainCell(int3 c)
+{
+  return LiqDrainCount() > 0 && LiqInsideDrain((float3(c) + 0.5) * LiqDx());
 }
 
 /// phi at the centre of cell c in cells, the far value (positive) where it was not computed this substep.
@@ -56,11 +64,13 @@ float PhiAt(int3 c)
 /// at the bottom of the pool, and the pressure would drive jets into them that carry particles through the wall.
 bool IsLiquidCell(int3 c, uint count, float phi)
 {
+  if (IsDrainCell(c))
+    return false;
   if (!LiqLevelSetEnabled())
     return count > 0;
   if (phi < LIQ_CONST(GpuFluidLiqPassF).y || (count >= max(LIQ_CONST(GpuFluidLiqPass).y, 1u) && phi < LIQ_CONST(GpuFluidLiqPassF).z))
     return true;
-  if (count == 0 || LiqShapeCount() == 0)
+  if (count == 0 || !LiqHasSolids())
     return false;
   [unroll] for (uint n = 0; n < 6; ++n)
   {

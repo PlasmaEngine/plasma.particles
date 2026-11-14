@@ -108,7 +108,7 @@ protected:
 
 public:
   /// Scene helpers, shared with the liquid gallery (GpuFluidLiquidGalleryTest.cpp). World write lock held.
-  plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color);
+  plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color, const plQuat& qRotation = plQuat::MakeIdentity());
   void AddSunAndSky(const plVec3& vToSun, float fLux);
 
 private:

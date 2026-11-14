@@ -1,0 +1,64 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// End of the static solids bake, one thread per column of cells (x, y): a cell farther than the band from every
+// triangle takes the sign of the nearest cell below it that the bake reached (or, below the first one, of that first
+// one), times the band. Walking up a column, a cell beyond the band lies inside a solid exactly when the last surface
+// crossed was its bottom: the last cell the bake reached is then inside, at the band's distance from the surface. A
+// column the bake never reached is outside every solid. Counts the solid cells (SDF < 0) for the stats.
+//
+// GpuFluidLiqPassF.x: band (m).
+
+RWByteAddressBuffer GpuFluidLiqSolidSdfOut;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(8, 8, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint3 cells = LiqCells();
+  if (dispatchThreadId.x >= cells.x || dispatchThreadId.y >= cells.y)
+    return;
+
+  const float band = LIQ_CONST(GpuFluidLiqPassF).x;
+  const float unknown = 0.5 * GPU_FLUID_LIQUID_SDF_UNKNOWN;
+
+  float carry = 1.0;
+  for (uint z = 0; z < cells.z; ++z)
+  {
+    const float v = asfloat(GpuFluidLiqSolidSdfOut.Load(LiqCellIndex(int3(dispatchThreadId.xy, z)) * 4));
+    if (v < unknown)
+    {
+      carry = v < 0.0 ? -1.0 : 1.0;
+      break;
+    }
+  }
+
+  uint solid = 0;
+  for (uint k = 0; k < cells.z; ++k)
+  {
+    const uint index = LiqCellIndex(int3(dispatchThreadId.xy, k)) * 4;
+    float v = asfloat(GpuFluidLiqSolidSdfOut.Load(index));
+    if (v >= unknown)
+    {
+      v = carry * band;
+      GpuFluidLiqSolidSdfOut.Store(index, asuint(v));
+    }
+    else
+    {
+      carry = v < 0.0 ? -1.0 : 1.0;
+    }
+    solid += v < 0.0 ? 1u : 0u;
+  }
+
+  if (solid > 0)
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SOLID_CELLS * 4, solid);
+}

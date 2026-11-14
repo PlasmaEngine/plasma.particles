@@ -1,0 +1,158 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Static solids bake (plan section 7), one 8x8x8 group per brick of the bake list (bricks with at least one triangle
+// binned on the CPU, plGpuFluidLiquidSolidBake). Each thread takes the exact distance from its cell centre to every
+// triangle of its brick's bin (which holds every triangle closer than the band to the brick), and the sign from the
+// angle-weighted pseudonormal of the closest feature (face, edge or vertex; Baerentzen & Aanaes 2005), which is exact
+// for a closed, consistently wound mesh. Cells farther than the band keep GPU_FLUID_LIQUID_SDF_UNKNOWN for
+// LiquidSolidsSign. Every surface is at least the minimum thickness: the stored value is min(signed, d - t / 2).
+//
+// GpuFluidLiqPass.x: bricks in the list. GpuFluidLiqPassF.x: band (m), y: half the minimum thickness (m).
+
+ByteAddressBuffer GpuFluidLiqSolidTriangles; // GPU_FLUID_LIQUID_SOLID_TRIANGLE_FLOATS floats per triangle
+ByteAddressBuffer GpuFluidLiqSolidBins;      // per brick: first index, count
+ByteAddressBuffer GpuFluidLiqSolidIndices;
+ByteAddressBuffer GpuFluidLiqSolidBricks;    // the bricks to bake
+RWByteAddressBuffer GpuFluidLiqSolidSdfOut;
+
+float3 LoadTriangleVector(uint triangleIndex, uint slot)
+{
+  return asfloat(GpuFluidLiqSolidTriangles.Load3((triangleIndex * GPU_FLUID_LIQUID_SOLID_TRIANGLE_FLOATS + slot * 3) * 4));
+}
+
+/// Closest point of triangle abc to p (Ericson, Real-Time Collision Detection 5.1.5), and the feature it lies on:
+/// 0 the face, 1..3 the vertices a, b, c, 4..6 the edges ab, bc, ca.
+float3 ClosestPointOnTriangle(float3 p, float3 a, float3 b, float3 c, out uint feature)
+{
+  const float3 ab = b - a;
+  const float3 ac = c - a;
+  const float3 ap = p - a;
+  const float d1 = dot(ab, ap);
+  const float d2 = dot(ac, ap);
+  if (d1 <= 0.0 && d2 <= 0.0)
+  {
+    feature = 1;
+    return a;
+  }
+
+  const float3 bp = p - b;
+  const float d3 = dot(ab, bp);
+  const float d4 = dot(ac, bp);
+  if (d3 >= 0.0 && d4 <= d3)
+  {
+    feature = 2;
+    return b;
+  }
+
+  const float vc = d1 * d4 - d3 * d2;
+  if (vc <= 0.0 && d1 >= 0.0 && d3 <= 0.0)
+  {
+    feature = 4;
+    return a + ab * (d1 / (d1 - d3));
+  }
+
+  const float3 cp = p - c;
+  const float d5 = dot(ab, cp);
+  const float d6 = dot(ac, cp);
+  if (d6 >= 0.0 && d5 <= d6)
+  {
+    feature = 3;
+    return c;
+  }
+
+  const float vb = d5 * d2 - d1 * d6;
+  if (vb <= 0.0 && d2 >= 0.0 && d6 <= 0.0)
+  {
+    feature = 6;
+    return a + ac * (d2 / (d2 - d6));
+  }
+
+  const float va = d3 * d6 - d5 * d4;
+  if (va <= 0.0 && (d4 - d3) >= 0.0 && (d5 - d6) >= 0.0)
+  {
+    feature = 5;
+    return b + (c - b) * ((d4 - d3) / ((d4 - d3) + (d5 - d6)));
+  }
+
+  feature = 0;
+  const float denom = 1.0 / (va + vb + vc);
+  return a + ab * (vb * denom) + ac * (vc * denom);
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  GPU_FLUID_KERNEL_MODES
+  if (groupId.x >= LIQ_CONST(GpuFluidLiqPass).x)
+    return;
+
+  const uint brick = GpuFluidLiqSolidBricks.Load(groupId.x * 4);
+  const uint3 bricks = LiqBricks();
+  const uint3 b = uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y));
+  const int3 cell = int3(b * GPU_FLUID_LIQUID_BRICK + groupThreadId);
+  if (!LiqInside(cell))
+    return;
+
+  const float3 p = (float3(cell) + 0.5) * LiqDx();
+  const uint2 bin = GpuFluidLiqSolidBins.Load2(brick * 8);
+  const float band = LIQ_CONST(GpuFluidLiqPassF).x;
+
+  // The bin lists triangles in increasing order, so those of one mesh object come one after the other: each object's
+  // closest triangle gives its own signed distance, and the smallest over the objects is their union's.
+  const float halfThickness = LIQ_CONST(GpuFluidLiqPassF).y;
+  float result = 1.0e30;
+  uint object = 0xFFFFFFFFu;
+  float bestSq = band * band;
+  float bestSign = 1.0;
+  bool bFound = false;
+  for (uint i = 0; i <= bin.y; ++i)
+  {
+    const uint t = i < bin.y ? GpuFluidLiqSolidIndices.Load((bin.x + i) * 4) : 0u;
+    const uint tObject = i < bin.y ? GpuFluidLiqSolidTriangles.Load((t * GPU_FLUID_LIQUID_SOLID_TRIANGLE_FLOATS + 30) * 4) : 0xFFFFFFFEu;
+    if (tObject != object)
+    {
+      if (bFound)
+      {
+        const float dist = sqrt(bestSq);
+        result = min(result, min(bestSign * dist, dist - halfThickness));
+      }
+      object = tObject;
+      bestSq = band * band;
+      bestSign = 1.0;
+      bFound = false;
+    }
+    if (i == bin.y)
+      break;
+
+    const float3 a = LoadTriangleVector(t, 0);
+    const float3 bb = LoadTriangleVector(t, 1);
+    const float3 c = LoadTriangleVector(t, 2);
+    uint feature;
+    const float3 q = ClosestPointOnTriangle(p, a, bb, c, feature);
+    const float3 d = p - q;
+    const float dSq = dot(d, d);
+    if (dSq < bestSq)
+    {
+      // Feature 0 the face normal (slot 3), 1..3 the vertex normals (slots 7..9), 4..6 the edge normals (slots 4..6).
+      const uint slot = feature == 0 ? 3u : (feature <= 3 ? 6u + feature : feature);
+      const float3 n = LoadTriangleVector(t, slot);
+      bestSq = dSq;
+      bestSign = dot(d, n) >= 0.0 ? 1.0 : -1.0;
+      bFound = true;
+    }
+  }
+
+  if (result > 1.0e29)
+    return; // farther than the band from every object: LiquidSolidsSign decides
+
+  GpuFluidLiqSolidSdfOut.Store(LiqCellIndex(cell) * 4, asuint(result));
+}

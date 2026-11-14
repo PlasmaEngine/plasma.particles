@@ -91,7 +91,19 @@ The items flagged on the Mac (typed RGBA16F 3D UAV loads, push-constant blocks, 
 - `-debugDevice` turns on D3D12 GPU-based validation, too slow for these tests; use `PL_DX12_DEBUG_DEVICE=1` for the debug layer alone.
 - The package's GitHub push URL is SSH and this PC has no key; push over HTTPS.
 
-## Open review findings: P2
+## RESUME (2026-11-14, PC thread)
+- **P2 review fixes: done** (`2e6eb3e`). Gas gallery 21/21 on DX12 and Vulkan. Video `P2-moving-emitter-bricks.mp4`.
+  - Finding 2 root cause: the gas data was intact. The brick view's edge emission, summed over every brick edge a ray crosses, tinted the dark gas until it read as transparent. Fixed with a dimmer default (`GpuFluid.Debug.BrickGlow` 0.04).
+  - PC timings are not valid yet: the user's editor shared the GPU (~44% busy), so the PC CSVs are indicative only.
+- **P8A major finding: root cause found.** The render graph names the n-th pass of a name `<name> #n`, so every substep after the first was timed as `Sort #2`, `P2G #3` and so on. The liquid tests summed only the plain names, so they counted one substep. They now sum the repeats and clear stale ones (`GetPassMs` / `RemovePassStats`). Medium Room Substep Cost passes.
+- **P8 stage B: in progress** (the WIP from `wip/gpu-fluid-p8b-flood`, now built). Fixed: `triangle` keyword in LiquidSolidsBake, static boxes rotated after creation, the Static Solids triangle expectation, float-mode macros on the new kernels.
+  - Passing: Open Side Outflow, Sleep And Wake, No Liquid, Medium Room Substep Cost.
+  - Failing:
+    - Static Solids: 82.6% of the expected solid cells.
+    - Flooding Room: level +18% at 6 s and -32% at 12 s; 77% of the water left 20 s after the drain opens; P2G 125 ms a frame, which points to over-packed cells; the scene is too dark to show the water.
+    - Random-seed tanks: Quarter is marginal at 1.1 cm/s; Three Quarter boils at 12 cm/s.
+
+## Open review findings: P2 (fixed in `2e6eb3e`; kept for reference)
 
 **Major**
 1. **The brick view never draws bricks kept only by flux, proximity or idleness.** Their brick-table A is 0, so the march skips them.

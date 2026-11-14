@@ -3,6 +3,7 @@
 #include <Foundation/Containers/DynamicArray.h>
 #include <Foundation/Containers/HybridArray.h>
 #include <Foundation/Math/Vec3.h>
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidLiquidSolids.h>
 #include <ParticlePlugin/GpuFluid/Gpu/GpuFluidScan.h>
 #include <ParticlePlugin/GpuFluid/GpuFluidDeclarations.h>
 #include <RendererCore/Shader/ShaderResource.h>
@@ -138,6 +139,10 @@ struct plGpuFluidLiquidFrameInput
   plUInt32 m_uiLiquidMinCount = 1;
   /// Particles in air cells fly ballistically (gravity only). False: they take the extrapolated grid velocity.
   bool m_bBallisticAir = true;
+  /// Only clear of the surface: a particle in an air cell right above a liquid cell (along gravity) takes the grid
+  /// velocity instead. A part-full top layer the level set reads as air otherwise fell, bounced off the liquid below
+  /// and fell again, kicks of 0.1-0.2 m/s in a resting tank (P8, random-seed tanks at 16.25 and 16.75 cells).
+  bool m_bBallisticClearOfSurface = true;
   float m_fThetaMin = 0.25f;         ///< smallest theta from the level set
   /// Clamped Laplacian steps on the substep's level set before it classifies (pairs; 0: none). They take the particles'
   /// noise out of theta, which otherwise keeps a resting surface jittering.
@@ -158,6 +163,21 @@ struct plGpuFluidLiquidFrameInput
   plHybridArray<plGpuFluidLiquidFill, 4> m_Fills;
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_Shapes;
   plHybridArray<plGpuFluidLiquidSource, 4> m_Sources; ///< at most s_uiMaxSources are used
+
+  /// The static solids baked from the world's collision meshes (null: none). A new pointer is baked again on the GPU.
+  plGpuFluidLiquidSolidBakePtr m_pSolidBake;
+
+  /// Open drains: boxes (CenterType.xyz centre, Size.xyz half extents, domain metres). A particle inside one is removed
+  /// and counted as drained; a cell whose centre is inside one is air.
+  plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_DRAINS> m_Drains;
+
+  /// Brick and volume sleep (plan section 5): a brick calm for 60 substeps freezes its particles; when no brick holding
+  /// particles is awake, no inflow runs and nothing that could wake it changed, the whole volume stops simulating (only
+  /// its last surface is drawn) until an input changes.
+  bool m_bAllowSleep = true;
+
+  /// Water level probes: up to four columns (x, y cells) whose level (m above the domain floor) the stats report.
+  plHybridArray<plVec2U32, GPU_FLUID_LIQUID_MAX_PROBES> m_Probes;
 
   /// Splits Liquid/P2G (level set apart: "P2G LevelSet") and Liquid/Solve ("Solve Setup": classify, forces, right-hand
   /// side; "Solve": the pressure; "Solve Project": residual, projection, extrapolation) into passes of their own, so
@@ -214,6 +234,21 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
   plUInt32 m_uiSurfaceVertices = 0; ///< surface-nets vertices of the frame (0 when the surface is off)
   plUInt32 m_uiSurfaceQuads = 0;    ///< and quads, both capped at their capacity
   plUInt32 m_uiSurfaceOverflow = 0; ///< vertices and quads that did not fit
+
+  plUInt32 m_uiAwakeBricks = 0;    ///< bricks holding particles that are awake after the last substep
+  plUInt32 m_uiSleepingBricks = 0; ///< and asleep (their particles frozen)
+  /// Water depth at the probes (m above the domain floor) from the particles of the 3 x 3 cell column around each:
+  /// their count over n0 per cell, the volume they stand for spread over the column.
+  float m_fProbeLevels[GPU_FLUID_LIQUID_MAX_PROBES] = {};
+  float m_fProbePhiLevels[GPU_FLUID_LIQUID_MAX_PROBES] = {}; ///< the same from the level set's lowest zero crossing
+  plUInt32 m_uiInSolid = 0;        ///< particle-substeps of the frame left deeper than half a cell inside a solid (N9)
+  plUInt32 m_uiSolidCells = 0;     ///< cells the static solids bake made solid (SDF < 0), counted by the last bake
+
+  // Filled on the CPU, current (not read back):
+  bool m_bVolumeAsleep = false;     ///< the volume does not simulate (nothing awake, nothing to wake it)
+  plUInt64 m_uiTicksAsleep = 0;     ///< ticks skipped asleep since the last reset
+  plUInt32 m_uiSolidTriangles = 0;  ///< triangles of the static solids bake on the GPU (0: none)
+  plUInt32 m_uiSolidBakes = 0;      ///< bakes run since the volume was created
 };
 
 /// What the debug renderer needs to draw a liquid volume's particles this frame.
@@ -274,6 +309,11 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hSurfaceArgs;
   plShaderResourceHandle m_hSource;
   plShaderResourceHandle m_hSourceFinish;
+  plShaderResourceHandle m_hSolidsClear;
+  plShaderResourceHandle m_hSolidsBake;
+  plShaderResourceHandle m_hSolidsSign;
+  plShaderResourceHandle m_hSleep;
+  plShaderResourceHandle m_hProbes;
   plGpuFluidScan m_Scan;
 
   void Load();
@@ -308,8 +348,14 @@ public:
   void Destroy();
   bool IsCreated() const { return m_bCreated; }
 
-  /// Records this tick's work. pStats are the newest stats read back (or null), which pick the substep count.
-  void Record(plRenderGraph& ref_graph, const plGpuFluidLiquidShaders& shaders, const plGpuFluidLiquidFrameInput& input, const plGpuFluidLiquidStats* pStats, plUInt64 uiStatsAge);
+  /// Records this tick's work. pStats are the newest stats read back (or null), which pick the substep count. False
+  /// when nothing was recorded (no new tick, or the volume is asleep): the stats buffer then holds the last tick's.
+  bool Record(plRenderGraph& ref_graph, const plGpuFluidLiquidShaders& shaders, const plGpuFluidLiquidFrameInput& input, const plGpuFluidLiquidStats* pStats, plUInt64 uiStatsAge, plUInt64 uiFrame);
+
+  bool IsAsleep() const { return m_bAsleep; }
+  plUInt64 GetTicksAsleep() const { return m_uiTicksAsleep; }
+  plUInt32 GetSolidTriangles() const { return m_bHasSolidSdf ? m_uiSolidTriangles : 0u; }
+  plUInt32 GetSolidBakes() const { return m_uiSolidBakes; }
 
   /// Whether a tick has been recorded since the solver was created, so its points may be drawn.
   bool HasRecorded() const { return m_bRecorded; }
@@ -431,4 +477,28 @@ private:
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_UploadedShapes;
   bool m_bShapesUploaded = false;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
+
+  // Static solids: the baked distance per cell, and the bake's uploads (kept until the next bake).
+  plGALBufferHandle m_hSolidSdf;
+  plGALBufferHandle m_hSolidTriangles;
+  plGALBufferHandle m_hSolidBins;
+  plGALBufferHandle m_hSolidIndices;
+  plGALBufferHandle m_hSolidBricks;
+  plGpuFluidLiquidSolidBakePtr m_pBakedSolids; ///< the bake the SDF holds
+  bool m_bHasSolidSdf = false;
+  plUInt32 m_uiSolidTriangles = 0;
+  plUInt32 m_uiSolidBakes = 0;
+
+  // Regions: the drains and the wake boxes, uploaded when they change.
+  plGALBufferHandle m_hRegions;
+  plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_REGIONS> m_UploadedRegions;
+
+  // Sleep: per brick whether a particle was faster than the sleep speed this substep, and the calm substeps in a row.
+  plGALBufferHandle m_hBrickSpeed;
+  plGALBufferHandle m_hBrickCalm;
+  bool m_bAsleep = false;
+  bool m_bWakePending = true;    ///< the next substep starts every brick awake
+  plUInt64 m_uiWakeFrame = 0;    ///< render frame of the last wake; stats from before it cannot put the volume to sleep
+  plUInt64 m_uiAsleepKey = 0;    ///< the inputs that can wake the volume, as they were when it fell asleep
+  plUInt64 m_uiTicksAsleep = 0;
 };

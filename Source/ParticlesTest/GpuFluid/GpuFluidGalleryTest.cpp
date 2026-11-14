@@ -236,7 +236,7 @@ void plGpuFluidGalleryApplication::BeforeHighLevelSystemsShutdown()
   plGameEngineTestApplication::BeforeHighLevelSystemsShutdown();
 }
 
-plGameObject* plGpuFluidGalleryApplication::AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color)
+plGameObject* plGpuFluidGalleryApplication::AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color, const plQuat& qRotation)
 {
   if (!m_hBoxMesh.IsValid())
   {
@@ -257,6 +257,7 @@ plGameObject* plGpuFluidGalleryApplication::AddBox(const char* szName, const plV
   plGameObjectDesc desc;
   desc.m_sName.Assign(szName);
   desc.m_LocalPosition = vCenter;
+  desc.m_LocalRotation = qRotation;
   desc.m_LocalScaling = vSize;
   desc.m_Tags.Set(plTagRegistry::GetGlobalRegistry().RegisterTag("CastShadow"));
   plGameObject* pObject = nullptr;

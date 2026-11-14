@@ -1,6 +1,7 @@
 #pragma once
 
 #include <Core/World/World.h>
+#include <Foundation/Threading/TaskSystem.h>
 #include <ParticlePlugin/GpuFluid/Gpu/GpuFluidGpuManager.h>
 #include <ParticlePlugin/GpuFluid/GpuFluidDeclarations.h>
 
@@ -80,6 +81,18 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidInflow
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidInflow);
 
+/// \brief A drain: a box in the volume's space that, while open, removes the liquid reaching it (counted as drained).
+/// The cells inside are air to the pressure solve, so the liquid around flows in under its own weight (a floor drain
+/// is a thin box on the floor; a hole in a wall a box through it).
+struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidDrain
+{
+  plVec3 m_vCenter = plVec3::MakeZero();
+  plVec3 m_vHalfExtents = plVec3(0.1f, 0.1f, 0.05f); ///< m
+  bool m_bOpen = true;
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidDrain);
+
 /// \brief How a liquid volume is drawn.
 struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidRenderMode
 {
@@ -148,6 +161,15 @@ public:
   plDynamicArray<plGpuFluidLiquidFillBox> m_FillBoxes;                  // [ property ]
   plDynamicArray<plGpuFluidLiquidObstacle> m_Obstacles;                 // [ property ]
   plDynamicArray<plGpuFluidLiquidInflow> m_Inflows;                     // [ property ]
+  plDynamicArray<plGpuFluidLiquidDrain> m_Drains;                       // [ property ]
+
+  /// Static solids from the world's collision meshes (plWorldGeoExtractionUtil, CollisionMesh: Jolt static actors, or
+  /// any component answering plMsgExtractGeometry), baked into a distance field on activation, when the domain
+  /// changes, on RebakeStaticSolids() and when the cvar GpuFluid.Rebake changes.
+  bool m_bBakeStaticSolids = true;                                      // [ property ]
+  /// Bricks calm for 60 substeps freeze their particles, and a volume with nothing awake and nothing to wake it stops
+  /// simulating (only its surface is drawn) until an inflow, drain, solid or gravity changes.
+  bool m_bAllowSleep = true;                                            // [ property ]
 
   float m_fFlipBlend = 0.1f;                                            // [ property ]
   plUInt32 m_uiMaxSubsteps = 0;                                         // [ property ] 0: the quality tier's (GetTierMaxSubsteps)
@@ -169,6 +191,15 @@ public:
 
   /// Empties the volume and seeds the fill boxes again on the next tick.
   void ResetSimulation();
+
+  /// Gathers the static solids again (on the next update) and bakes them; the simulation goes on.
+  void RebakeStaticSolids() { m_bSolidsDirty = true; }
+
+  /// The bake the simulation uses (null: none yet, or BakeStaticSolids off), and how many have been built.
+  const plGpuFluidLiquidSolidBake* GetStaticSolids() const { return m_pSolidBake.Borrow(); }
+  plUInt32 GetStaticSolidsBuilt() const { return m_uiSolidBakesBuilt; }
+  /// Whether a bake is being built on a task.
+  bool IsBakingStaticSolids() const { return m_BakeTaskGroup.IsValid(); }
 
   /// Cells per axis of the domain.
   plVec3U32 GetCells() const;
@@ -202,6 +233,18 @@ private:
   plGpuFluidLiquidSettings ComputeSettings() const;
   void EnsureVolume();
   void ReleaseVolume();
+  void UpdateStaticSolids();
+
+  // Static solids: the bake in use, the one a task is building (with the meshes it reads), and what asks for a new one.
+  plSharedPtr<plGpuFluidLiquidSolidBake> m_pSolidBake;
+  plSharedPtr<plGpuFluidLiquidSolidBakeJob> m_pBakeJob;
+  plTaskGroupID m_BakeTaskGroup;
+  bool m_bSolidsDirty = true;
+  plInt32 m_iLastRebakeCVar = 0;
+  plUInt32 m_uiSolidBakesBuilt = 0;
+  plVec3 m_vBakedDomainOrigin = plVec3::MakeZero();
+  plVec3U32 m_vBakedCells = plVec3U32::MakeZero();
+  float m_fBakedCellSize = 0.0f;
 
   plGpuFluidGpuManager* m_pManager = nullptr;
   plGpuFluidVolumeId m_VolumeId = 0;
