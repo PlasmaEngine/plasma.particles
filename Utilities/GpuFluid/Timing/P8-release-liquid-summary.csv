@@ -1,0 +1,6 @@
+scene,particles,substeps_per_frame,total_ms_per_frame,substep_phases_ms,surface_ms,draw_ms,solve_ms,p2g_ms,sort_ms,g2p_ms,stats_ms,ns_per_particle_substep,solve_us_per_brick_substep,active_bricks,pcg_iterations
+MediumRoom,393216,2.03,8.892,7.667,0.588,0.648,4.094,2.558,0.700,0.315,0.509,9.59,4.02,501,4
+MediumRoomProfile,393216,2.30,8.835,7.710,0.612,0.649,3.995,2.512,0.723,0.479,0.439,8.52,2.56,501,4
+DamBreak,230400,5.66,7.716,6.967,0.398,0.501,4.686,1.755,0.365,0.161,0.293,5.34,3.03,273,8
+Hydrostatic,118272,4.44,4.113,3.704,0.217,0.467,2.690,0.737,0.164,0.113,0.119,7.05,5.41,112,8
+Pour,136847,14.00,11.196,9.511,1.463,0.390,7.881,1.351,0.179,0.100,0.087,4.96,2.13,264,16

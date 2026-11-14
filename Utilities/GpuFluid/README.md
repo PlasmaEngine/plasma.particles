@@ -130,6 +130,38 @@ PL_GPUFLUID_TUNE_BUOYANCY=8 PL_GPUFLUID_TUNE_FRAMES=300 Utilities/GpuFluid/run_g
 The names are in `Tune(...)` calls in `GpuFluidGalleryTest.cpp`. The gallery window is 1280 x 720 (written to the run's
 appdata, so the shared FluidGallery project stays at 960 x 540).
 
+## Liquid gallery (`GpuFluid Liquid Gallery`, P6 to P8)
+
+The liquid track runs its test binary as `ParticlesTestLiquid` next to the engine binaries (so it never replaces the
+gas track's `ParticlesTest`) and clears the GpuFluid shader cache before each run:
+
+```
+cp Bin/Tests/Mac_x64_Development/ParticlesTest $W/Binaries/Mac_Development/ParticlesTestLiquid
+find $W/Binaries/Mac_Development/ShaderCache -type d -name GpuFluid -prune -exec rm -rf {} \;
+cd $W/Binaries/Mac_Development && DYLD_LIBRARY_PATH="$PWD:<this package>/Bin/Mac_x64_Development" PL_SILENT_ASSERTS=1 \
+  ./ParticlesTestLiquid -run -close -noGui -noSave -all -assert 0 -renderer Metal -outputDir <out> -filter "GpuFluid Liquid Gallery"
+```
+
+A filter can name one sub-test by a part of its name ("Random Seed", "Medium Room"). Release: the same with
+`Mac_Release` and `Mac_x64_Release` (only the package's Release dylib is loaded then; `DYLD_PRINT_LIBRARIES=1` shows it).
+
+| Sub-test | Checks |
+|---|---|
+| Dam Break | N5 (alive == seeded - drained, volume measure +-3% every tick, rest depth +-3% with the slosh energy taken out and +-5% raw, centroid steps), N2 every tick, N7 against Martin & Moyce |
+| Hydrostatic Tank | N6 at a stratified seed with forced substep changes |
+| Hydrostatic Tank Random Seed | N6 with every particle anywhere in the box: max \|v\| < 1 cm/s at tick 300 and over the last 60 ticks |
+| Pour Into Glass | inflow count, containment, settled depth, N2, a surface mesh every tick |
+| Medium Room | the plan's Medium reference load (128 x 96 x 64 at 6.25 cm, 393K particles) on the tier defaults: per-phase GPU time (`MediumRoom_timings.csv`), N2 percentiles, the 3-substep cap |
+| No Liquid | the liquid pass runs none of its GPU passes in a view without liquid |
+| Dam Break Video, Pour Into Glass Video | frames with `PL_GPUFLUID_VIDEO=1` |
+
+Solver values can be tried without a rebuild through `PL_GPUFLUID_LIQ_<NAME>` (see `ApplyTuningOverrides` in
+`GpuFluidLiquidGalleryTest.cpp`), for instance `CYCLES` (MGPCG iterations), `FORCE_SUBSTEPS` (a fixed substep count),
+`LIQUID_PHI` (tau of the level-set classification), `LEVEL_SET_ONLY`, `DENSITY_GAIN`, `TWO_SIDED`, `VOLUME_GAIN`,
+`PROFILE=1` (P2G's level set and the solve's setup and projection in passes of their own, so each is timed),
+`SURFACE_OWN_LEVEL_SET=1` (P7's extra sort for the surface), `RENDER_MODE=1` with `TOP_SPEED` (speed-coloured points).
+Timing CSVs of each phase end are in `Timing/` (`P8-release-liquid-*.csv`).
+
 ## Offline compile for Vulkan and DX12
 
 `compile_offline.sh <work dir>` compiles every GpuFluid shader (top level, `Gas`, `Liquid`, all permutations) with
