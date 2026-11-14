@@ -1,0 +1,18 @@
+phase,mean_ms_per_frame
+GpuFluid Liquid/Begin,0.040859
+GpuFluid Liquid/Seed,0.860917
+GpuFluid Liquid/Source,0
+GpuFluid Liquid/Sort,0.327972
+GpuFluid Liquid/P2G,1.883968
+GpuFluid Liquid/Solve,5.22325
+GpuFluid Liquid/G2P,0.161325
+GpuFluid Liquid/Render,0.244114
+GpuFluid Liquid/Surface Sort,0.378695
+GpuFluid Liquid/Surface,0.758026
+GpuFluid Liquid/Readback,0.037389
+GpuFluid Liquid Copy Scene Color,0.157949
+GpuFluid Liquid Copy Depth,0.032361
+GpuFluid Liquid Back Faces,0.085552
+GpuFluid Liquid Surface,0.215889
+total,9.055598
+draw_total,0.491751

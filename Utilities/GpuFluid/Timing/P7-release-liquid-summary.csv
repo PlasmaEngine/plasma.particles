@@ -1,0 +1,4 @@
+scene,particles,substeps_per_frame,sim_ms_per_frame,surface_ms_per_frame,draw_ms_per_frame,solve_ms_per_frame,ns_per_particle_substep_sim,mean_active_bricks,us_per_brick_substep_solve
+DamBreak,230400,6.85,7.919,1.137,0.492,5.223,5.02,350.1,2.18
+Hydrostatic,118272,4.44,5.162,0.422,0.467,4.018,9.83,,
+Pour,136847,14.0,8.896,1.796,0.391,6.980,4.64,,

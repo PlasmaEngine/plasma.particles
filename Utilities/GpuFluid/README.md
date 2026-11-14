@@ -92,3 +92,9 @@ PL_GPUFLUID_TUNE_BUOYANCY=8 PL_GPUFLUID_TUNE_FRAMES=300 Utilities/GpuFluid/run_g
 
 The names are in `Tune(...)` calls in `GpuFluidGalleryTest.cpp`. The gallery window is 1280 x 720 (written to the run's
 appdata, so the shared FluidGallery project stays at 960 x 540).
+
+## Offline compile for Vulkan and DX12
+
+`compile_offline.sh <work dir>` compiles every GpuFluid shader (top level, `Gas`, `Liquid`, all permutations) with
+the engine's `ShaderCompiler` for VULKAN and DX12 on this Mac (plan amendment A6) and prints one summary line per
+platform; the logs stay in the work dir. Build the engine's `ShaderCompiler` target first.

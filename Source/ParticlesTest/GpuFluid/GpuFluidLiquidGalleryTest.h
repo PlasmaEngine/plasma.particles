@@ -18,14 +18,17 @@ class plGpuFluidLiquidVolumeComponent;
 ///   tick; N2. With exactly n0 particles per cell this is a discrete equilibrium the solve keeps; it checks that dt
 ///   changes and a partial surface layer do not disturb it.
 /// - "Hydrostatic Tank Random Seed": the same tank with the particles anywhere in the box (cell counts vary), the
-///   same checks. Runs only with PL_GPUFLUID_LIQ_STRICT_N6=1. The level-set classification (P7) took out the jets into
-///   empty cells inside the pool, and the density correction's dead zone the boiling; what is left fails the 1 cm/s
-///   limit: loose particles at the surface pick up about one substep of gravity (0.04 .. 0.25 m/s, more at fewer
-///   substeps) while the pool's mean speed is below 2 mm/s.
+///   same checks, plus max |v| over the last 60 ticks. Mandatory (plan amendment A2) and known to fail with the
+///   default classification (cells with particles or phi < 0): the surface cells' classification follows the
+///   particles' noise, and the pressure of a cell that is liquid beside one that is air pushes sideways, so the
+///   surface keeps moving and kicks of up to about 1 m/s recur. Liquid cells from phi < 0 alone with a particle radius
+///   of 0.65 cells (PL_GPUFLUID_LIQ_LEVEL_SET_ONLY=1 PL_GPUFLUID_LIQ_PARTICLE_RADIUS=0.65) pass it, but the dam break
+///   then keeps sloshing at 0.27 m/s mean after 20 s and its rest-depth check fails.
 /// - "Dam Break Video": 8 s of the dam break as PNG frames, the rendered surface, when PL_GPUFLUID_VIDEO=1.
-/// - "Pour Into Glass": a nozzle (an inflow of 0.54 l/s) pours into a glass of analytic box walls for 8 s. Particles ==
-///   seeded - drained exactly, the seeded count against the flow rate, no NaN, everything inside the glass at the
-///   end, and a surface mesh on every tick without overflow.
+/// - "Pour Into Glass": a nozzle (an inflow of 0.92 l/s) pours into a glass of analytic box walls for 8 s, then the
+///   water settles for 2 s. Particles == seeded - drained exactly, the seeded count against the flow rate, no NaN,
+///   everything inside the glass at the end, the settled depth against the poured volume over the glass's inner area
+///   (+-5%: a jet packing the pool), and a surface mesh on every tick without overflow.
 /// - "Pour Into Glass Video": the same as PNG frames, when PL_GPUFLUID_VIDEO=1.
 ///
 /// Uses the gallery's application (FluidGallery project); writes shots and CSVs under GpuFluidGallery/Liquid/.
@@ -117,6 +120,8 @@ private:
   bool m_bDepthOfFieldWasEnabled = true;
   bool m_bRestoreDepthOfField = false;
   bool m_bGpuStatsWasEnabled = false;
+  bool m_bVirtualShadowsWereEnabled = true;
+  int m_iTransparencyModeWas = 4;
 
   plUInt64 m_uiLastStatsFrame = 0;
   plMap<plUInt32, TickSample> m_Ticks;
@@ -135,4 +140,6 @@ private:
   // Pour Into Glass: the glass's inside in domain cells, for the containment check.
   plVec3 m_vGlassMin = plVec3::MakeZero();
   plVec3 m_vGlassMax = plVec3::MakeZero();
-  plGpuFluidLiquidStats m_LastStats;};
+  bool m_bPourStopped = false; ///< the nozzle was switched off for the settling ticks
+  plGpuFluidLiquidStats m_LastStats;
+};
