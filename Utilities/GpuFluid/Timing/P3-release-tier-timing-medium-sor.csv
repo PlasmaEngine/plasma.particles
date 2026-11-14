@@ -1,0 +1,63 @@
+# GpuFluid tier timing, tier MediumSOR, Smoke Column, 1024 active bricks, 2 ticks per frame, 60 warm-up + 180 measured frames, Metal, Dev build, Rendering.Pipeline.Injections off
+# gas settings: PressureSolver=0 PressureCycles=0 MGShortCycles=0 MGPreSmooth=2 MGPostSmooth=2 VelocityMacCormack=1 Vorticity=-1
+# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs
+tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples
+MediumSOR,Gas/Advect,2,8.9449,9.0825,4.4724,4.3676,180
+MediumSOR,Gas/Emit,2,0.1433,0.1705,0.0717,0.0700,180
+MediumSOR,Gas/Finalize,1,0.1673,0.1776,0.1673,0.1634,180
+MediumSOR,Gas/Forces,2,2.6030,2.6915,1.3015,1.2710,180
+MediumSOR,Gas/Pressure,2,12.3623,12.5201,6.1812,6.0363,180
+MediumSOR,Gas tick phases,2,24.0842,24.2637,12.0421,11.7598,180
+MediumSOR,Gas frame total,1,24.2542,24.4251,24.2542,23.6857,180
+# other passes of the last frame (ms)
+# Renderer/GPU/BloomDownscale #4[ms],0.120
+# Renderer/GPU/BloomDownscale #6[ms],0.151
+# Renderer/GPU/BloomDownscale[ms],0.075
+# Renderer/GPU/BloomUpscale #3[ms],0.134
+# Renderer/GPU/Contact Shadow Trace[ms],0.560
+# Renderer/GPU/DepthPrePass[ms],0.290
+# Renderer/GPU/DownscaleDepth[ms],0.143
+# Renderer/GPU/EditorRenderPass[ms],0.959
+# Renderer/GPU/GPU Culling Chain (Phase 2)[ms],0.335
+# Renderer/GPU/GPU Culling Phase 2[ms],0.084
+# Renderer/GPU/Gas/Advect #2[ms],4.416
+# Renderer/GPU/Gas/Advect[ms],4.561
+# Renderer/GPU/Gas/Alloc #2[ms],1.614
+# Renderer/GPU/Gas/Emit[ms],0.096
+# Renderer/GPU/Gas/Finalize[ms],0.164
+# Renderer/GPU/Gas/Forces #2[ms],1.319
+# Renderer/GPU/Gas/Forces[ms],1.322
+# Renderer/GPU/Gas/Pressure #2[ms],6.074
+# Renderer/GPU/Gas/Pressure[ms],6.357
+# Renderer/GPU/GpuFluid Stats Clear[ms],0.106
+# Renderer/GPU/GpuFluid Stats Readback[ms],0.073
+# Renderer/GPU/HiZ Reduce #7[ms],0.558
+# Renderer/GPU/LitOpaqueStatic[ms],0.896
+# Renderer/GPU/OpaqueForwardRenderPass[ms],0.184
+# Renderer/GPU/SSAO Blur[ms],0.119
+# Renderer/GPU/SimplePass[ms],0.092
+# Renderer/GPU/SkyAtmo Copy Scene Color[ms],0.155
+# Renderer/GPU/SkyAtmo Sky[ms],0.173
+# Renderer/GPU/TAA Resolve[ms],0.779
+# Renderer/GPU/Update Clustered Data[ms],0.094
+# Renderer/GPU/VDB Copy Scene Color[ms],0.141
+# Renderer/GPU/VDB March[ms],5.493
+# Renderer/GPU/VDB Shadow Moments[ms],0.138
+# Renderer/GPU/VFog Apply[ms],0.066
+# Renderer/GPU/VFog Copy Scene Color[ms],0.138
+# Renderer/GPU/VFog Integrate[ms],0.139
+# Renderer/GPU/VFog Temporal[ms],0.217
+# Renderer/GPU/VSM Atlas Clear[ms],0.505
+# Renderer/GPU/VSM Dynamic Region[ms],0.054
+# Renderer/GPU/VSM PageMark[ms],0.061
+# Renderer/GPU/VSM Static Region[ms],0.293
+# Renderer/GPU/View: GpuFluid[ms],24.761
+# Renderer/GPU/View: MainView[ms],13.795
+# Renderer/GPU/View: Reflection Probe Filter 0[ms],0.077
+# Renderer/GPU/View: Reflection Probe Render 0[ms],1.753
+# Renderer/GPU/View: VSM Region 1[ms],0.400
+# Renderer/GPU/View: VSM Region 2[ms],0.374
+# Renderer/GPU/View: VSM Region 3[ms],0.367
+# Renderer/GPU/View: VirtualShadowPool[ms],0.067
+# Renderer/GPU/WeatherScreenEffects Copy[ms],0.057
+# Renderer/GPU/_TotalTracked[ms],75.968
