@@ -329,6 +329,8 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_uiSolidCells = pWords[GPU_FLUID_STAT_SOLID_CELLS];
   stats.m_fSolidContactDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_CONTACT]);
   stats.m_fSolidDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_DENSITY]);
+  stats.m_fSolidCleared = static_cast<float>(static_cast<double>(pWords[GPU_FLUID_STAT_SOLID_CLEARED]) / GPU_FLUID_MASS_SCALE);
+  stats.m_fEmitted = static_cast<float>(static_cast<double>(pWords[GPU_FLUID_STAT_EMITTED]) / GPU_FLUID_MASS_SCALE);
   for (plUInt32 i = 0; i < GPU_FLUID_STAT_PROBE_COUNT; ++i)
     stats.m_fProbes[i] = AsFloat(pWords[GPU_FLUID_STAT_PROBE + i]);
 

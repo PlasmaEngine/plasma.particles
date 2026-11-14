@@ -19,15 +19,25 @@
 //
 // Sub-tests of the GpuFluid Gallery (numeric first, each also asserts numbers):
 // - N2 Divergence: the Smoke Column with the multigrid's default V-cycles; L_inf(div after) / L_inf(div before) < 1e-2 on
-//   every readback after the first half second. A second phase with 12 V-cycles measures the half-precision floor.
+//   every readback after the first half second. A second phase with 12 V-cycles measures the half-precision floor. The
+//   same limit is checked in every other gas scene of this file (CheckDivergenceRatio), the wind's inflow faces and the
+//   moving solids included.
 // - N3 Poisson: a manufactured problem with a known solution on 64 cubed (8 x 8 x 8 bricks), every face open. The
 //   residual must fall at least 5x per V-cycle while it is above the float floor; then a sweep of solver settings
 //   (multigrid V-cycles, red-black SOR iterations) writes residual and error against the GPU time of Gas/Pressure to
-//   N3_Poisson.csv, for the convergence-per-ms comparison.
+//   N3_Poisson.csv, for the convergence-per-ms comparison. The plan's third column, MGPCG, has no gas solver to time: the
+//   design's gas pressure is sparse MG only, MGPCG is the liquid's dense solver (L10, liquid track P7), and its rows
+//   belong in that track's N3 sweep.
 // - N4 Gas Mass: a closed box (every face a wall, no dissipation), a source for half a second, then 300 ticks in all:
-//   the mass may drift by at most s_fN4MassTolerance.
+//   the mass may drift by at most s_fN4MassTolerance. N4 Gas Mass Velocity SL: the same with the velocity advected
+//   semi-Lagrangian (scalars still MacCormack), against the tighter s_fN4MassToleranceVelocitySL, so a regression in the
+//   scalar advection's conservation is not hidden by the larger drift of the defaults.
 // - N9 Colliders: a plume rising into a sphere collider centred above its source, no noise: the density-weighted
-//   centroid stays within a voxel of the middle in x and y, no density is left inside the solid, and gas did reach it.
+//   centroid stays within a voxel of the middle in x and y, gas reaches the sphere and gets past it, and the gas the
+//   solid deletes from its cells (GPU_FLUID_STAT_SOLID_CLEARED) stays a small fraction of what the source emitted. (No
+//   density left inside the solid and no flow through its faces hold by construction, GasSolids writes both every
+//   tick; they are logged, not what the test is about.) N9 Moving Collider: the Smoke Around Obstacles scene (noise, the
+//   box sweeping and turning through the plume) without recording frames, held to s_fN9MaxClearedMoving.
 // - Corridor Smoke Video, Smoke Around Obstacles Video: with PL_GPUFLUID_VIDEO=1, the P3 clips.
 
 namespace
@@ -39,6 +49,9 @@ namespace
   constexpr plInt32 s_iN2Frames = 150;
   constexpr plInt32 s_iN2FloorFrames = 40;
   constexpr float s_fN2MaxRatio = 1e-2f;
+  /// Readbacks whose largest divergence before the projection is below this are not held to the ratio: there the result
+  /// is the half-precision floor of the stored velocity (about 0.1 1/s), not the solver's convergence.
+  constexpr float s_fN2MinDivergence = 10.0f;
 
   // N3
   constexpr plInt32 s_iN3ProbeFrames = 8;
@@ -55,15 +68,30 @@ namespace
   constexpr float s_fN4ReferenceSeconds = 0.7f;
   /// Largest relative mass drift from the reference readback to the end. Set from the first measured run plus 50%, so a
   /// change that loses or gains more gas shows: P3 measured 0.4045 with the Medium defaults (MacCormack scalars and
-  /// velocity, vorticity confinement 0.3). Most of it is the scalar MacCormack correction, which is not conservative and
-  /// adds gas where confinement keeps stirring a sharp layer (largest drift 0.12 without confinement, 0.18 with
-  /// semi-Lagrangian advection only).
+  /// velocity, vorticity confinement 0.3, then a short second V-cycle), 0.4457 with two full V-cycles; the tighter first
+  /// value is kept.
+  ///
+  /// Where it comes from (one setting changed at a time, largest drift): velocity advected semi-Lagrangian 0.114,
+  /// confinement off 0.124, both advections semi-Lagrangian 0.178 (a loss), 8 V-cycles 0.377. So it is the MacCormack
+  /// velocity together with confinement: each alone gives about 0.12, together they keep the closed box stirred with
+  /// strong grid-scale motion, and the scalars' trilinear backtraces (semi-Lagrangian and MacCormack alike, neither is
+  /// conservative) gain gas in that flow: with it the largest divergence before the projection reaches 25 1/s, without it
+  /// about 7. The pressure solve is not the cause: the mean divergence after it stays near 1e-5 1/s while the mass grows.
+  /// The MacCormack velocity stays on at Medium and up (plan amendment A1.8, plume-top streaking); N4 Gas Mass Velocity
+  /// SL holds the scalar advection to the tighter limit below.
   constexpr float s_fN4MassTolerance = 0.61f;
+  /// The same rule for the run with the velocity advected semi-Lagrangian: measured 0.1155, plus 50%.
+  constexpr float s_fN4MassToleranceVelocitySL = 0.173f;
 
   // N9
   constexpr plInt32 s_iN9Frames = 150;
   constexpr float s_fN9SphereHeight = 2.2f; ///< above the floor
   constexpr float s_fN9SphereRadius = 0.6f;
+  /// Gas the solids may delete from their cells, as a fraction of what the sources emitted over the run. Around a static
+  /// solid the advection carries nothing in (every face of a solid cell holds the solid's velocity, 0, so a solid cell's
+  /// backtrace stays on its own empty texel): P3 measured exactly 0. A moving solid deletes what it sweeps over: 0.0101.
+  constexpr float s_fN9MaxClearedStatic = 1e-3f; ///< N9 Colliders' sphere, the corridor's partition and cabinet
+  constexpr float s_fN9MaxClearedMoving = 0.02f; ///< N9 Moving Collider: the box sweeps and turns through the plume
 
   // Gas Wind
   constexpr plInt32 s_iWindFrames = 120;
@@ -106,6 +134,57 @@ namespace
       return 0.0;
     values.Sort();
     return values[values.GetCount() / 2];
+  }
+
+  /// N2's limit in any gas scene: L_inf(div after) / L_inf(div before) < s_fN2MaxRatio on every readback after the first
+  /// half second whose divergence before the projection is above s_fN2MinDivergence. bRequireReadbacks: at least one
+  /// readback must be that far above the floor (a calm scene may have none).
+  template <typename Samples>
+  void CheckDivergenceRatio(const Samples& samples, const char* szScene, bool bRequireReadbacks = true)
+  {
+    float fWorst = 0.0f;
+    float fWorstAt = 0.0f;
+    float fWorstBefore = 0.0f;
+    float fWorstAfter = 0.0f;
+    plUInt32 uiChecked = 0;
+    for (const auto& s : samples)
+    {
+      if (s.m_fSeconds < 0.5f || s.m_fDivBefore < s_fN2MinDivergence)
+        continue;
+      ++uiChecked;
+      const float fRatio = s.m_fDivAfter / s.m_fDivBefore;
+      if (!(fRatio <= fWorst)) // a NaN counts as the worst
+      {
+        fWorst = fRatio;
+        fWorstAt = s.m_fSeconds;
+        fWorstBefore = s.m_fDivBefore;
+        fWorstAfter = s.m_fDivAfter;
+      }
+    }
+
+    plTestFramework::Output(plTestOutput::Message, "%s, N2 divergence ratio: worst %.5f at %.2f s (%.3f -> %.4f 1/s) over %u readbacks; limit %.3f", szScene, fWorst, fWorstAt, fWorstBefore,
+      fWorstAfter, uiChecked, s_fN2MaxRatio);
+    PL_TEST_BOOL_MSG(!bRequireReadbacks || uiChecked > 0, "%s: no readback above %.1f 1/s to check the divergence ratio on", szScene, s_fN2MinDivergence);
+    PL_TEST_BOOL_MSG(fWorst < s_fN2MaxRatio, "%s: the largest divergence after the projection is %.4f of the one before (limit %.3f)", szScene, fWorst, s_fN2MaxRatio);
+  }
+
+  /// Gas the solids deleted from their cells over the run, against what the sources emitted: logged, and held to
+  /// fMaxFraction.
+  template <typename Samples>
+  void CheckSolidClearing(const Samples& samples, const char* szScene, float fMaxFraction)
+  {
+    double fEmitted = 0.0;
+    double fCleared = 0.0;
+    for (const auto& s : samples)
+    {
+      fEmitted += s.m_fEmitted;
+      fCleared += s.m_fSolidCleared;
+    }
+    const double fFraction = fCleared / plMath::Max(fEmitted, 1e-6);
+    plTestFramework::Output(plTestOutput::Message, "%s, gas lost to the solids: %.3f of %.1f emitted over %u readbacks = %.5f (limit %.3f)", szScene, fCleared, fEmitted, samples.GetCount(),
+      fFraction, fMaxFraction);
+    PL_TEST_BOOL_MSG(fEmitted > 1.0, "%s: the readbacks saw almost no emission (%.3f)", szScene, fEmitted);
+    PL_TEST_BOOL_MSG(fFraction <= fMaxFraction, "%s: the solids deleted %.4f of the emitted gas (limit %.3f)", szScene, fFraction, fMaxFraction);
   }
 
   /// Every face closed. (A default-constructed plBitflags holds plGpuFluidFaces::Default, open but the floor.)
@@ -481,6 +560,9 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP3SubTest(plInt32 iIdentifie
       }
       return PL_SUCCESS;
 
+    case SubTests::N4GasMassVelocitySL:
+      SetCVarForSubTest("GpuFluid.Gas.VelocityMacCormack", false);
+      [[fallthrough]];
     case SubTests::N4GasMass:
       PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupClosedBoxScene());
       m_pOwnApplication->SetCamera(plVec3(-1.2f, -4.8f, 1.6f), plVec3(0.0f, 0.0f, 1.0f), 45.0f);
@@ -498,6 +580,7 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP3SubTest(plInt32 iIdentifie
       return PL_SUCCESS;
 
     case SubTests::ObstaclesVideo:
+    case SubTests::N9MovingCollider:
       PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupObstacleScene(true, true));
       m_pOwnApplication->SetCamera(plVec3(-5.3f, -11.3f, 1.8f), plVec3(0.0f, 0.0f, 3.4f), 50.0f);
       return PL_SUCCESS;
@@ -840,8 +923,11 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN3Poisson()
   return plTestAppRun::Quit;
 }
 
-plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass()
+plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass(bool bVelocityMacCormack)
 {
+  const char* szName = bVelocityMacCormack ? "N4_GasMass" : "N4_GasMassVelocitySL";
+  const float fTolerance = bVelocityMacCormack ? s_fN4MassTolerance : s_fN4MassToleranceVelocitySL;
+
   // The source stops after half a second (on the update thread, so the frame after).
   if (m_iFrame == static_cast<plInt32>(s_fN4SourceSeconds * 30.0f))
   {
@@ -862,14 +948,20 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass()
   if (m_iFrame == 15 || m_iFrame == 30 || m_iFrame == 60 || m_iFrame == 100 || m_iFrame == 149)
   {
     plStringBuilder sName;
-    sName.SetFormat("N4_GasMass_f{}", plArgU(static_cast<plUInt32>(m_iFrame), 3, true));
+    sName.SetFormat("{}_f{}", szName, plArgU(static_cast<plUInt32>(m_iFrame), 3, true));
     PL_TEST_BOOL(m_pOwnApplication->SaveShot(sName).Succeeded());
   }
 
   if (m_iFrame + 1 < s_iN4Frames)
     return plTestAppRun::Continue;
 
-  WriteGasCsv(m_GasSamples, ":imgout/GpuFluidGallery/N4_GasMass.csv");
+  {
+    plStringBuilder sPath;
+    sPath.SetFormat(":imgout/GpuFluidGallery/{}.csv", szName);
+    WriteGasCsv(m_GasSamples, sPath);
+  }
+  // Semi-Lagrangian velocity keeps the box calm: its divergence before the projection stays below 10 1/s after 0.5 s.
+  CheckDivergenceRatio(m_GasSamples, bVelocityMacCormack ? "N4 closed box" : "N4 closed box, velocity semi-Lagrangian", bVelocityMacCormack);
 
   const GasSample* pReference = nullptr;
   for (const GasSample& s : m_GasSamples)
@@ -897,12 +989,12 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass()
 
   const GasSample& last = m_GasSamples.PeekBack();
   const float fEndDrift = (last.m_fMass - pReference->m_fMass) / plMath::Max(pReference->m_fMass, 1e-6f);
-  plTestFramework::Output(plTestOutput::Message, "N4 gas mass (closed box, no dissipation, %.2f s): reference %.2f at %.2f s, end %.2f at %.2f s -> drift %+.5f; largest drift %.5f (tolerance %.4f); peak density %.3f, NaN %u",
-    last.m_fSeconds, pReference->m_fMass, pReference->m_fSeconds, last.m_fMass, last.m_fSeconds, fEndDrift, fWorstDrift, s_fN4MassTolerance, fMaxDensity, uiNaN);
+  plTestFramework::Output(plTestOutput::Message, "N4 gas mass (closed box, no dissipation, velocity %s, %.2f s): reference %.2f at %.2f s, end %.2f at %.2f s -> drift %+.5f; largest drift %.5f (tolerance %.4f); peak density %.3f, NaN %u",
+    bVelocityMacCormack ? "MacCormack" : "semi-Lagrangian", last.m_fSeconds, pReference->m_fMass, pReference->m_fSeconds, last.m_fMass, last.m_fSeconds, fEndDrift, fWorstDrift, fTolerance, fMaxDensity, uiNaN);
 
   PL_TEST_INT(uiNaN, 0);
   PL_TEST_BOOL_MSG(pReference->m_fMass > 1.0f, "N4: the source added almost nothing (%.3f)", pReference->m_fMass);
-  PL_TEST_BOOL_MSG(fWorstDrift <= s_fN4MassTolerance, "N4: the mass drifted by %.5f (tolerance %.4f)", fWorstDrift, s_fN4MassTolerance);
+  PL_TEST_BOOL_MSG(fWorstDrift <= fTolerance, "N4: the mass drifted by %.5f (tolerance %.4f)", fWorstDrift, fTolerance);
   return plTestAppRun::Quit;
 }
 
@@ -944,7 +1036,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN9Colliders()
   float fDriftX = 0.0f;
   float fDriftY = 0.0f;
   float fSolidDensity = 0.0f;
-  float fCleared = 0.0f;
+  float fContact = 0.0f;
   plUInt32 uiSolidCellsMin = 0xFFFFFFFFu;
   plUInt32 uiSolidCellsMax = 0;
   plUInt32 uiNaN = 0;
@@ -953,7 +1045,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN9Colliders()
   {
     uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
     fSolidDensity = plMath::Max(fSolidDensity, s.m_fSolidDensity);
-    fCleared = plMath::Max(fCleared, s.m_fSolidContact);
+    fContact = plMath::Max(fContact, s.m_fSolidContact);
     uiSolidCellsMin = plMath::Min(uiSolidCellsMin, s.m_uiSolidCells);
     uiSolidCellsMax = plMath::Max(uiSolidCellsMax, s.m_uiSolidCells);
     if (s.m_fSeconds < 0.5f)
@@ -968,14 +1060,18 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN9Colliders()
   const GasSample& last = m_GasSamples.PeekBack();
   plTestFramework::Output(plTestOutput::Message,
     "N9 colliders: centroid drift from the middle, largest %.3f voxels in x, %.3f in y over %u readbacks; solid cells %u..%u (sphere %.0f); density left in the solid %.6f, largest against it %.3f; end centroid height %.2f m, mass %.1f, NaN %u",
-    fDriftX, fDriftY, uiChecked, uiSolidCellsMin, uiSolidCellsMax, fSphereCells, fSolidDensity, fCleared, last.m_fCentroidZ, last.m_fMass, uiNaN);
+    fDriftX, fDriftY, uiChecked, uiSolidCellsMin, uiSolidCellsMax, fSphereCells, fSolidDensity, fContact, last.m_fCentroidZ, last.m_fMass, uiNaN);
 
   PL_TEST_INT(uiNaN, 0);
   PL_TEST_BOOL_MSG(uiChecked > 50, "N9: only %u readbacks", uiChecked);
   PL_TEST_BOOL_MSG(fDriftX < 1.0f, "N9: the centroid drifted %.3f voxels in x (limit 1)", fDriftX);
   PL_TEST_BOOL_MSG(fDriftY < 1.0f, "N9: the centroid drifted %.3f voxels in y (limit 1)", fDriftY);
+  // GasSolids zeroes the solid's cells every tick, so this only guards that clear itself; what the solid costs the gas is
+  // the cleared mass below.
   PL_TEST_BOOL_MSG(fSolidDensity == 0.0f, "N9: density %.6f left inside the solid", fSolidDensity);
-  PL_TEST_BOOL_MSG(fCleared > 0.1f, "N9: the plume never reached the sphere (largest density against it %.4f)", fCleared);
+  CheckSolidClearing(m_GasSamples, "N9 static sphere", s_fN9MaxClearedStatic);
+  CheckDivergenceRatio(m_GasSamples, "N9 static sphere");
+  PL_TEST_BOOL_MSG(fContact > 0.1f, "N9: the plume never reached the sphere (largest density against it %.4f)", fContact);
   PL_TEST_BOOL_MSG(plMath::Abs(static_cast<float>(uiSolidCellsMax) - fSphereCells) < 0.05f * fSphereCells && uiSolidCellsMin == uiSolidCellsMax,
     "N9: %u..%u solid cells for a sphere of %.0f", uiSolidCellsMin, uiSolidCellsMax, fSphereCells);
   PL_TEST_BOOL_MSG(last.m_fCentroidZ > s_fN9SphereHeight, "N9: the plume did not get past the sphere (centroid at %.2f m)", last.m_fCentroidZ);
@@ -1030,6 +1126,8 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunGasWind()
   PL_TEST_FLOAT(vWind.x, s_fWindSpeed, 1e-3f);
   PL_TEST_BOOL_MSG(fDrift > 0.1f, "The wind carried the plume only %.2f m downwind", fDrift);
   PL_TEST_BOOL_MSG(last.m_fCentroidZ < 2.0f, "The plume still rose straight (centroid at %.2f m)", last.m_fCentroidZ);
+  // The wind's inflow faces carry a velocity the solve has to take in on every tick.
+  CheckDivergenceRatio(m_GasSamples, "Gas wind");
   return plTestAppRun::Quit;
 }
 
@@ -1071,12 +1169,14 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunCorridorSmokeVideo()
     s_iCorridorFrames, m_GasSamples.GetCount(), uiNaN, fSolidDensity, last.m_fMass, last.m_fCentroidX, last.m_fCentroidZ, last.m_uiSolidCells);
   PL_TEST_INT(uiNaN, 0);
   PL_TEST_BOOL(fSolidDensity == 0.0f);
+  CheckSolidClearing(m_GasSamples, "Corridor video", s_fN9MaxClearedStatic);
+  CheckDivergenceRatio(m_GasSamples, "Corridor video");
   return plTestAppRun::Quit;
 }
 
-plTestAppRun plGameEngineTestGpuFluidGallery::RunObstaclesVideo()
+plTestAppRun plGameEngineTestGpuFluidGallery::RunObstaclesVideo(bool bVideo)
 {
-  if (!VideoEnabled())
+  if (bVideo && !VideoEnabled())
   {
     plTestFramework::Output(plTestOutput::Details, "Skipped: set PL_GPUFLUID_VIDEO=1 to record the frames.");
     return plTestAppRun::Quit;
@@ -1108,13 +1208,13 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunObstaclesVideo()
   }
 
   const plInt32 iVideoFrame = m_iFrame - 1;
-  if (iVideoFrame >= 0)
+  if (iVideoFrame >= 0 && bVideo)
     SaveVideoFrame("SmokeObstacles", iVideoFrame, "P3 Smoke Around Obstacles: static sphere and a moving, turning box collider");
 
   if (iVideoFrame + 1 < s_iObstacleFrames)
     return plTestAppRun::Continue;
 
-  WriteGasCsv(m_GasSamples, ":imgout/GpuFluidGallery/SmokeObstacles.csv");
+  WriteGasCsv(m_GasSamples, bVideo ? ":imgout/GpuFluidGallery/SmokeObstacles.csv" : ":imgout/GpuFluidGallery/N9_MovingCollider.csv");
   plUInt32 uiNaN = 0;
   float fSolidDensity = 0.0f;
   for (const GasSample& s : m_GasSamples)
@@ -1122,8 +1222,11 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunObstaclesVideo()
     uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
     fSolidDensity = plMath::Max(fSolidDensity, s.m_fSolidDensity);
   }
-  plTestFramework::Output(plTestOutput::Message, "Obstacles video: %d frames, %u readbacks, NaN %u, density left in solids %.6f", s_iObstacleFrames, m_GasSamples.GetCount(), uiNaN, fSolidDensity);
+  const char* szScene = bVideo ? "Obstacles video" : "N9 moving collider";
+  plTestFramework::Output(plTestOutput::Message, "%s: %d frames, %u readbacks, NaN %u, density left in solids %.6f", szScene, s_iObstacleFrames, m_GasSamples.GetCount(), uiNaN, fSolidDensity);
   PL_TEST_INT(uiNaN, 0);
   PL_TEST_BOOL(fSolidDensity == 0.0f);
+  CheckSolidClearing(m_GasSamples, szScene, s_fN9MaxClearedMoving);
+  CheckDivergenceRatio(m_GasSamples, szScene);
   return plTestAppRun::Quit;
 }

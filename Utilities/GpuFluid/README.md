@@ -70,18 +70,26 @@ Keep each mp4 under 15 MB, and delete the frames once encoded: disk is tight.
 
 ## Sub-tests (P3)
 
-- **N2 Divergence**: the Smoke Column with the Medium multigrid (a full V-cycle and a short F/M one per tick):
+- **N2 Divergence**: the Smoke Column with the Medium multigrid (two full V-cycles per tick):
   L_inf(div after) / L_inf(div before) must stay below 1e-2 on every readback after the first half second. A second
-  phase with 12 V-cycles prints the half-precision floor of the stored velocity. `N2_Divergence.csv`.
+  phase with 12 V-cycles prints the half-precision floor of the stored velocity. `N2_Divergence.csv`. Every other P3
+  scene holds the same ratio on its readbacks above 10 1/s (the "N2 divergence ratio" lines): N4, N9, Gas Wind and the
+  two videos. (`GpuFluid.Gas.MGShortCycles true`, a second cycle that stops at 4 cubed, misses it under wind: 0.0124.)
 - **N3 Poisson**: a manufactured problem with a known solution on 64 cubed (8 x 8 x 8 bricks), every face open, from a
   cold start each frame (`plGpuFluidGasVolumeComponent::m_DebugPoissonTest`). The residual must fall at least 5x per
   V-cycle after the first while above the float floor (`N3_Poisson_Cycles.csv`); then multigrid V-cycles and red-black
   SOR iterations are swept against the GPU time of Gas/Pressure (`N3_Poisson.csv`), and each stage of a V-cycle is timed
-  on its own (the "N3 profile" line).
+  on its own (the "N3 profile" line). No MGPCG rows: the gas pressure is multigrid only; MGPCG is the liquid's solver.
 - **N4 Gas Mass**: a closed 2 m box, no dissipation, a source for 0.5 s, 300 ticks; the largest mass drift after 0.7 s
-  must stay within the tolerance stored in the test (the first measured run plus 50%). `N4_GasMass.csv`.
+  must stay within the tolerance stored in the test (the first measured run plus 50%). `N4_GasMass.csv`. The drift of
+  the defaults (+40%) comes from the MacCormack velocity together with vorticity confinement, see `s_fN4MassTolerance`.
+  **N4 Gas Mass Velocity SL** runs the same box with `GpuFluid.Gas.VelocityMacCormack false` against a tighter
+  tolerance (+12% measured), so a regression in the scalar advection shows. `N4_GasMassVelocitySL.csv`.
 - **N9 Colliders**: a plume centred under a sphere collider, no source noise: the centroid stays within a voxel of the
-  middle in x and y, no density is left inside the solid, the solid has the sphere's cell count, and gas reaches it.
+  middle in x and y, the solid has the sphere's cell count, gas reaches it and gets past it, and the gas the solid
+  deletes from its cells stays below 1e-3 of what the source emitted (the "lost to the solids" line; the `emitted` and
+  `solid_cleared` CSV columns). **N9 Moving Collider**: the Smoke Around Obstacles scene without recording frames; the
+  sweeping box may delete at most 2% of the emitted gas. `N9_MovingCollider.csv`.
 - **Gas Wind**: the Smoke Column under a 2 m/s `plSimpleWindWorldModule` wind: the ambient velocity matches and the
   plume bends over.
 - **Corridor Smoke Video**, **Smoke Around Obstacles Video**: with `PL_GPUFLUID_VIDEO=1`, 300 and 240 frames into

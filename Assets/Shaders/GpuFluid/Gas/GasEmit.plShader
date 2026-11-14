@@ -28,6 +28,10 @@ ALL
 
 RWTexture3D<float4> GpuFluidScalarTarget;   // R density, G temperature, B fuel, A burn
 RWTexture3D<float4> GpuFluidVelocityTarget; // MAC staggered, m/s
+RWByteAddressBuffer GpuFluidStats;          // GPU_FLUID_STAT_EMITTED: the density added to interior cells
+
+groupshared uint gs_uiEmitted; // fixed point GPU_FLUID_MEAN_SCALE
+groupshared uint gs_uiEmittedOverflow;
 
 float EmitterWeight(float3 p)
 {
@@ -88,6 +92,13 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   // Turbulent jitter scales with the source's own speed, with a floor so a still source still stirs.
   const float jitterSpeed = noiseStrength * max(length(p3.xyz), 0.5);
 
+  if (groupIndex == 0)
+  {
+    gs_uiEmitted = 0;
+    gs_uiEmittedOverflow = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
   for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
   {
     const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
@@ -123,7 +134,15 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
       const float puff = 1.0 + noiseStrength * GpuFluidValueNoise(noisePos * 0.5, 7u).w;
 
       float4 scalar = GpuFluidScalarTarget[base + stored];
-      scalar.r += max(p2.x * puff, 0.0) * wCentre * dt;
+      const float added = max(p2.x * puff, 0.0) * wCentre * dt;
+      scalar.r += added;
+      // Interior texels only: an apron texel is a copy of a neighbour's interior, counted by that brick.
+      if (all(stored >= GPU_FLUID_BRICK_APRON) && all(stored < GPU_FLUID_BRICK_APRON + GPU_FLUID_BRICK_SIZE) && added > 0.0)
+      {
+        if (added > 64.0)
+          InterlockedAdd(gs_uiEmittedOverflow, 1u); // beyond the fixed-point range of the sum
+        InterlockedAdd(gs_uiEmitted, (uint)round(min(added, 64.0) * GPU_FLUID_MEAN_SCALE));
+      }
       scalar.g = max(scalar.g, p2.y * wCentre);
       scalar.b += p2.z * wCentre * dt;
       if (bNaNTexel)
@@ -139,5 +158,14 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
       velocity.xyz = lerp(velocity.xyz, target, wFace);
       GpuFluidVelocityTarget[base + stored] = velocity;
     }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0 && (gs_uiEmitted > 0 || gs_uiEmittedOverflow > 0))
+  {
+    uint overflow = gs_uiEmittedOverflow;
+    GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_EMITTED, (uint)round(float(gs_uiEmitted) * (GPU_FLUID_MASS_SCALE / GPU_FLUID_MEAN_SCALE)), overflow);
+    if (overflow > 0)
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_OVERFLOW * 4, overflow);
   }
 }

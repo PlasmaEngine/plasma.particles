@@ -78,6 +78,8 @@
 #define GPU_FLUID_STAT_SOLID_CELLS 24    // interior cells inside a solid (GasSolids, the frame's last tick)
 #define GPU_FLUID_STAT_SOLID_CONTACT 25  // asuint of the largest density in a fluid cell next to a solid (GasSolids, the frame's last tick)
 #define GPU_FLUID_STAT_SOLID_DENSITY 26  // asuint of the largest density left in a solid cell at the end of the frame (GasFinalize)
+#define GPU_FLUID_STAT_SOLID_CLEARED 27  // density GasSolids took out of interior solid cells, fixed point GPU_FLUID_MASS_SCALE (summed over the frame's ticks)
+#define GPU_FLUID_STAT_EMITTED 28        // density the sources added to interior cells, fixed point GPU_FLUID_MASS_SCALE (summed over the frame's ticks)
 #define GPU_FLUID_STAT_PROBE 32          // 16 words of solver probes (GasPoisson): asuint of max |residual| or |error|
 #define GPU_FLUID_STAT_PROBE_COUNT 16
 #define GPU_FLUID_STAT_WORD_COUNT 64

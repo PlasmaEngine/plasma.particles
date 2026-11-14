@@ -24,7 +24,9 @@ ALL
 //    copies agree.
 //
 // On the frame's last tick the solid cells and the largest density in a fluid cell against a solid go to the stats
-// (how much gas reaches the solids; the advection never carries gas into one, its faces hold the solid's velocity).
+// (how much gas reaches the solids). On every tick the density step 4 takes out of interior cells is summed into
+// GPU_FLUID_STAT_SOLID_CLEARED: the gas lost to the solids, from a solid moving over gas and from what the advection's
+// trilinear samples carry into a solid's cells.
 // Params: 0 x shape count, y first shape of this tick in GpuFluidSolidShapes
 
 StructuredBuffer<plGpuFluidSolidShape> GpuFluidSolidShapes;
@@ -37,6 +39,8 @@ groupshared uint gs_uiMask[2];
 groupshared uint gs_uiFlags[GPU_FLUID_SOLID_FLAG_WORDS];
 groupshared uint gs_uiContact;
 groupshared uint gs_uiSolidCells;
+groupshared uint gs_uiCleared; // fixed point GPU_FLUID_MEAN_SCALE
+groupshared uint gs_uiClearedOverflow;
 
 float ShapeDistance(plGpuFluidSolidShape shape, float3 p)
 {
@@ -112,6 +116,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     gs_uiMask[1] = 0;
     gs_uiContact = 0;
     gs_uiSolidCells = 0;
+    gs_uiCleared = 0;
+    gs_uiClearedOverflow = 0;
   }
   if (groupIndex < GPU_FLUID_SOLID_FLAG_WORDS)
     gs_uiFlags[groupIndex] = 0;
@@ -187,7 +193,20 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       const float3 p = float3(brick * GPU_FLUID_BRICK_SIZE + stored - GPU_FLUID_BRICK_APRON) + 0.5;
       uint shape;
       if (SolidDistance(p, firstShape, shape) < 0.0)
+      {
+        // Interior texels only: an apron texel is a copy of a neighbour's interior, counted by that brick.
+        if (all(stored >= GPU_FLUID_BRICK_APRON) && all(stored < GPU_FLUID_BRICK_APRON + GPU_FLUID_BRICK_SIZE))
+        {
+          const float density = GpuFluidScalarTarget[base + stored].r;
+          if (density > 0.0 && !GpuFluidIsNonFinite(density))
+          {
+            if (density > 64.0)
+              InterlockedAdd(gs_uiClearedOverflow, 1u); // beyond the fixed-point range of the sum
+            InterlockedAdd(gs_uiCleared, (uint)round(min(density, 64.0) * GPU_FLUID_MEAN_SCALE));
+          }
+        }
         GpuFluidScalarTarget[base + stored] = float4(0.0, 0.0, 0.0, 0.0);
+      }
     }
   }
   GroupMemoryBarrierWithGroupSync();
@@ -199,5 +218,13 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   {
     GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_SOLID_CELLS * 4, gs_uiSolidCells);
     GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_SOLID_CONTACT * 4, gs_uiContact);
+  }
+
+  if (groupIndex == 0 && (gs_uiCleared > 0 || gs_uiClearedOverflow > 0))
+  {
+    uint overflow = gs_uiClearedOverflow;
+    GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_SOLID_CLEARED, (uint)round(float(gs_uiCleared) * (GPU_FLUID_MASS_SCALE / GPU_FLUID_MEAN_SCALE)), overflow);
+    if (overflow > 0)
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_OVERFLOW * 4, overflow);
   }
 }

@@ -61,6 +61,6 @@ DYLD_LIBRARY_PATH="$BIN:$P/Bin/Mac_x64_$CONFIG" PL_SILENT_ASSERTS=1 \
 STATUS=$?
 END=$(date +%s)
 
-grep -E "N0 |N2 |N3 |N4 |N9 |Video end|Smoke |Gas safety|Corridor video|Obstacles video|Tier |Sub-Test .* (succeeded|failed)|Tests? (passed|failed)|All tests passed|Error:" "$OUT/console.log" | tail -60
+grep -E "N0 |N2 |N3 |N4 |N9 |lost to the solids|Video end|Smoke |Gas safety|Corridor video|Obstacles video|Tier |Sub-Test .* (succeeded|failed)|Tests? (passed|failed)|All tests passed|Error:" "$OUT/console.log" | tail -60
 echo "exit $STATUS after $((END - START)) s; log: $OUT/console.log"
 exit $STATUS

@@ -85,6 +85,8 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   plUInt32 m_uiSolidCells = 0;       ///< interior cells inside a solid on the frame's last tick
   float m_fSolidContactDensity = 0.0f; ///< largest density in a fluid cell next to a solid on that tick
   float m_fSolidDensity = 0.0f;      ///< largest density left in a solid cell at the end of the frame (must be 0)
+  float m_fSolidCleared = 0.0f;      ///< density taken out of solid cells over the frame's ticks (gas lost to the solids)
+  float m_fEmitted = 0.0f;           ///< density the sources added over the frame's ticks
 
   /// Solver probes of the N3 Poisson test (plGpuFluidProbe*): max |residual| or |error|.
   float m_fProbes[plGpuFluidStatProbeCount] = {};

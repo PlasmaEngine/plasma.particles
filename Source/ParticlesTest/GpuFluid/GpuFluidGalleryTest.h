@@ -141,6 +141,8 @@ protected:
     CorridorSmokeVideo,
     ObstaclesVideo,
     GasWind,
+    N4GasMassVelocitySL,
+    N9MovingCollider,
   };
 
   /// One stats readback of a simulated volume, with the simulation time it was recorded at.
@@ -166,6 +168,8 @@ protected:
     plUInt32 m_uiSolidCells = 0;
     float m_fSolidContact = 0.0f; ///< largest density in a fluid cell against a solid on the frame's last tick
     float m_fSolidDensity = 0.0f; ///< largest density left in a solid cell at the end of the frame
+    float m_fSolidCleared = 0.0f; ///< density the solids took out of their cells over the frame's ticks
+    float m_fEmitted = 0.0f;      ///< density the sources added over the frame's ticks
   };
 
   /// One solver configuration of the N3 convergence-per-ms sweep.
@@ -194,10 +198,10 @@ private:
   plResult InitializeP3SubTest(plInt32 iIdentifier);
   plTestAppRun RunN2Divergence();
   plTestAppRun RunN3Poisson();
-  plTestAppRun RunN4GasMass();
+  plTestAppRun RunN4GasMass(bool bVelocityMacCormack);
   plTestAppRun RunN9Colliders();
   plTestAppRun RunCorridorSmokeVideo();
-  plTestAppRun RunObstaclesVideo();
+  plTestAppRun RunObstaclesVideo(bool bVideo);
   plTestAppRun RunGasWind();
 
   /// Records the frame of a video sub-test into <out>/GpuFluidGallery/<folder>/frame_%05d.png, with a caption.

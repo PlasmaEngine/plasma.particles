@@ -707,7 +707,9 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
   AddSubTest("N2 Divergence", SubTests::N2Divergence);
   AddSubTest("N3 Poisson", SubTests::N3Poisson);
   AddSubTest("N4 Gas Mass", SubTests::N4GasMass);
+  AddSubTest("N4 Gas Mass Velocity SL", SubTests::N4GasMassVelocitySL);
   AddSubTest("N9 Colliders", SubTests::N9Colliders);
+  AddSubTest("N9 Moving Collider", SubTests::N9MovingCollider);
   AddSubTest("Corridor Smoke Video", SubTests::CorridorSmokeVideo);
   AddSubTest("Smoke Around Obstacles Video", SubTests::ObstaclesVideo);
   AddSubTest("Gas Wind", SubTests::GasWind);
@@ -872,13 +874,17 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
     case SubTests::N3Poisson:
       return RunN3Poisson();
     case SubTests::N4GasMass:
-      return RunN4GasMass();
+      return RunN4GasMass(true);
+    case SubTests::N4GasMassVelocitySL:
+      return RunN4GasMass(false);
     case SubTests::N9Colliders:
       return RunN9Colliders();
     case SubTests::CorridorSmokeVideo:
       return RunCorridorSmokeVideo();
     case SubTests::ObstaclesVideo:
-      return RunObstaclesVideo();
+      return RunObstaclesVideo(true);
+    case SubTests::N9MovingCollider:
+      return RunObstaclesVideo(false);
     case SubTests::GasWind:
       return RunGasWind();
   }
@@ -1236,6 +1242,8 @@ void plGameEngineTestGpuFluidGallery::CollectGasSample()
   sample.m_uiSolidCells = stats.m_uiSolidCells;
   sample.m_fSolidContact = stats.m_fSolidContactDensity;
   sample.m_fSolidDensity = stats.m_fSolidDensity;
+  sample.m_fSolidCleared = stats.m_fSolidCleared;
+  sample.m_fEmitted = stats.m_fEmitted;
 }
 
 plTestAppRun plGameEngineTestGpuFluidGallery::RunSmokeColumn(bool bVideo)
@@ -1420,12 +1428,12 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
 
 void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
 {
-  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped\n");
+  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped,emitted,solid_cleared\n");
   for (const GasSample& s : samples)
   {
     sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
     sCsv.AppendFormat("{},{},{},{},{},{},{},", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
-    sCsv.AppendFormat("{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped);
+    sCsv.AppendFormat("{},{},{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped, s.m_fEmitted, s.m_fSolidCleared);
   }
 
   plFileWriter csv;

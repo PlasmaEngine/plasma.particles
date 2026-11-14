@@ -836,6 +836,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
       plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
       pass.WriteTexture(hScalar0);
       pass.WriteTexture(hVelocityCur);
+      pass.WriteBuffer(hStats);
       pass.HasSideEffects();
       pass.SetExecuteCallback([=, hShader = m_hEmitShader](const plRenderGraphContext& ctx)
         {
@@ -846,6 +847,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
           plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
           bindGroup.BindTexture("GpuFluidScalarTarget", hScalarGAL);
           bindGroup.BindTexture("GpuFluidVelocityTarget", hVelocityGAL);
+          bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
 
           for (plUInt32 i = 0; i < emitters.GetCount(); ++i)
           {
