@@ -6,7 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #include <Shaders/Common/Common.h>
-#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+#include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
 // Phase Gas/Finalize, once per frame after the last tick. One 8 cubed group per active brick (indirect).
 //
@@ -20,6 +20,8 @@ ALL
 //   so the march skips the brick.
 // - Stats: bounds of the bricks with content, mass, density-weighted centroid, maxima, and the largest and summed |div u|
 //   after the projection (the "after" half of the projection check), all integer atomics or float maxima as uint.
+//   Solid cells (the last tick's face codes) are left out of the divergence; the largest density left in one goes to
+//   GPU_FLUID_STAT_SOLID_DENSITY.
 //
 // Params: 0 x allocation threshold, y brick mean floor
 
@@ -27,6 +29,7 @@ RWTexture3D<float4> GpuFluidScalarTarget;
 RWTexture3D<float4> GpuFluidVelocityTarget;
 RWTexture3D<float4> GpuFluidIndirectionOutput;
 RWByteAddressBuffer GpuFluidStats;
+RWStructuredBuffer<uint> GpuFluidFaceCodes; // only read here
 
 groupshared uint gs_uiPeakDensity;
 groupshared uint gs_uiPeakTemperature;
@@ -37,6 +40,7 @@ groupshared uint gs_uiNaN;
 groupshared uint gs_uiMaxDivergence;
 groupshared uint gs_uiSumDivergence;
 groupshared uint gs_uiOverflow;
+groupshared uint gs_uiSolidDensity;
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -61,6 +65,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     gs_uiMaxDivergence = 0;
     gs_uiSumDivergence = 0;
     gs_uiOverflow = 0;
+    gs_uiSolidDensity = 0;
   }
   GroupMemoryBarrierWithGroupSync();
 
@@ -113,8 +118,11 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     [unroll] for (uint axis = 0; axis < 3; ++axis)
       InterlockedAdd(gs_uiCentroid[axis], (uint)round(min(density, 64.0) * position[axis] * GPU_FLUID_MASS_SCALE));
 
-    // Finite here: the guard above zeroed every non-finite face.
-    const float divergence = abs((plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx);
+    // Finite here: the guard above zeroed every non-finite face. A solid cell's faces move with the solid.
+    const bool bSolid = GpuFluidCodeIsSolid(GpuFluidFaceCodes[slot * GPU_FLUID_BRICK_CELLS + groupIndex]);
+    if (bSolid)
+      InterlockedMax(gs_uiSolidDensity, asuint(density));
+    const float divergence = bSolid ? 0.0 : abs((plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx);
     const float scaled = round(divergence * GPU_FLUID_DIV_SCALE);
     if (scaled > 1048576.0)
       InterlockedAdd(gs_uiOverflow, 1u);
@@ -156,6 +164,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_TEMPERATURE * 4, gs_uiPeakTemperature);
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_SPEED * 4, gs_uiPeakSpeed);
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_DIV_POST * 4, gs_uiMaxDivergence);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_SOLID_DENSITY * 4, gs_uiSolidDensity);
   GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_DIV_POST_SUM, gs_uiSumDivergence, overflow);
   if (gs_uiNaN > 0)
     GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);

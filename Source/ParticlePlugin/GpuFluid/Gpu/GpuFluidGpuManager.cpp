@@ -234,7 +234,7 @@ void plGpuFluidGpuManager::CreateResources(GasVolume& ref_volume)
 
   plResult result = ref_volume.m_Grid.Create(ref_volume.m_Settings.m_vBrickGrid, ref_volume.m_uiCapacity);
   if (result.Succeeded())
-    result = ref_volume.m_Solver.Create(ref_volume.m_Grid.GetAtlasBricks(), ref_volume.m_uiCapacity);
+    result = ref_volume.m_Solver.Create(ref_volume.m_Settings.m_vBrickGrid, ref_volume.m_Grid.GetAtlasBricks(), ref_volume.m_uiCapacity);
 
   plGALBufferCreationDescription statsDesc;
   statsDesc.m_uiTotalSize = GPU_FLUID_STATS_BYTES;
@@ -326,6 +326,12 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_fMeanDivergenceBefore = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_PRE_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
   stats.m_fMeanDivergenceAfter = static_cast<float>(pWords[GPU_FLUID_STAT_DIV_POST_SUM] / (GPU_FLUID_DIV_SCALE * fCells));
 
+  stats.m_uiSolidCells = pWords[GPU_FLUID_STAT_SOLID_CELLS];
+  stats.m_fSolidContactDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_CONTACT]);
+  stats.m_fSolidDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_DENSITY]);
+  for (plUInt32 i = 0; i < GPU_FLUID_STAT_PROBE_COUNT; ++i)
+    stats.m_fProbes[i] = AsFloat(pWords[GPU_FLUID_STAT_PROBE + i]);
+
   ref_volume.m_bStatsValid = true;
 
   plStats::SetStat("GpuFluid/Gas/AllocatedBricks", stats.m_uiAllocatedBricks);
@@ -414,7 +420,7 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
       if (!volume.m_Grid.IsAllocated())
       {
         volume.m_Grid.AddAllocPasses(graph, gridGraph, input.m_Simulation.m_OpenFaces.GetValue());
-        volume.m_Solver.AddClearPass(graph, volume.m_Grid, gridGraph);
+        volume.m_Solver.AddClearPass(graph, volume.m_Grid, gridGraph, input.m_Simulation.m_vAmbientWind);
       }
 
       uiTicks = bFreshInput ? plMath::Min(input.m_Simulation.m_uiTicks, plGpuFluidMaxGasTicksPerFrame) : 0;
@@ -473,6 +479,8 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     {
       plGpuFluidGasSimulation simulation = input.m_Simulation;
       simulation.m_uiTicks = uiTicks;
+      // The Poisson test hook solves once per fresh input, like a tick; its readback needs the counters.
+      simulation.m_PoissonTest.m_bEnabled = simulation.m_PoissonTest.m_bEnabled && bCounters;
       volume.m_Solver.AddFramePasses(graph, volume.m_Grid, gridGraph, hStats, simulation);
     }
 

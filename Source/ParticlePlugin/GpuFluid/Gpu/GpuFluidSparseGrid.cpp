@@ -19,6 +19,7 @@ namespace
   constexpr plUInt32 s_uiAllocReset = 0;
   constexpr plUInt32 s_uiAllocAssign = 1;
   constexpr plUInt32 s_uiAllocLists = 2;
+  constexpr plUInt32 s_uiAllocColours = 3;
 
   plGALBufferHandle CreateUIntBuffer(plGALDevice* pDevice, plUInt32 uiCount, bool bIndirectArguments, const char* szName)
   {
@@ -73,6 +74,8 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
   m_hNeighbors = CreateUIntBuffer(pDevice, uiCapacity * GPU_FLUID_NEIGHBOR_COUNT, false, "GpuFluid Gas Neighbors");
   m_hCounters = CreateUIntBuffer(pDevice, GPU_FLUID_COUNTER_WORDS, false, "GpuFluid Gas Counters");
   m_hDispatchArgs = CreateUIntBuffer(pDevice, GPU_FLUID_ARGS_WORDS, true, "GpuFluid Gas DispatchArgs");
+  m_hColourList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas ColourList");
+  m_hColourArgs = CreateUIntBuffer(pDevice, 2 * GPU_FLUID_ARGS_WORDS, true, "GpuFluid Gas ColourArgs");
 
   {
     plGALTextureCreationDescription desc;
@@ -92,7 +95,8 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
   }
 
   if (m_hPageTable.IsInvalidated() || m_hActiveList.IsInvalidated() || m_hBrickCoords.IsInvalidated() || m_hNeighbors.IsInvalidated() ||
-      m_hCounters.IsInvalidated() || m_hDispatchArgs.IsInvalidated() || m_hIndirection.IsInvalidated())
+      m_hCounters.IsInvalidated() || m_hDispatchArgs.IsInvalidated() || m_hColourList.IsInvalidated() || m_hColourArgs.IsInvalidated() ||
+      m_hIndirection.IsInvalidated())
   {
     Destroy();
     return PL_FAILURE;
@@ -108,7 +112,7 @@ void plGpuFluidSparseGrid::Destroy()
 {
   plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
 
-  for (plGALBufferHandle* pBuffer : {&m_hPageTable, &m_hActiveList, &m_hBrickCoords, &m_hNeighbors, &m_hCounters, &m_hDispatchArgs})
+  for (plGALBufferHandle* pBuffer : {&m_hPageTable, &m_hActiveList, &m_hBrickCoords, &m_hNeighbors, &m_hCounters, &m_hDispatchArgs, &m_hColourList, &m_hColourArgs})
   {
     if (!pBuffer->IsInvalidated())
       pDevice->DestroyBuffer(*pBuffer);
@@ -131,6 +135,8 @@ plGpuFluidSparseGridGraph plGpuFluidSparseGrid::Import(plRenderGraph& ref_graph)
   grid.m_hNeighbors = ref_graph.ImportBuffer(m_hNeighbors);
   grid.m_hCounters = ref_graph.ImportBuffer(m_hCounters);
   grid.m_hDispatchArgs = ref_graph.ImportBuffer(m_hDispatchArgs);
+  grid.m_hColourList = ref_graph.ImportBuffer(m_hColourList);
+  grid.m_hColourArgs = ref_graph.ImportBuffer(m_hColourArgs);
   grid.m_hIndirection = ref_graph.ImportTexture(m_hIndirection);
   return grid;
 }
@@ -152,6 +158,8 @@ void plGpuFluidSparseGrid::AddAllocPasses(plRenderGraph& ref_graph, const plGpuF
   pass.WriteBuffer(grid.m_hNeighbors);
   pass.WriteBuffer(grid.m_hCounters);
   pass.WriteBuffer(grid.m_hDispatchArgs);
+  pass.WriteBuffer(grid.m_hColourList);
+  pass.WriteBuffer(grid.m_hColourArgs);
   pass.WriteTexture(grid.m_hIndirection);
   pass.HasSideEffects();
   pass.SetExecuteCallback([grid, constants, uiVirtualBricks, uiCapacity, hShader = m_hAllocShader](const plRenderGraphContext& ctx)
@@ -168,6 +176,8 @@ void plGpuFluidSparseGrid::AddAllocPasses(plRenderGraph& ref_graph, const plGpuF
       bindGroup.BindBuffer("GpuFluidNeighborsOutput", ctx.ResolveBuffer(grid.m_hNeighbors));
       bindGroup.BindBuffer("GpuFluidCountersOutput", ctx.ResolveBuffer(grid.m_hCounters));
       bindGroup.BindBuffer("GpuFluidDispatchArgsOutput", ctx.ResolveBuffer(grid.m_hDispatchArgs));
+      bindGroup.BindBuffer("GpuFluidColourListOutput", ctx.ResolveBuffer(grid.m_hColourList));
+      bindGroup.BindBuffer("GpuFluidColourArgsOutput", ctx.ResolveBuffer(grid.m_hColourArgs));
       bindGroup.BindTexture("GpuFluidIndirectionOutput", ctx.ResolveTexture(grid.m_hIndirection));
 
       const plGALBufferHandle hCounters = ctx.ResolveBuffer(grid.m_hCounters);
@@ -191,6 +201,11 @@ void plGpuFluidSparseGrid::AddAllocPasses(plRenderGraph& ref_graph, const plGpuF
       c.GpuFluidGasPass = plVec4U32(s_uiAllocLists, 0, 0, 0);
       pContext->SetPushConstants("plGpuFluidGasConstants", c);
       pContext->Dispatch((uiCapacity + 63) / 64).IgnoreResult();
+      pEncoder->BufferBarrier(hCounters, plGALResourceState::UnorderedAccessWrite, plGALResourceState::UnorderedAccessWrite);
+
+      c.GpuFluidGasPass = plVec4U32(s_uiAllocColours, 0, 0, 0);
+      pContext->SetPushConstants("plGpuFluidGasConstants", c);
+      pContext->Dispatch(1).IgnoreResult();
     });
 
   m_bAllocated = true;
@@ -203,6 +218,8 @@ void plGpuFluidSparseGrid::BindReadOnly(const plRenderGraphContext& ctx, plBindG
   ref_bindGroup.BindBuffer("GpuFluidBrickCoords", ctx.ResolveBuffer(grid.m_hBrickCoords));
   ref_bindGroup.BindBuffer("GpuFluidNeighbors", ctx.ResolveBuffer(grid.m_hNeighbors));
   ref_bindGroup.BindBuffer("GpuFluidDispatchArgs", ctx.ResolveBuffer(grid.m_hDispatchArgs));
+  ref_bindGroup.BindBuffer("GpuFluidColourList", ctx.ResolveBuffer(grid.m_hColourList));
+  ref_bindGroup.BindBuffer("GpuFluidColourArgs", ctx.ResolveBuffer(grid.m_hColourArgs));
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_GpuFluid_Gpu_GpuFluidSparseGrid);

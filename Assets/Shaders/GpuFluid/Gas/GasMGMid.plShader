@@ -1,0 +1,473 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidMG.hlsli>
+
+// Phase Gas/Pressure, the multigrid's intra-brick coarse levels M (4 cubed) and C (2 cubed) (GpuFluidMG.hlsli). One
+// 64 thread group per active brick (indirect), one thread per cell of M. Like GasMGFine, every kernel works on a
+// groupshared tile of its level with one layer from each face neighbour, and the smoothing kernels run block red-black:
+// one launch per brick colour (GpuFluidGasPass.y; 2: every brick), so the halo never changes during a launch; the
+// second colour (Pass.w bit 0) smooths against the first colour's new values. x is read from one side and written to
+// the other.
+//
+// Modes (GpuFluidGasPass.x):
+// - GPU_FLUID_MG_MID_RESTRICT: residual of M (x side 0) -> b of C; C pre-smoothed from 0 -> x of C side 0. Its halo is
+//   0 for the first colour, the first colour's new x of C for the second.
+// - GPU_FLUID_MG_COARSE_RESTRICT: residual of C (x side 0) -> b of this brick's cell of D0, whose x is set to 0.
+// - GPU_FLUID_MG_COARSE_PROLONG: C side 0 += P(x of D0), post-smoothing -> C side 1.
+// - GPU_FLUID_MG_MID_PROLONG: M side 0 += P(x of C side 1), post-smoothing -> M side 1.
+//   For the first colour the halo is the neighbours' side 0 plus the same correction, for the second their side 1.
+// Params: 0 x over-relaxation, y pre-smoothing sweeps, z post-smoothing sweeps   1 z scale of the coarse correction
+
+RWStructuredBuffer<float4> GpuFluidMGCoeff;      // only read here
+RWStructuredBuffer<float4> GpuFluidMGDenseCoeff; // only read here
+RWStructuredBuffer<float> GpuFluidMGLocal;
+RWStructuredBuffer<float2> GpuFluidMGDense;
+RWStructuredBuffer<uint> GpuFluidFaceCodes;      // only read here (FIX_RESTRICT)
+RWStructuredBuffer<uint> GpuFluidMGMask;         // only read here
+RWStructuredBuffer<float> GpuFluidPhiIn;         // only read here (FIX_RESTRICT): Phi before the pre-smoothing
+RWStructuredBuffer<float> GpuFluidPhiHalo;       // only read here (FIX_RESTRICT): Phi after it
+
+groupshared float gs_fX[216];      // tile of the level being smoothed: 6 cubed (M) or 4 cubed (C)
+groupshared float gs_fR[64];
+groupshared float gs_fCoarse[64];  // coarse samples of a prolongation: C (4 cubed) or D0 (3 cubed)
+groupshared uint gs_uiKind[64];
+groupshared float gs_fXC[64];      // MID_RESTRICT: the C tile smoothed after the restriction
+
+uint TileOf(int3 c, int n)
+{
+  const int side = n + 2;
+  return uint((c.x + 1) + side * ((c.y + 1) + side * (c.z + 1)));
+}
+
+uint CellOf(int3 c, int n)
+{
+  return uint(c.x + n * (c.y + n * c.z));
+}
+
+int3 CoordOf(uint i, int n)
+{
+  return int3(int(i) % n, (int(i) / n) % n, int(i) / (n * n));
+}
+
+uint XOffset(int n, uint side)
+{
+  if (n == 4)
+    return side == 0 ? GPU_FLUID_MG_XM0 : GPU_FLUID_MG_XM1;
+  return side == 0 ? GPU_FLUID_MG_XC0 : GPU_FLUID_MG_XC1;
+}
+
+uint CoeffOffset(int n)
+{
+  return n == 4 ? 0 : GPU_FLUID_MG_COEFF_C;
+}
+
+/// The level's x of this brick (side) and of the face neighbours' first layer (haloSide; > 1: zeros) into gs_fX.
+/// Thread i < n cubed owns cell i.
+void LoadTile(uint slot, int n, uint side, uint haloSide, uint groupIndex)
+{
+  const uint count = uint(n * n * n);
+  if (groupIndex < count)
+  {
+    const int3 c = CoordOf(groupIndex, n);
+    gs_fX[TileOf(c, n)] = GpuFluidMGLocal[slot * GPU_FLUID_MG_LOCAL_STRIDE + XOffset(n, side) + groupIndex];
+
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+    {
+      [unroll] for (int s = -1; s <= 1; s += 2)
+      {
+        if (c[axis] != (s < 0 ? 0 : n - 1))
+          continue;
+        int3 d = int3(0, 0, 0);
+        d[axis] = s;
+        const uint neighbor = GpuFluidNeighbor(slot, d);
+        float value = 0.0;
+        if (neighbor < GPU_FLUID_NEIGHBOR_OUTSIDE && haloSide <= 1)
+        {
+          int3 other = c;
+          other[axis] = s < 0 ? n - 1 : 0;
+          value = GpuFluidMGLocal[neighbor * GPU_FLUID_MG_LOCAL_STRIDE + XOffset(n, haloSide) + CellOf(other, n)];
+        }
+        gs_fX[TileOf(c + d, n)] = value;
+      }
+    }
+  }
+}
+
+float Neighbors(int3 c, int n, float4 c0, float4 c1)
+{
+  return c0.x * gs_fX[TileOf(c - int3(1, 0, 0), n)] + c0.y * gs_fX[TileOf(c + int3(1, 0, 0), n)] + c0.z * gs_fX[TileOf(c - int3(0, 1, 0), n)] +
+         c0.w * gs_fX[TileOf(c + int3(0, 1, 0), n)] + c1.x * gs_fX[TileOf(c - int3(0, 0, 1), n)] + c1.y * gs_fX[TileOf(c + int3(0, 0, 1), n)];
+}
+
+void Smooth(int n, uint groupIndex, float4 c0, float4 c1, float b, float omega, uint sweeps)
+{
+  const uint count = uint(n * n * n);
+  const int3 c = CoordOf(groupIndex, n);
+  const uint parity = uint(c.x + c.y + c.z) & 1u;
+
+  for (uint i = 0; i < sweeps * 2; ++i)
+  {
+    if (groupIndex < count && parity == (i & 1u) && c1.w > 0.0)
+    {
+      const uint t = TileOf(c, n);
+      gs_fX[t] = lerp(gs_fX[t], (Neighbors(c, n, c0, c1) - b) / c1.w, omega);
+    }
+    GroupMemoryBarrierWithGroupSync();
+  }
+}
+
+/// Trilinear correction at tile position l (-1..n) of a level of size n, from a coarse tile of size n/2 (+2) in
+/// gs_fCoarse / gs_uiKind.
+float Prolong(int3 l, int n)
+{
+  const int nc = n / 2;
+  const int3 c0 = GpuFluidHalfFloor3(l);
+  const int3 c1 = c0 + int3((l.x & 1) != 0 ? 1 : -1, (l.y & 1) != 0 ? 1 : -1, (l.z & 1) != 0 ? 1 : -1);
+
+  const uint parentTile = TileOf(c0, nc);
+  if (gs_uiKind[parentTile] != GPU_FLUID_KIND_FLUID)
+    return 0.0;
+  const float parent = gs_fCoarse[parentTile];
+
+  float result = 0.0;
+  [unroll] for (uint corner = 0; corner < 8; ++corner)
+  {
+    const bool3 far = bool3((corner & 1u) != 0, (corner & 2u) != 0, (corner & 4u) != 0);
+    const int3 c = int3(far.x ? c1.x : c0.x, far.y ? c1.y : c0.y, far.z ? c1.z : c0.z);
+    const float weight = (far.x ? 0.25 : 0.75) * (far.y ? 0.25 : 0.75) * (far.z ? 0.25 : 0.75);
+    const uint t = TileOf(c, nc);
+    result += weight * GpuFluidProlongSample(gs_uiKind[t], gs_fCoarse[t], parent);
+  }
+  return result;
+}
+
+/// Adds the prolongation to this thread's cell and, on the brick's faces, to the halo cells next to it.
+void AddProlongation(int n, uint groupIndex, bool bHalo)
+{
+  if (groupIndex >= uint(n * n * n))
+    return;
+
+  const int3 c = CoordOf(groupIndex, n);
+  const float scale = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1).z;
+  gs_fX[TileOf(c, n)] += scale * Prolong(c, n);
+  if (!bHalo)
+    return;
+
+  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  {
+    [unroll] for (int s = -1; s <= 1; s += 2)
+    {
+      if (c[axis] != (s < 0 ? 0 : n - 1))
+        continue;
+      int3 d = int3(0, 0, 0);
+      d[axis] = s;
+      gs_fX[TileOf(c + d, n)] += scale * Prolong(c + d, n);
+    }
+  }
+}
+
+/// FIX_RESTRICT, for the first colour: its b of M came from residuals against the second colour's Phi before that
+/// colour pre-smoothed (GasMGFine SMOOTH_RESTRICT, partial). Only the residuals of its brick-face cells change with the
+/// neighbours' change dPhi across FLUID faces, r -= dPhi, so b of M -= 0.5 dPhi for each such child. Then M is
+/// pre-smoothed from 0 against the second colour's new x of M, and the M residual is restricted to b of C, C
+/// pre-smoothed from 0 (halo 0: this colour smooths C first).
+void FixRestrict(uint slot, uint groupIndex, float omega, uint sweeps)
+{
+  const uint localBase = slot * GPU_FLUID_MG_LOCAL_STRIDE;
+  const uint coeffBase = slot * GPU_FLUID_MG_COEFF_STRIDE;
+  const int3 cm = CoordOf(groupIndex, 4);
+
+  float bm = GpuFluidMGLocal[localBase + GPU_FLUID_MG_BM + groupIndex];
+  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  {
+    [unroll] for (int s = -1; s <= 1; s += 2)
+    {
+      if (cm[axis] != (s < 0 ? 0 : 3))
+        continue;
+
+      int3 d = int3(0, 0, 0);
+      d[axis] = s;
+      const uint neighbor = GpuFluidNeighbor(slot, d);
+      if (neighbor >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+        continue;
+
+      const uint face = axis * 2 + (s > 0 ? 1u : 0u);
+      const uint u = (axis + 1) % 3;
+      const uint v = (axis + 2) % 3;
+      [unroll] for (uint k = 0; k < 4; ++k)
+      {
+        int3 f = cm * 2;
+        f[axis] += s > 0 ? 1 : 0;
+        f[u] += int(k & 1u);
+        f[v] += int(k >> 1);
+        if (GpuFluidFaceCode(GpuFluidFaceCodes[slot * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(f))], face) != GPU_FLUID_CODE_FLUID)
+          continue;
+
+        int3 other = f;
+        other[axis] = s < 0 ? GPU_FLUID_BRICK_SIZE - 1 : 0;
+        const uint index = neighbor * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other));
+        bm -= 0.5 * (GpuFluidPhiHalo[index] - GpuFluidPhiIn[index]);
+      }
+    }
+  }
+  GpuFluidMGLocal[localBase + GPU_FLUID_MG_BM + groupIndex] = bm;
+
+  // The M tile: own 0, halo the second colour's new x of M.
+  gs_fX[groupIndex] = 0.0;
+  if (groupIndex < 216 - 64)
+    gs_fX[64 + groupIndex] = 0.0;
+  if (groupIndex < 216 - 128)
+    gs_fX[128 + groupIndex] = 0.0;
+  if (groupIndex < 216 - 192)
+    gs_fX[192 + groupIndex] = 0.0;
+  GroupMemoryBarrierWithGroupSync();
+  [unroll] for (uint axis2 = 0; axis2 < 3; ++axis2)
+  {
+    [unroll] for (int s2 = -1; s2 <= 1; s2 += 2)
+    {
+      if (cm[axis2] != (s2 < 0 ? 0 : 3))
+        continue;
+      int3 d = int3(0, 0, 0);
+      d[axis2] = s2;
+      const uint neighbor = GpuFluidNeighbor(slot, d);
+      if (neighbor < GPU_FLUID_NEIGHBOR_OUTSIDE)
+      {
+        int3 other = cm;
+        other[axis2] = s2 < 0 ? 3 : 0;
+        gs_fX[TileOf(cm + d, 4)] = GpuFluidMGLocal[neighbor * GPU_FLUID_MG_LOCAL_STRIDE + GPU_FLUID_MG_XM0 + CellOf(other, 4)];
+      }
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const float4 m0 = GpuFluidMGCoeff[coeffBase + groupIndex * 2 + 0];
+  const float4 m1 = GpuFluidMGCoeff[coeffBase + groupIndex * 2 + 1];
+  Smooth(4, groupIndex, m0, m1, bm, omega, sweeps);
+  GpuFluidMGLocal[localBase + GPU_FLUID_MG_XM0 + groupIndex] = gs_fX[TileOf(cm, 4)];
+
+  // M residual -> b of C.
+  gs_fR[groupIndex] = m1.w > 0.0 ? bm - (Neighbors(cm, 4, m0, m1) - m1.w * gs_fX[TileOf(cm, 4)]) : 0.0;
+  GroupMemoryBarrierWithGroupSync();
+
+  float bc = 0.0;
+  float4 c0 = float4(0.0, 0.0, 0.0, 0.0);
+  float4 c1 = float4(0.0, 0.0, 0.0, 0.0);
+  if (groupIndex < 8)
+  {
+    const int3 cc = CoordOf(groupIndex, 2);
+    [unroll] for (uint child = 0; child < 8; ++child)
+      bc += gs_fR[CellOf(cc * 2 + int3(child & 1u, (child >> 1) & 1u, child >> 2), 4)];
+    bc *= 0.5;
+    GpuFluidMGLocal[localBase + GPU_FLUID_MG_BC + groupIndex] = bc;
+    c0 = GpuFluidMGCoeff[coeffBase + GPU_FLUID_MG_COEFF_C + groupIndex * 2 + 0];
+    c1 = GpuFluidMGCoeff[coeffBase + GPU_FLUID_MG_COEFF_C + groupIndex * 2 + 1];
+  }
+  gs_fX[groupIndex] = 0.0; // the C tile (4 cubed): halo 0
+  GroupMemoryBarrierWithGroupSync();
+
+  Smooth(2, groupIndex, c0, c1, bc, omega, sweeps);
+  if (groupIndex < 8)
+    GpuFluidMGLocal[localBase + GPU_FLUID_MG_XC0 + groupIndex] = gs_fX[TileOf(CoordOf(groupIndex, 2), 2)];
+}
+
+[numthreads(64, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  // A brick-colour launch runs over that colour's list (GpuFluidSparse.hlsli).
+  const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
+  const uint slot = GpuFluidGroupSlotOfColour(groupId, pass.y);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+
+  const uint mode = pass.x;
+  const bool bSecondColour = (pass.w & 1u) != 0;
+  const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const float omega = params.x;
+  const uint preSweeps = uint(params.y);
+  const uint postSweeps = uint(params.z);
+
+  if (mode == GPU_FLUID_MG_MID_FIX_RESTRICT)
+  {
+    FixRestrict(slot, groupIndex, omega, preSweeps);
+    return;
+  }
+
+  const uint localBase = slot * GPU_FLUID_MG_LOCAL_STRIDE;
+  const uint coeffBase = slot * GPU_FLUID_MG_COEFF_STRIDE;
+
+  // The level this mode smooths or takes the residual of: M for MID_*, C for COARSE_*.
+  const int n = (mode == GPU_FLUID_MG_MID_RESTRICT || mode == GPU_FLUID_MG_MID_PROLONG || mode == GPU_FLUID_MG_MID_RESTRICT_COARSE) ? 4 : 2;
+  const uint count = uint(n * n * n);
+  const bool bProlong = mode == GPU_FLUID_MG_COARSE_PROLONG || mode == GPU_FLUID_MG_MID_PROLONG;
+
+  float4 c0 = float4(0.0, 0.0, 0.0, 0.0);
+  float4 c1 = float4(0.0, 0.0, 0.0, 0.0);
+  float b = 0.0;
+  if (groupIndex < count)
+  {
+    c0 = GpuFluidMGCoeff[coeffBase + CoeffOffset(n) + groupIndex * 2 + 0];
+    c1 = GpuFluidMGCoeff[coeffBase + CoeffOffset(n) + groupIndex * 2 + 1];
+    b = GpuFluidMGLocal[localBase + (n == 4 ? GPU_FLUID_MG_BM : GPU_FLUID_MG_BC) + groupIndex];
+  }
+
+  // A prolongation's second colour finds its halo corrected and smoothed already (side 1).
+  LoadTile(slot, n, 0, bProlong && bSecondColour ? 1 : 0, groupIndex);
+
+  if (bProlong)
+  {
+    if (mode == GPU_FLUID_MG_MID_PROLONG)
+    {
+      // C side 1 around this brick: 4 cubed, -1..2.
+      const int3 c = CoordOf(groupIndex, 4) - 1;
+      const int3 d = int3(c.x < 0 ? -1 : (c.x > 1 ? 1 : 0), c.y < 0 ? -1 : (c.y > 1 ? 1 : 0), c.z < 0 ? -1 : (c.z > 1 ? 1 : 0));
+      const int3 cl = c - d * 2;
+      const uint source = all(d == 0) ? slot : GpuFluidNeighbor(slot, d);
+
+      float value = 0.0;
+      uint kind;
+      if (source == GPU_FLUID_NEIGHBOR_UNALLOCATED)
+        kind = GPU_FLUID_KIND_DIRICHLET;
+      else if (source == GPU_FLUID_NEIGHBOR_OUTSIDE)
+        kind = GpuFluidOutsideKind(d, brick);
+      else
+      {
+        const bool bFluid = ((GpuFluidMGMask[source * GPU_FLUID_MG_MASK_STRIDE + 2] >> CellOf(cl, 2)) & 1u) != 0;
+        kind = bFluid ? GPU_FLUID_KIND_FLUID : GPU_FLUID_KIND_NEUMANN;
+        value = GpuFluidMGLocal[source * GPU_FLUID_MG_LOCAL_STRIDE + GPU_FLUID_MG_XC1 + CellOf(cl, 2)];
+      }
+      gs_fCoarse[groupIndex] = value;
+      gs_uiKind[groupIndex] = kind;
+    }
+    else if (groupIndex < 27)
+    {
+      // D0 around this brick: 3 cubed, -1..1.
+      const int3 d = CoordOf(groupIndex, 3) - 1;
+      const int3 other = brick + d;
+      const int3 grid = int3(GpuFluidGrid());
+
+      float value = 0.0;
+      uint kind;
+      if (any(other < 0) || any(other >= grid))
+      {
+        kind = GpuFluidOutsideKind(d, brick);
+      }
+      else
+      {
+        const uint dense = GpuFluidBrickLinear(uint3(other), uint3(grid));
+        const float diag = GpuFluidMGDenseCoeff[dense * 2 + 1].w;
+        kind = diag > 0.0 ? GPU_FLUID_KIND_FLUID : (diag < 0.0 ? GPU_FLUID_KIND_DIRICHLET : GPU_FLUID_KIND_NEUMANN);
+        value = GpuFluidMGDense[dense].x;
+      }
+      gs_fCoarse[TileOf(d, 1)] = value;
+      gs_uiKind[TileOf(d, 1)] = kind;
+    }
+    GroupMemoryBarrierWithGroupSync();
+
+    AddProlongation(n, groupIndex, !bSecondColour);
+    GroupMemoryBarrierWithGroupSync();
+
+    Smooth(n, groupIndex, c0, c1, b, omega, postSweeps);
+    if (groupIndex < count)
+      GpuFluidMGLocal[localBase + XOffset(n, 1) + groupIndex] = gs_fX[TileOf(CoordOf(groupIndex, n), n)];
+    return;
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  // Residual of the level.
+  if (groupIndex < count)
+  {
+    const int3 c = CoordOf(groupIndex, n);
+    gs_fR[groupIndex] = c1.w > 0.0 ? b - (Neighbors(c, n, c0, c1) - c1.w * gs_fX[TileOf(c, n)]) : 0.0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (mode == GPU_FLUID_MG_COARSE_RESTRICT)
+  {
+    if (groupIndex == 0)
+    {
+      float sum = 0.0;
+      [unroll] for (uint i = 0; i < 8; ++i)
+        sum += gs_fR[i];
+      const uint dense = GpuFluidBrickLinear(uint3(brick), GpuFluidGrid());
+      GpuFluidMGDense[dense] = float2(0.0, 0.5 * sum);
+    }
+    return;
+  }
+
+  // GPU_FLUID_MG_MID_RESTRICT: b of C, then C pre-smoothed from 0 in its own tile (gs_fX is reused as the C tile).
+  float bc = 0.0;
+  float4 cc0 = float4(0.0, 0.0, 0.0, 0.0);
+  float4 cc1 = float4(0.0, 0.0, 0.0, 0.0);
+  if (groupIndex < 8)
+  {
+    const int3 cc = CoordOf(groupIndex, 2);
+    [unroll] for (uint child = 0; child < 8; ++child)
+      bc += gs_fR[CellOf(cc * 2 + int3(child & 1u, (child >> 1) & 1u, child >> 2), 4)];
+    bc *= 0.5;
+    GpuFluidMGLocal[localBase + GPU_FLUID_MG_BC + groupIndex] = bc;
+    cc0 = GpuFluidMGCoeff[coeffBase + GPU_FLUID_MG_COEFF_C + groupIndex * 2 + 0];
+    cc1 = GpuFluidMGCoeff[coeffBase + GPU_FLUID_MG_COEFF_C + groupIndex * 2 + 1];
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex < 64)
+    gs_fX[groupIndex] = 0.0;
+  GroupMemoryBarrierWithGroupSync();
+
+  // The second colour smooths against the first colour's new x of C.
+  if (bSecondColour && groupIndex < 8)
+  {
+    const int3 c = CoordOf(groupIndex, 2);
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+    {
+      [unroll] for (int s = -1; s <= 1; s += 2)
+      {
+        if (c[axis] != (s < 0 ? 0 : 1))
+          continue;
+        int3 d = int3(0, 0, 0);
+        d[axis] = s;
+        const uint neighbor = GpuFluidNeighbor(slot, d);
+        if (neighbor < GPU_FLUID_NEIGHBOR_OUTSIDE)
+        {
+          int3 other = c;
+          other[axis] = s < 0 ? 1 : 0;
+          gs_fX[TileOf(c + d, 2)] = GpuFluidMGLocal[neighbor * GPU_FLUID_MG_LOCAL_STRIDE + GPU_FLUID_MG_XC0 + CellOf(other, 2)];
+        }
+      }
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  Smooth(2, groupIndex, cc0, cc1, bc, omega, preSweeps);
+  if (groupIndex < 8)
+    GpuFluidMGLocal[localBase + GPU_FLUID_MG_XC0 + groupIndex] = gs_fX[TileOf(CoordOf(groupIndex, 2), 2)];
+
+  if (mode != GPU_FLUID_MG_MID_RESTRICT_COARSE)
+    return;
+
+  // MID_RESTRICT_COARSE (the second colour): the C tile is current, its halo the first colour's x of C, so the C residual
+  // goes to this brick's cell of D0 right away.
+  GroupMemoryBarrierWithGroupSync();
+  if (groupIndex < 8)
+  {
+    const int3 c = CoordOf(groupIndex, 2);
+    gs_fR[groupIndex] = cc1.w > 0.0 ? bc - (Neighbors(c, 2, cc0, cc1) - cc1.w * gs_fX[TileOf(c, 2)]) : 0.0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+  if (groupIndex == 0)
+  {
+    float sum = 0.0;
+    [unroll] for (uint i = 0; i < 8; ++i)
+      sum += gs_fR[i];
+    GpuFluidMGDense[GpuFluidBrickLinear(uint3(brick), GpuFluidGrid())] = float2(0.0, 0.5 * sum);
+  }
+}

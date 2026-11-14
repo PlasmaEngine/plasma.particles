@@ -6,24 +6,17 @@ ALL
 [COMPUTESHADER]
 
 #include <Shaders/Common/Common.h>
-#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+#include <Shaders/GpuFluid/GpuFluidDivergence.hlsli>
 
-// Phase Gas/Pressure, first kernel: the exact MAC divergence of every interior cell,
-// (u[i+1] - u[i] + v[j+1] - v[j] + w[k+1] - w[k]) / dx, the +1 faces of the brick's last cells coming from the apron.
-// Faces on closed domain walls are zero by then (GasForces, GasHalo). One 8 cubed group per active brick (indirect).
-//
-// On the frame's last tick the largest and the summed |div| go to the stats, the "before" half of the projection check.
-// Every tick, a non-finite divergence is counted in GPU_FLUID_STAT_NAN before it is replaced by 0, and a fixed-point
-// contribution that had to be clamped, or a sum that wrapped, in GPU_FLUID_STAT_OVERFLOW.
+// Phase Gas/Pressure, after GasMGSetup, for the red-black SOR solver (the multigrid takes the divergence in its first
+// fine launches): the exact MAC divergence of every interior cell and its stats (GpuFluidDivergence.hlsli). Faces on
+// closed domain walls are zero by then (GasForces, GasHalo), faces of solids move with them (GasSolids). One 8 cubed
+// group per active brick (indirect). Pass.z: 1 on the frame's last tick.
 
-RWTexture3D<float4> GpuFluidVelocityTarget;
+RWTexture3D<float4> GpuFluidVelocityTarget; // only read here
 RWStructuredBuffer<float> GpuFluidDivergence;
 RWByteAddressBuffer GpuFluidStats;
-
-groupshared uint gs_uiMaxDivergence;
-groupshared uint gs_uiSumDivergence;
-groupshared uint gs_uiNaN;
-groupshared uint gs_uiOverflow;
+RWStructuredBuffer<uint> GpuFluidFaceCodes; // only read here: solid cells (GasMGSetup) have no divergence to remove
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -34,54 +27,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
   const bool bLastTick = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).z != 0;
   const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
+  const uint index = slot * GPU_FLUID_BRICK_CELLS + groupIndex;
 
-  if (groupIndex == 0)
-  {
-    gs_uiMaxDivergence = 0;
-    gs_uiSumDivergence = 0;
-    gs_uiNaN = 0;
-    gs_uiOverflow = 0;
-  }
+  GpuFluidDivergenceBegin(groupIndex);
   GroupMemoryBarrierWithGroupSync();
 
-  const int3 texel = GpuFluidTexel(slot, int3(groupThreadId));
-  const float3 minus = GpuFluidVelocityTarget[texel].xyz;
-  const float plusX = GpuFluidVelocityTarget[texel + int3(1, 0, 0)].x;
-  const float plusY = GpuFluidVelocityTarget[texel + int3(0, 1, 0)].y;
-  const float plusZ = GpuFluidVelocityTarget[texel + int3(0, 0, 1)].z;
-
-  float divergence = (plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx;
-  if (GpuFluidIsNonFinite(divergence))
-  {
-    InterlockedAdd(gs_uiNaN, 1u); // counted before it is dropped, like every other guard
-    divergence = 0.0;
-  }
-
-  GpuFluidDivergence[slot * GPU_FLUID_BRICK_CELLS + groupIndex] = divergence;
-
-  if (bLastTick)
-  {
-    // 512 cells of at most 2^20 each stay below 2^32 in groupshared memory.
-    const float scaled = round(abs(divergence) * GPU_FLUID_DIV_SCALE);
-    if (scaled > 1048576.0)
-      InterlockedAdd(gs_uiOverflow, 1u);
-    InterlockedMax(gs_uiMaxDivergence, asuint(abs(divergence)));
-    InterlockedAdd(gs_uiSumDivergence, (uint)min(scaled, 1048576.0));
-  }
-
+  const bool bSolid = GpuFluidCodeIsSolid(GpuFluidFaceCodes[index]);
+  GpuFluidDivergence[index] = GpuFluidDivergenceOfCell(GpuFluidVelocityTarget, GpuFluidTexel(slot, int3(groupThreadId)), invDx, bSolid, bLastTick);
   GroupMemoryBarrierWithGroupSync();
 
-  if (groupIndex == 0)
-  {
-    uint overflow = gs_uiOverflow;
-    if (bLastTick)
-    {
-      GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_DIV_PRE * 4, gs_uiMaxDivergence);
-      GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_DIV_PRE_SUM, gs_uiSumDivergence, overflow);
-    }
-    if (gs_uiNaN > 0)
-      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);
-    if (overflow > 0)
-      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_OVERFLOW * 4, overflow);
-  }
+  GpuFluidDivergenceEnd(GpuFluidStats, groupIndex, bLastTick);
 }

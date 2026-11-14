@@ -20,6 +20,8 @@ struct plGpuFluidSparseGridGraph
   plRenderGraphBufferHandle m_hNeighbors;
   plRenderGraphBufferHandle m_hCounters;
   plRenderGraphBufferHandle m_hDispatchArgs;
+  plRenderGraphBufferHandle m_hColourList;
+  plRenderGraphBufferHandle m_hColourArgs;
   plRenderGraphTextureHandle m_hIndirection;
 };
 
@@ -34,6 +36,8 @@ struct plGpuFluidSparseGridGraph
 /// | Neighbors     | 27 per pool slot: slot, or "unallocated" / "outside the domain"            |
 /// | Counters      | active count, denied count                                                 |
 /// | DispatchArgs  | groups x, y, z for "one group per active brick" (2D fold) and the count    |
+/// | ColourList    | the active slots by brick colour (coordinate sum parity): 0 at the front, 1 at the back |
+/// | ColourArgs    | DispatchArgs for each brick colour (the multigrid's block red-black launches) |
 /// | Indirection   | the VDB brick table (RGBA16F): rgb = atlas brick / 255, a = brick mean      |
 ///
 /// P1 allocates the whole box once (Gas/Alloc on the first frame). P2 replaces only the assign step with the
@@ -87,6 +91,8 @@ private:
   plGALBufferHandle m_hNeighbors;
   plGALBufferHandle m_hCounters;
   plGALBufferHandle m_hDispatchArgs;
+  plGALBufferHandle m_hColourList;
+  plGALBufferHandle m_hColourArgs;
   plGALTextureHandle m_hIndirection;
 
   plShaderResourceHandle m_hAllocShader;
@@ -100,4 +106,6 @@ void plGpuFluidSparseGrid::DeclareReadOnly(PassBuilder& ref_pass, const plGpuFlu
   ref_pass.ReadBuffer(grid.m_hBrickCoords, plGALResourceState::ComputeShaderRead);
   ref_pass.ReadBuffer(grid.m_hNeighbors, plGALResourceState::ComputeShaderRead);
   ref_pass.ReadBuffer(grid.m_hDispatchArgs, plGALResourceState::IndirectArgument | plGALResourceState::ComputeShaderRead);
+  ref_pass.ReadBuffer(grid.m_hColourList, plGALResourceState::ComputeShaderRead);
+  ref_pass.ReadBuffer(grid.m_hColourArgs, plGALResourceState::IndirectArgument | plGALResourceState::ComputeShaderRead);
 }

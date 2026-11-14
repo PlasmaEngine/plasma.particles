@@ -1,0 +1,203 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Forces, after GasForces: the analytic solids of this tick (at most GPU_FLUID_MAX_SOLID_SHAPES: boxes,
+// spheres, capsules, planes; GpuFluidGasConstants.h). One 8 cubed group per active brick (indirect).
+//
+// A cell is solid when the smallest signed distance of the shapes at its centre is negative. Per brick:
+// 1. The shapes whose bounds reach the stored brick (apron included) go into a 64 bit mask; a brick no shape reaches
+//    only clears its solid flags.
+// 2. Every interior cell's solid bit goes to GpuFluidSolidFlags (16 words per slot), read by GasMGSetup, which turns it
+//    into the pressure operator's Neumann faces.
+// 3. Every -side face of an interior cell that touches a solid (either of its two cells solid) takes the velocity of
+//    the shape nearest to the face, v + w x r, along the face's axis: no flow through a static solid, and a moving one
+//    pushes the gas. The projection leaves these faces alone.
+// 4. Every stored texel (apron included) of a solid cell loses its scalars, so nothing is drawn or advected out of a
+//    solid. Apron cells are evaluated from the same shapes at the same positions as the neighbour's interior, so both
+//    copies agree.
+//
+// On the frame's last tick the solid cells and the largest density in a fluid cell against a solid go to the stats
+// (how much gas reaches the solids; the advection never carries gas into one, its faces hold the solid's velocity).
+// Params: 0 x shape count, y first shape of this tick in GpuFluidSolidShapes
+
+StructuredBuffer<plGpuFluidSolidShape> GpuFluidSolidShapes;
+RWStructuredBuffer<uint> GpuFluidSolidFlags;
+RWTexture3D<float4> GpuFluidVelocityTarget;
+RWTexture3D<float4> GpuFluidScalarTarget;
+RWByteAddressBuffer GpuFluidStats;
+
+groupshared uint gs_uiMask[2];
+groupshared uint gs_uiFlags[GPU_FLUID_SOLID_FLAG_WORDS];
+groupshared uint gs_uiContact;
+groupshared uint gs_uiSolidCells;
+
+float ShapeDistance(plGpuFluidSolidShape shape, float3 p)
+{
+  const uint type = uint(shape.CenterType.w);
+  const float3 d = p - shape.CenterType.xyz;
+
+  if (type == GPU_FLUID_SHAPE_SPHERE)
+    return length(d) - shape.Axis0.w;
+
+  if (type == GPU_FLUID_SHAPE_BOX)
+  {
+    const float3 q = abs(float3(dot(d, shape.Axis0.xyz), dot(d, shape.Axis1.xyz), dot(d, shape.Axis2.xyz))) - float3(shape.Axis0.w, shape.Axis1.w, shape.Axis2.w);
+    return length(max(q, 0.0)) + min(max(q.x, max(q.y, q.z)), 0.0);
+  }
+
+  if (type == GPU_FLUID_SHAPE_CAPSULE)
+  {
+    const float t = clamp(dot(d, shape.Axis0.xyz), -shape.Axis0.w, shape.Axis0.w);
+    return length(d - t * shape.Axis0.xyz) - shape.Axis1.w;
+  }
+
+  // Plane: solid behind it (against its normal).
+  return dot(d, shape.Axis0.xyz);
+}
+
+/// Smallest signed distance of the masked shapes at p, and the shape it belongs to.
+float SolidDistance(float3 p, uint firstShape, out uint out_shape)
+{
+  float best = 1e30;
+  out_shape = 0;
+  [unroll] for (uint word = 0; word < 2; ++word)
+  {
+    uint bits = gs_uiMask[word];
+    while (bits != 0)
+    {
+      const uint bit = firstbitlow(bits);
+      bits &= bits - 1u;
+      const uint shape = word * 32 + bit;
+      const float distance = ShapeDistance(GpuFluidSolidShapes[firstShape + shape], p);
+      if (distance < best)
+      {
+        best = distance;
+        out_shape = shape;
+      }
+    }
+  }
+  return best;
+}
+
+/// Velocity of a shape's material at p (voxels), m/s.
+float3 ShapeVelocity(plGpuFluidSolidShape shape, float3 p, float dx)
+{
+  const float3 r = (p - shape.CenterType.xyz) * dx;
+  return shape.LinearVelocity.xyz + cross(shape.AngularVelocity.xyz, r);
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const bool bLastTick = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).z != 0;
+  const float dx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).y;
+  const uint shapeCount = min(uint(params.x), (uint)GPU_FLUID_MAX_SOLID_SHAPES);
+  const uint firstShape = uint(params.y);
+
+  if (groupIndex == 0)
+  {
+    gs_uiMask[0] = 0;
+    gs_uiMask[1] = 0;
+    gs_uiContact = 0;
+    gs_uiSolidCells = 0;
+  }
+  if (groupIndex < GPU_FLUID_SOLID_FLAG_WORDS)
+    gs_uiFlags[groupIndex] = 0;
+  GroupMemoryBarrierWithGroupSync();
+
+  const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+  const float3 brickMin = float3(brick * GPU_FLUID_BRICK_SIZE) - 1.0;
+  const float3 brickMax = brickMin + GPU_FLUID_BRICK_STORE;
+
+  if (groupIndex < shapeCount)
+  {
+    const plGpuFluidSolidShape shape = GpuFluidSolidShapes[firstShape + groupIndex];
+    if (all(shape.BoundsMax.xyz >= brickMin - 1.0) && all(shape.BoundsMin.xyz <= brickMax + 1.0))
+      InterlockedOr(gs_uiMask[groupIndex >> 5], 1u << (groupIndex & 31u));
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if ((gs_uiMask[0] | gs_uiMask[1]) != 0)
+  {
+    const int3 local = int3(groupThreadId);
+    const int3 base = GpuFluidSlotBase(slot);
+    const float3 centre = float3(brick * GPU_FLUID_BRICK_SIZE + local) + 0.5;
+
+    uint nearest;
+    const bool bSolid = SolidDistance(centre, firstShape, nearest) < 0.0;
+    if (bSolid)
+    {
+      InterlockedOr(gs_uiFlags[groupIndex >> 5], 1u << (groupIndex & 31u));
+      InterlockedAdd(gs_uiSolidCells, 1u);
+    }
+
+    // -side faces touching a solid take the solid's velocity.
+    {
+      const int3 texel = base + local + GPU_FLUID_BRICK_APRON;
+      float4 velocity = GpuFluidVelocityTarget[texel];
+      bool bChanged = false;
+      bool bTouches = false; // a fluid cell with a solid neighbour
+      [unroll] for (uint axis = 0; axis < 3; ++axis)
+      {
+        float3 below = centre;
+        below[axis] -= 1.0;
+        float3 above = centre;
+        above[axis] += 1.0;
+        uint belowShape, aboveShape;
+        const bool bBelowSolid = SolidDistance(below, firstShape, belowShape) < 0.0;
+        bTouches = bTouches || (!bSolid && (bBelowSolid || SolidDistance(above, firstShape, aboveShape) < 0.0));
+        if (bSolid || bBelowSolid)
+        {
+          float3 face = centre;
+          face[axis] -= 0.5;
+          uint faceShape;
+          SolidDistance(face, firstShape, faceShape);
+          velocity[axis] = ShapeVelocity(GpuFluidSolidShapes[firstShape + faceShape], face, dx)[axis];
+          bChanged = true;
+        }
+      }
+      if (bChanged)
+        GpuFluidVelocityTarget[texel] = velocity;
+
+      // How much gas reaches the solid: the densest cell against it.
+      if (bTouches)
+      {
+        const float density = GpuFluidScalarTarget[texel].r;
+        if (!GpuFluidIsNonFinite(density))
+          InterlockedMax(gs_uiContact, asuint(max(density, 0.0)));
+      }
+    }
+
+    // Scalars of every stored texel inside a solid.
+    for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+    {
+      const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+      const float3 p = float3(brick * GPU_FLUID_BRICK_SIZE + stored - GPU_FLUID_BRICK_APRON) + 0.5;
+      uint shape;
+      if (SolidDistance(p, firstShape, shape) < 0.0)
+        GpuFluidScalarTarget[base + stored] = float4(0.0, 0.0, 0.0, 0.0);
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex < GPU_FLUID_SOLID_FLAG_WORDS)
+    GpuFluidSolidFlags[slot * GPU_FLUID_SOLID_FLAG_WORDS + groupIndex] = gs_uiFlags[groupIndex];
+
+  if (groupIndex == 0 && bLastTick && gs_uiSolidCells > 0)
+  {
+    GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_SOLID_CELLS * 4, gs_uiSolidCells);
+    GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_SOLID_CONTACT * 4, gs_uiContact);
+  }
+}

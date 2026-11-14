@@ -1,20 +1,38 @@
 #include <ParticlePlugin/ParticlePluginPCH.h>
 
 #include <Core/Interfaces/PhysicsWorldModule.h>
+#include <Core/Interfaces/WindWorldModule.h>
 #include <Core/Messages/UpdateLocalBoundsMessage.h>
 #include <Core/WorldSerializer/WorldReader.h>
 #include <Core/WorldSerializer/WorldWriter.h>
 #include <Foundation/Configuration/CVar.h>
+#include <ParticlePlugin/GpuFluid/Components/GpuFluidColliderComponent.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
+#include <Shaders/GpuFluid/GpuFluidGasConstants.h>
 
 plCVarFloat cvar_GpuFluidDebugStepTime("GpuFluid.Debug.StepTime", 0.0f, plCVarFlags::Default, "Overrides the gas solver's fixed tick, in seconds (0: 1/60 s, 1/30 s on Low).");
 plCVarBool cvar_GpuFluidDebugInjectNaN("GpuFluid.Debug.InjectNaN", false, plCVarFlags::Default, "Test hook: the next simulated gas tick writes one NaN into the density at its source's centre, then this turns itself off.");
-plCVarBool cvar_GpuFluidDebugSemiLagrangian("GpuFluid.Debug.SemiLagrangian", false, plCVarFlags::Default, "Advects the gas scalars semi-Lagrangian only, without the MacCormack correction, whatever the quality.");
+plCVarBool cvar_GpuFluidDebugSemiLagrangian("GpuFluid.Debug.SemiLagrangian", false, plCVarFlags::Default, "Advects the gas scalars and velocity semi-Lagrangian only, without the MacCormack correction, whatever the quality.");
+plCVarInt cvar_GpuFluidGasPressureSolver("GpuFluid.Gas.PressureSolver", 1, plCVarFlags::Default, "Gas pressure solver: 0 red-black SOR (the volume's PressureIterations sweeps), 1 multigrid V-cycles.");
+plCVarInt cvar_GpuFluidGasPressureCycles("GpuFluid.Gas.PressureCycles", 0, plCVarFlags::Default, "Overrides the multigrid V-cycles per gas tick (0: the volume's PressureCycles, or its quality's default).");
+plCVarInt cvar_GpuFluidGasMGPreSmooth("GpuFluid.Gas.MGPreSmooth", 2, plCVarFlags::Default, "Multigrid: red-black sweeps before each restriction.");
+plCVarInt cvar_GpuFluidGasMGPostSmooth("GpuFluid.Gas.MGPostSmooth", 2, plCVarFlags::Default, "Multigrid: red-black sweeps after each prolongation.");
+plCVarInt cvar_GpuFluidGasMGCoarseSweeps("GpuFluid.Gas.MGCoarseSweeps", 4, plCVarFlags::Default, "Multigrid: red-black sweeps on the coarsest level.");
+plCVarInt cvar_GpuFluidGasMGFinalSweeps("GpuFluid.Gas.MGFinalSweeps", 0, plCVarFlags::Default, "Multigrid: red-black sweeps over the whole fine level after each V-cycle, every neighbour current.");
+plCVarFloat cvar_GpuFluidGasMGProlongScale("GpuFluid.Gas.MGProlongScale", 1.0f, plCVarFlags::Default, "Multigrid: scale of every coarse-grid correction.");
+plCVarInt cvar_GpuFluidGasMGDownColour("GpuFluid.Gas.MGDownColour", 0, plCVarFlags::Default, "Multigrid: the brick colour that pre-smooths the fine level first (0 or 1).");
+plCVarBool cvar_GpuFluidGasMGShortCycles("GpuFluid.Gas.MGShortCycles", true, plCVarFlags::Default, "Multigrid: every V-cycle after a tick's first stops at the 4 cubed level.");
+plCVarBool cvar_GpuFluidGasProfilePressure("GpuFluid.Gas.ProfilePressure", false, plCVarFlags::Default, "Each step of the gas pressure phase in a render-graph pass of its own, so each is timed.");
+plCVarFloat cvar_GpuFluidGasMGOmega("GpuFluid.Gas.MGOmega", 1.0f, plCVarFlags::Default, "Multigrid: over-relaxation of the smoother.");
+plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 4096, plCVarFlags::Default, "Multigrid: dense levels up to this many cells run in one dispatch of one group; larger ones one thread per cell.");
+plCVarBool cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", true, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection too (Medium and up).");
+plCVarFloat cvar_GpuFluidGasVorticity("GpuFluid.Gas.Vorticity", -1.0f, plCVarFlags::Default, "Overrides the gas volumes' vorticity confinement epsilon (negative: each volume's own).");
+plCVarFloat cvar_GpuFluidGasVorticityRate("GpuFluid.Gas.VorticityRate", 10.0f, plCVarFlags::Default, "Vorticity confinement: the rate k (1/s) of the acceleration eps dx k (N x w).");
 
 // clang-format off
-PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 2, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 3, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -30,7 +48,11 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 2, plComponentMode::Static
     PL_MEMBER_PROPERTY("VelocityDissipation", m_fVelocityDissipation)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 100.0f), new plSuffixAttribute(" 1/s")),
     PL_MEMBER_PROPERTY("DensityMax", m_fDensityMax)->AddAttributes(new plDefaultValueAttribute(4.0f), new plClampValueAttribute(0.01f, 64.0f)),
     PL_MEMBER_PROPERTY("PressureIterations", m_uiPressureIterations)->AddAttributes(new plDefaultValueAttribute(40), new plClampValueAttribute(0, 1000)),
+    PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 16)),
     PL_MEMBER_PROPERTY("EdgeFade", m_fEdgeFade)->AddAttributes(new plDefaultValueAttribute(0.75f), new plClampValueAttribute(0.0f, 100.0f), new plSuffixAttribute(" m")),
+    PL_MEMBER_PROPERTY("Vorticity", m_fVorticity)->AddAttributes(new plDefaultValueAttribute(0.3f), new plClampValueAttribute(0.0f, 10.0f)),
+    PL_MEMBER_PROPERTY("WindInfluence", m_fWindInfluence)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 10.0f)),
+    PL_MEMBER_PROPERTY("PhysicsBodies", m_bPhysicsBodies)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_ENUM_MEMBER_PROPERTY("EmitterShape", plGpuFluidEmitterShape, m_EmitterShape)->AddAttributes(new plGroupAttribute("Source")),
     PL_MEMBER_PROPERTY("EmitterOffset", m_vEmitterOffset)->AddAttributes(new plDefaultValueAttribute(plVec3(0.0f, 0.0f, -1.4f)), new plSuffixAttribute(" m")),
     PL_MEMBER_PROPERTY("EmitterRadius", m_fEmitterRadius)->AddAttributes(new plDefaultValueAttribute(0.5f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
@@ -120,6 +142,12 @@ void plGpuFluidGasVolumeComponent::SerializeComponent(plWorldWriter& inout_strea
   s << m_fEmitterNoise;
   s << m_fEmitterNoiseScale;
   s << m_fEdgeFade;
+
+  // Version 3
+  s << m_uiPressureCycles;
+  s << m_fVorticity;
+  s << m_fWindInfluence;
+  s << m_bPhysicsBodies;
 }
 
 void plGpuFluidGasVolumeComponent::DeserializeComponent(plWorldReader& inout_stream)
@@ -173,6 +201,14 @@ void plGpuFluidGasVolumeComponent::DeserializeComponent(plWorldReader& inout_str
   s >> m_fEmitterNoise;
   s >> m_fEmitterNoiseScale;
   s >> m_fEdgeFade;
+
+  if (uiVersion < 3)
+    return;
+
+  s >> m_uiPressureCycles;
+  s >> m_fVorticity;
+  s >> m_fWindInfluence;
+  s >> m_bPhysicsBodies;
 }
 
 void plGpuFluidGasVolumeComponent::OnActivated()
@@ -345,8 +381,42 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_fEdgeFadeVoxels = m_fEdgeFade / fVoxel;
   sim.m_uiPressureIterations = m_uiPressureIterations;
   sim.m_bMacCormack = m_Quality != plGpuFluidQuality::Low && !cvar_GpuFluidDebugSemiLagrangian.GetValue();
+  sim.m_bMacCormackVelocity = sim.m_bMacCormack && cvar_GpuFluidGasVelocityMacCormack.GetValue();
   sim.m_fAllocThreshold = m_fAllocThreshold;
   sim.m_fMeanFloor = 1e-4f;
+
+  // Vorticity confinement from Medium up.
+  const float fVorticity = cvar_GpuFluidGasVorticity.GetValue() >= 0.0f ? cvar_GpuFluidGasVorticity.GetValue() : m_fVorticity;
+  sim.m_fVorticity = m_Quality != plGpuFluidQuality::Low ? fVorticity : 0.0f;
+  sim.m_fVorticityRate = plMath::Max(cvar_GpuFluidGasVorticityRate.GetValue(), 0.0f);
+
+  // Pressure: the multigrid unless the reference solver is asked for.
+  sim.m_PressureSolver = cvar_GpuFluidGasPressureSolver.GetValue() == 0 ? plGpuFluidPressureSolver::RedBlackSOR : plGpuFluidPressureSolver::Multigrid;
+  sim.m_uiPressureCycles = cvar_GpuFluidGasPressureCycles.GetValue() > 0 ? static_cast<plUInt32>(cvar_GpuFluidGasPressureCycles.GetValue())
+                                                                          : (m_uiPressureCycles > 0 ? m_uiPressureCycles : GetDefaultPressureCycles(m_Quality));
+  sim.m_Multigrid.m_uiPreSmooth = static_cast<plUInt32>(plMath::Clamp(cvar_GpuFluidGasMGPreSmooth.GetValue(), 0, 16));
+  sim.m_Multigrid.m_uiPostSmooth = static_cast<plUInt32>(plMath::Clamp(cvar_GpuFluidGasMGPostSmooth.GetValue(), 0, 16));
+  sim.m_Multigrid.m_uiCoarsestSweeps = static_cast<plUInt32>(plMath::Clamp(cvar_GpuFluidGasMGCoarseSweeps.GetValue(), 1, 256));
+  sim.m_Multigrid.m_fOmega = plMath::Clamp(cvar_GpuFluidGasMGOmega.GetValue(), 0.1f, 1.95f);
+  sim.m_Multigrid.m_uiFinalSweeps = static_cast<plUInt32>(plMath::Clamp(cvar_GpuFluidGasMGFinalSweeps.GetValue(), 0, 16));
+  sim.m_Multigrid.m_fProlongScale = plMath::Clamp(cvar_GpuFluidGasMGProlongScale.GetValue(), 0.0f, 4.0f);
+  sim.m_Multigrid.m_uiDownColour = cvar_GpuFluidGasMGDownColour.GetValue() != 0 ? 1u : 0u;
+  sim.m_Multigrid.m_bShortLaterCycles = cvar_GpuFluidGasMGShortCycles.GetValue();
+  sim.m_Multigrid.m_bProfilePressure = cvar_GpuFluidGasProfilePressure.GetValue();
+  sim.m_Multigrid.m_uiDenseGroupCells = static_cast<plUInt32>(plMath::Max(cvar_GpuFluidGasMGDenseGroupCells.GetValue(), 0));
+  sim.m_PoissonTest = m_DebugPoissonTest;
+
+  // Wind: the world's wind at the box's centre, into the volume's space.
+  sim.m_vAmbientWind.SetZero();
+  if (const plWindWorldModuleInterface* pWind = GetWorld()->GetModuleReadOnly<plWindWorldModuleInterface>())
+  {
+    const plVec3 vWorldWind = pWind->GetWindAt(GetOwner()->GetGlobalPosition()) * m_fWindInfluence;
+    const float fMaxSpeed = static_cast<float>(GPU_FLUID_MAX_SPEED);
+    sim.m_vAmbientWind = (GetOwner()->GetGlobalRotation().GetInverse() * vWorldWind).CompClamp(plVec3(-fMaxSpeed), plVec3(fMaxSpeed));
+  }
+  m_vLastWind = sim.m_vAmbientWind;
+
+  GatherSolids(timeDiff, sim);
 
   sim.m_Emitters.Clear();
   if (m_EmitterShape != plGpuFluidEmitterShape::None)
@@ -372,6 +442,274 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
       sim.m_bInjectNaN = true;
       cvar_GpuFluidDebugInjectNaN = false;
     }
+  }
+}
+
+plUInt32 plGpuFluidGasVolumeComponent::GetDefaultPressureCycles(plGpuFluidQuality::Enum quality)
+{
+  switch (quality)
+  {
+    case plGpuFluidQuality::Low:
+      return 1;
+    case plGpuFluidQuality::Ultra:
+      return 3;
+    default:
+      return 2;
+  }
+}
+
+namespace
+{
+  /// A solid in the world (centre, rotation, size in metres) as a shape in the volume's voxels.
+  struct SolidPose
+  {
+    plGpuFluidColliderShape::Enum m_Shape = plGpuFluidColliderShape::Box;
+    plVec3 m_vCenter = plVec3::MakeZero();
+    plQuat m_qRotation = plQuat::MakeIdentity();
+    plVec3 m_vHalfExtents = plVec3(0.5f); ///< box
+    float m_fRadius = 0.5f;               ///< sphere, capsule
+    float m_fHalfHeight = 0.5f;           ///< capsule
+  };
+
+  /// Linear and angular velocity (world space) of a transform that went from prev to cur in fSeconds.
+  void TransformVelocity(const plTransform& prev, const plTransform& cur, float fSeconds, plVec3& out_vLinear, plVec3& out_vAngular)
+  {
+    out_vLinear.SetZero();
+    out_vAngular.SetZero();
+    if (fSeconds <= 1e-6f)
+      return;
+
+    out_vLinear = (cur.m_vPosition - prev.m_vPosition) / fSeconds;
+
+    plQuat qDelta = cur.m_qRotation * prev.m_qRotation.GetInverse();
+    if (qDelta.w < 0.0f)
+      qDelta = plQuat(-qDelta.x, -qDelta.y, -qDelta.z, -qDelta.w); // the short way round
+    plVec3 vAxis;
+    plAngle angle;
+    qDelta.GetRotationAxisAndAngle(vAxis, angle, 1e-6f);
+    if (angle.GetRadian() > 1e-6f)
+      out_vAngular = vAxis * (angle.GetRadian() / fSeconds);
+  }
+
+  plGpuFluidSolidShape MakeShape(const SolidPose& pose, const plVec3& vLinear, const plVec3& vAngular, const plTransform& volume, float fVoxel, const plVec3& vGridVoxels)
+  {
+    const plQuat qInv = volume.m_qRotation.GetInverse();
+    const plVec3 vCenter = (qInv * (pose.m_vCenter - volume.m_vPosition)) / fVoxel + vGridVoxels * 0.5f;
+    const plQuat qRel = qInv * pose.m_qRotation;
+    const plVec3 a0 = qRel * plVec3(1.0f, 0.0f, 0.0f);
+    const plVec3 a1 = qRel * plVec3(0.0f, 1.0f, 0.0f);
+    const plVec3 a2 = qRel * plVec3(0.0f, 0.0f, 1.0f);
+    const plVec3 vLin = qInv * vLinear;
+    const plVec3 vAng = qInv * vAngular;
+
+    plGpuFluidSolidShape shape;
+    plMemoryUtils::ZeroFill(&shape, 1);
+    shape.LinearVelocity = plVec4(vLin.x, vLin.y, vLin.z, 0.0f);
+    shape.AngularVelocity = plVec4(vAng.x, vAng.y, vAng.z, 0.0f);
+
+    plVec3 vReach = plVec3::MakeZero();
+    float fType = static_cast<float>(GPU_FLUID_SHAPE_BOX);
+    switch (pose.m_Shape)
+    {
+      case plGpuFluidColliderShape::Sphere:
+      {
+        fType = static_cast<float>(GPU_FLUID_SHAPE_SPHERE);
+        const float r = pose.m_fRadius / fVoxel;
+        shape.Axis0 = plVec4(a0.x, a0.y, a0.z, r);
+        vReach = plVec3(r);
+        break;
+      }
+      case plGpuFluidColliderShape::Capsule:
+      {
+        fType = static_cast<float>(GPU_FLUID_SHAPE_CAPSULE);
+        const float hh = pose.m_fHalfHeight / fVoxel;
+        const float r = pose.m_fRadius / fVoxel;
+        shape.Axis0 = plVec4(a2.x, a2.y, a2.z, hh);
+        shape.Axis1 = plVec4(a0.x, a0.y, a0.z, r);
+        vReach = a2.Abs() * hh + plVec3(r);
+        break;
+      }
+      case plGpuFluidColliderShape::Plane:
+      {
+        fType = static_cast<float>(GPU_FLUID_SHAPE_PLANE);
+        shape.Axis0 = plVec4(a2.x, a2.y, a2.z, 0.0f);
+        vReach = plVec3(1e7f);
+        break;
+      }
+      default:
+      {
+        const plVec3 h = pose.m_vHalfExtents / fVoxel;
+        shape.Axis0 = plVec4(a0.x, a0.y, a0.z, h.x);
+        shape.Axis1 = plVec4(a1.x, a1.y, a1.z, h.y);
+        shape.Axis2 = plVec4(a2.x, a2.y, a2.z, h.z);
+        vReach = a0.Abs() * h.x + a1.Abs() * h.y + a2.Abs() * h.z;
+        break;
+      }
+    }
+
+    shape.CenterType = plVec4(vCenter.x, vCenter.y, vCenter.z, fType);
+    shape.BoundsMin = plVec4(vCenter.x - vReach.x, vCenter.y - vReach.y, vCenter.z - vReach.z, 0.0f);
+    shape.BoundsMax = plVec4(vCenter.x + vReach.x, vCenter.y + vReach.y, vCenter.z + vReach.z, 0.0f);
+    return shape;
+  }
+} // namespace
+
+void plGpuFluidGasVolumeComponent::GatherSolids(plTime timeDiff, plGpuFluidGasSimulation& inout_simulation)
+{
+  plGpuFluidGasSimulation& sim = inout_simulation;
+  sim.m_Solids.Clear();
+  sim.m_uiSolidsPerTick = 0;
+
+  const float fVoxel = sim.m_fVoxelSize;
+  const plVec3U32 vGrid = m_ActiveSettings.m_vBrickGrid;
+  const plVec3 vGridVoxels = plVec3(static_cast<float>(vGrid.x), static_cast<float>(vGrid.y), static_cast<float>(vGrid.z)) * static_cast<float>(plGpuFluidBrickSize);
+  const float fSeconds = static_cast<float>(timeDiff.GetSeconds());
+
+  plTransform volume = GetOwner()->GetGlobalTransform();
+  volume.m_vScale.Set(1.0f);
+
+  // Each solid's pose last frame and now, and its velocity over the frame.
+  struct Moving
+  {
+    SolidPose m_Prev;
+    SolidPose m_Cur;
+    plVec3 m_vLinear;
+    plVec3 m_vAngular;
+  };
+  plHybridArray<Moving, GPU_FLUID_MAX_SOLID_SHAPES> solids;
+
+  plHashTable<plUInt64, plTransform> seen;
+
+  auto Track = [&](plUInt64 uiKey, const plTransform& cur, bool bStatic, SolidPose pose)
+  {
+    plTransform prev = cur;
+    if (!bStatic)
+      m_SolidTransforms.TryGetValue(uiKey, prev);
+    seen.Insert(uiKey, cur);
+
+    if (solids.GetCount() >= GPU_FLUID_MAX_SOLID_SHAPES)
+      return;
+
+    Moving& m = solids.ExpandAndGetRef();
+    m.m_Cur = pose;
+    m.m_Prev = pose;
+    m.m_Prev.m_vCenter = pose.m_vCenter + (prev.m_vPosition - cur.m_vPosition);
+    m.m_Prev.m_qRotation = (prev.m_qRotation * cur.m_qRotation.GetInverse()) * pose.m_qRotation;
+    TransformVelocity(prev, cur, fSeconds, m.m_vLinear, m.m_vAngular);
+  };
+
+  // Authored colliders.
+  if (const plGpuFluidColliderComponentManager* pManager = GetWorld()->GetComponentManager<plGpuFluidColliderComponentManager>())
+  {
+    for (auto it = pManager->GetComponents(); it.IsValid(); ++it)
+    {
+      const plGpuFluidColliderComponent& collider = *it;
+      if (!collider.IsActiveAndInitialized())
+        continue;
+
+      const plTransform cur = collider.GetOwner()->GetGlobalTransform();
+      const plVec3 vScale = cur.m_vScale.Abs();
+
+      SolidPose pose;
+      pose.m_Shape = collider.m_Shape;
+      pose.m_vCenter = cur.m_vPosition;
+      pose.m_qRotation = cur.m_qRotation;
+      pose.m_vHalfExtents = collider.m_vHalfExtents.CompMul(vScale);
+      pose.m_fRadius = collider.m_fRadius * (collider.m_Shape == plGpuFluidColliderShape::Capsule ? plMath::Max(vScale.x, vScale.y) : plMath::Max(vScale.x, vScale.y, vScale.z));
+      pose.m_fHalfHeight = collider.m_fHalfHeight * vScale.z;
+      Track(collider.GetHandle().GetInternalID().m_Data, cur, collider.m_bStatic, pose);
+    }
+  }
+
+  // Dynamic physics bodies in the box, as boxes of their world bounds (P9 replaces these with their real shapes).
+  const plPhysicsWorldModuleInterface* pPhysics = m_bPhysicsBodies ? GetWorld()->GetModuleReadOnly<plPhysicsWorldModuleInterface>() : nullptr;
+  if (pPhysics != nullptr)
+  {
+    plPhysicsOverlapResultArray results;
+    plPhysicsQueryParameters params(0, plPhysicsShapeType::Dynamic | plPhysicsShapeType::Character);
+    pPhysics->QueryShapesInBox(results, GetGridExtents(), volume, params);
+
+    plHybridArray<plGameObjectHandle, 16> actors;
+    for (const plPhysicsOverlapResult& result : results.m_Results)
+    {
+      const plGameObjectHandle hActor = result.m_hActorObject.IsInvalidated() ? result.m_hShapeObject : result.m_hActorObject;
+      if (hActor.IsInvalidated() || actors.Contains(hActor))
+        continue;
+      actors.PushBack(hActor);
+
+      plGameObject* pActor = nullptr;
+      if (!GetWorld()->TryGetObject(hActor, pActor))
+        continue;
+
+      // Bodies that carry their own collider are already in.
+      plGpuFluidColliderComponent* pCollider = nullptr;
+      if (pActor->TryGetComponentOfBaseType(pCollider))
+        continue;
+
+      const plBoundingBoxSphere bounds = pPhysics->GetWorldSpaceBounds(pActor, 0, plPhysicsShapeType::Dynamic | plPhysicsShapeType::Character, true);
+      if (!bounds.IsValid())
+        continue;
+
+      const plBoundingBox box = bounds.GetBox();
+      plTransform cur = pActor->GetGlobalTransform();
+      cur.m_vScale.Set(1.0f);
+
+      SolidPose pose;
+      pose.m_Shape = plGpuFluidColliderShape::Box;
+      pose.m_vCenter = box.GetCenter();
+      pose.m_qRotation = plQuat::MakeIdentity(); // world axis aligned bounds
+      pose.m_vHalfExtents = box.GetHalfExtents();
+      Track(hActor.GetInternalID().m_Data | (plUInt64(1) << 63), cur, false, pose);
+    }
+  }
+
+  m_SolidTransforms = std::move(seen);
+  m_uiLastSolids = solids.GetCount();
+
+  const plUInt32 uiTicks = plMath::Max(sim.m_uiTicks, 1u);
+  if (solids.IsEmpty() || sim.m_uiTicks == 0)
+    return;
+
+  // Each tick sees the solids where they are at its end, moved along the frame's motion. A solid is kept for every tick
+  // when it reaches the box on any of them, so all ticks list the same solids in the same order.
+  const plVec3 vGridMax = vGridVoxels + plVec3(1.0f);
+  auto Reaches = [&](const plGpuFluidSolidShape& shape)
+  {
+    return shape.BoundsMax.x >= -1.0f && shape.BoundsMax.y >= -1.0f && shape.BoundsMax.z >= -1.0f && shape.BoundsMin.x <= vGridMax.x && shape.BoundsMin.y <= vGridMax.y &&
+           shape.BoundsMin.z <= vGridMax.z;
+  };
+
+  plHybridArray<plGpuFluidSolidShape, GPU_FLUID_MAX_SOLID_SHAPES * plGpuFluidMaxGasTicksPerFrame> shapes; // solid-major
+  plUInt32 uiKept = 0;
+  for (const Moving& m : solids)
+  {
+    plGpuFluidSolidShape perTick[plGpuFluidMaxGasTicksPerFrame];
+    bool bReaches = false;
+    for (plUInt32 uiTick = 0; uiTick < uiTicks && uiTick < plGpuFluidMaxGasTicksPerFrame; ++uiTick)
+    {
+      const float t = static_cast<float>(uiTick + 1) / static_cast<float>(uiTicks);
+      SolidPose pose = m.m_Cur;
+      pose.m_vCenter = plMath::Lerp(m.m_Prev.m_vCenter, m.m_Cur.m_vCenter, t);
+      pose.m_qRotation = plQuat::MakeSlerp(m.m_Prev.m_qRotation, m.m_Cur.m_qRotation, t);
+      perTick[uiTick] = MakeShape(pose, m.m_vLinear, m.m_vAngular, volume, fVoxel, vGridVoxels);
+      bReaches = bReaches || Reaches(perTick[uiTick]);
+    }
+
+    if (!bReaches)
+      continue;
+    for (plUInt32 uiTick = 0; uiTick < uiTicks && uiTick < plGpuFluidMaxGasTicksPerFrame; ++uiTick)
+      shapes.PushBack(perTick[uiTick]);
+    ++uiKept;
+  }
+
+  const plUInt32 uiTickCount = plMath::Min(uiTicks, plGpuFluidMaxGasTicksPerFrame);
+  m_uiLastSolids = uiKept;
+  sim.m_uiSolidsPerTick = uiKept;
+  sim.m_Solids.SetCount(uiKept * uiTickCount);
+  for (plUInt32 uiTick = 0; uiTick < uiTickCount; ++uiTick)
+  {
+    for (plUInt32 i = 0; i < uiKept; ++i)
+      plMemoryUtils::RawByteCopy(&sim.m_Solids[uiTick * uiKept + i], &shapes[i * uiTickCount + uiTick], sizeof(plGpuFluidSolid)); // same layout, checked in GpuFluidGasSolver.cpp
   }
 }
 

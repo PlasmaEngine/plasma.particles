@@ -82,6 +82,13 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   float m_fMeanDivergenceBefore = 0.0f;
   float m_fMeanDivergenceAfter = 0.0f;
 
+  plUInt32 m_uiSolidCells = 0;       ///< interior cells inside a solid on the frame's last tick
+  float m_fSolidContactDensity = 0.0f; ///< largest density in a fluid cell next to a solid on that tick
+  float m_fSolidDensity = 0.0f;      ///< largest density left in a solid cell at the end of the frame (must be 0)
+
+  /// Solver probes of the N3 Poisson test (plGpuFluidProbe*): max |residual| or |error|.
+  float m_fProbes[plGpuFluidStatProbeCount] = {};
+
   bool HasBounds() const { return m_uiAllocatedBricks > 0 && m_vBoundsMinBrick.x <= m_vBoundsMaxBrick.x; }
 };
 

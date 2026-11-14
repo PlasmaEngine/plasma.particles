@@ -22,6 +22,8 @@ StructuredBuffer<uint> GpuFluidActiveList;   // active index -> pool slot
 StructuredBuffer<uint> GpuFluidBrickCoords;  // pool slot -> packed virtual brick
 StructuredBuffer<uint> GpuFluidNeighbors;    // pool slot * 27 + neighbour -> pool slot or GPU_FLUID_NEIGHBOR_*
 StructuredBuffer<uint> GpuFluidDispatchArgs; // x, y, z groups and the active count
+StructuredBuffer<uint> GpuFluidColourList;   // active bricks by brick colour: colour 0 from the front, colour 1 from the back
+StructuredBuffer<uint> GpuFluidColourArgs;   // two sets of x, y, z groups and the count, one per brick colour
 #endif
 
 uint3 GpuFluidGrid()
@@ -138,6 +140,22 @@ uint GpuFluidGroupSlot(uint3 groupId)
   return GpuFluidActiveList[activeIndex];
 }
 
+/// Pool slot an indirect group of a brick-colour dispatch works on (colour 0 or 1), or GPU_FLUID_INVALID_SLOT.
+uint GpuFluidColourGroupSlot(uint3 groupId, uint colour)
+{
+  const uint index = groupId.y * GPU_FLUID_DISPATCH_FOLD + groupId.x;
+  if (index >= GpuFluidColourArgs[colour * GPU_FLUID_ARGS_WORDS + 3])
+    return GPU_FLUID_INVALID_SLOT;
+  const uint capacity = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasGrid).w;
+  return GpuFluidColourList[colour == 0 ? index : capacity - 1 - index];
+}
+
+/// The slot of a group of a launch over one brick colour (colour 0 or 1) or every active brick (colour 2).
+uint GpuFluidGroupSlotOfColour(uint3 groupId, uint colour)
+{
+  return colour < 2 ? GpuFluidColourGroupSlot(groupId, colour) : GpuFluidGroupSlot(groupId);
+}
+
 /// Pool slot of a virtual brick, GPU_FLUID_NEIGHBOR_OUTSIDE beyond the grid, GPU_FLUID_NEIGHBOR_UNALLOCATED without one.
 uint GpuFluidLookupBrick(int3 brick)
 {
@@ -180,6 +198,13 @@ bool GpuFluidLocate(float3 q, out float3 out_texel)
 
   out_texel = float3(GpuFluidSlotBase(slot)) + GPU_FLUID_BRICK_APRON + (q - float3(brick * GPU_FLUID_BRICK_SIZE));
   return true;
+}
+
+/// Whether the sample at texel-index position q lies in a brick with a slot.
+bool GpuFluidLocateAllocated(float3 q)
+{
+  float3 texel;
+  return GpuFluidLocate(q, texel);
 }
 
 /// Hardware trilinear sample of an atlas field at texel-index position q (see GpuFluidLocate). A brick without a slot

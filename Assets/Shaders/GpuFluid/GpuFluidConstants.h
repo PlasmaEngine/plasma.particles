@@ -44,6 +44,12 @@
 // count folded into 2D above GPU_FLUID_DISPATCH_FOLD groups, so every backend's 65535 limit holds.
 #define GPU_FLUID_COUNTER_ACTIVE 0 // pool slots in the active list
 #define GPU_FLUID_COUNTER_DENIED 1 // bricks that wanted a slot and found the pool full
+#define GPU_FLUID_COUNTER_COLOUR0 2 // active bricks of brick colour 0 (even coordinate sum)
+#define GPU_FLUID_COUNTER_COLOUR1 3 // active bricks of brick colour 1
+
+// The active bricks split by brick colour (parity of the brick coordinate sum) for the multigrid's block red-black
+// launches: colour 0 from the front of the colour list, colour 1 from its back. The colour dispatch arguments are two
+// sets of GPU_FLUID_ARGS_WORDS: (x, y, 1, count) each.
 #define GPU_FLUID_COUNTER_WORDS 16
 #define GPU_FLUID_DISPATCH_FOLD 32768
 #define GPU_FLUID_ARGS_WORDS 4 // uint3 groups + the active count
@@ -69,6 +75,11 @@
 #define GPU_FLUID_STAT_DIV_POST_SUM 21   // sum of |div u| after it, fixed point GPU_FLUID_DIV_SCALE
 #define GPU_FLUID_STAT_OVERFLOW 22       // fixed-point contributions that were clamped to their range, or sums that wrapped
 #define GPU_FLUID_STAT_SPEED_CLAMPED 23  // face velocities GasForces clamped to GPU_FLUID_MAX_SPEED (summed over the frame's ticks)
+#define GPU_FLUID_STAT_SOLID_CELLS 24    // interior cells inside a solid (GasSolids, the frame's last tick)
+#define GPU_FLUID_STAT_SOLID_CONTACT 25  // asuint of the largest density in a fluid cell next to a solid (GasSolids, the frame's last tick)
+#define GPU_FLUID_STAT_SOLID_DENSITY 26  // asuint of the largest density left in a solid cell at the end of the frame (GasFinalize)
+#define GPU_FLUID_STAT_PROBE 32          // 16 words of solver probes (GasPoisson): asuint of max |residual| or |error|
+#define GPU_FLUID_STAT_PROBE_COUNT 16
 #define GPU_FLUID_STAT_WORD_COUNT 64
 #define GPU_FLUID_STATS_BYTES (GPU_FLUID_STAT_WORD_COUNT * 4)
 

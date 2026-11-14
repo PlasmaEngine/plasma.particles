@@ -1,39 +1,30 @@
 #pragma once
 
-#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+#include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
 // Pressure of the gas solver: Phi = p dt / rho in m^2/s, one float per interior cell (512 per pool slot, no apron), so
-// the projection is u -= grad Phi. Boundary rules, per neighbour of a cell:
-// - in the same brick or an allocated neighbour brick: its Phi;
-// - an unallocated brick (open air inside the domain): Dirichlet, Phi = 0;
-// - beyond an open domain face: Dirichlet, Phi = 0;
-// - beyond a closed domain face: Neumann, the neighbour does not take part (and the face between carries no flow).
+// the projection is u -= grad Phi. Which neighbours take part is in the face codes GasMGSetup writes every tick
+// (GPU_FLUID_CODE_*, GpuFluidMG.hlsli):
+// - FLUID: a fluid cell in the same brick or an allocated neighbour brick: its Phi;
+// - DIRICHLET: an unallocated brick (open air inside the domain) or beyond an open domain face: Phi = 0;
+// - WALL: beyond a closed domain face: Neumann, the face carries no flow;
+// - SOLID: either cell is inside a solid: Neumann, the face keeps the solid's velocity.
 
-/// Phi of the neighbour of cell `local` (0..7) of `slot` along `axis` on `side`. Returns false for a Neumann neighbour.
-bool GpuFluidNeighborPressure(RWStructuredBuffer<float> pressure, uint slot, int3 local, uint axis, int side, out float out_phi)
+/// Phi of the neighbour of cell `local` (0..7) of `slot` along `axis` on `side`, for a FLUID face.
+float GpuFluidNeighborPhi(RWStructuredBuffer<float> pressure, uint slot, int3 local, uint axis, int side)
 {
   int3 other = local;
   other[axis] += side;
 
-  out_phi = 0.0;
-
   if (other[axis] >= 0 && other[axis] < GPU_FLUID_BRICK_SIZE)
-  {
-    out_phi = pressure[slot * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
-    return true;
-  }
+    return pressure[slot * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
 
   int3 d = int3(0, 0, 0);
   d[axis] = side;
   const uint neighbor = GpuFluidNeighbor(slot, d);
-
-  if (neighbor == GPU_FLUID_NEIGHBOR_OUTSIDE)
-    return GpuFluidFaceOpen(axis, side); // open: Dirichlet 0, closed: Neumann
-
-  if (neighbor == GPU_FLUID_NEIGHBOR_UNALLOCATED)
-    return true; // open air
+  if (neighbor >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+    return 0.0; // not a FLUID face; kept for safety
 
   other[axis] -= side * GPU_FLUID_BRICK_SIZE;
-  out_phi = pressure[neighbor * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
-  return true;
+  return pressure[neighbor * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
 }

@@ -56,8 +56,12 @@ public:
   float m_fDissipation = 0.03f;                                       // [ property ] density, 1/s
   float m_fVelocityDissipation = 0.0f;                                // [ property ] 1/s
   float m_fDensityMax = 4.0f;                                         // [ property ] clamp and march majorant
-  plUInt32 m_uiPressureIterations = 40;                               // [ property ] red-black iterations per tick
+  plUInt32 m_uiPressureIterations = 40;                               // [ property ] red-black SOR iterations per tick (GpuFluid.Gas.PressureSolver 0)
+  plUInt32 m_uiPressureCycles = 0;                                    // [ property ] multigrid V-cycles per tick, 0: the quality's default
   float m_fEdgeFade = 0.75f;                                          // [ property ] metres before an open face over which gas fades
+  float m_fVorticity = 0.3f;                                          // [ property ] vorticity confinement epsilon (Medium and up)
+  float m_fWindInfluence = 1.0f;                                      // [ property ] how much of the world's wind the gas takes as its ambient velocity
+  bool m_bPhysicsBodies = true;                                       // [ property ] dynamic physics bodies in the box act as moving solids (their bounds)
 
   // The volume's own source.
   plEnum<plGpuFluidEmitterShape> m_EmitterShape;                      // [ property ]
@@ -111,6 +115,18 @@ public:
   /// Whether the volume was handed to the march in the last extraction.
   bool WasPublished() const { return m_bPublished; }
 
+  /// Test hook (N3): solve a manufactured Poisson problem every frame instead of simulating.
+  plGpuFluidPoissonTest m_DebugPoissonTest;
+
+  /// Solids handed to the solver in the last update, per tick (for tests and debugging).
+  plUInt32 GetLastSolidCount() const { return m_uiLastSolids; }
+
+  /// Ambient wind of the last update, m/s in the volume's space.
+  const plVec3& GetLastAmbientWind() const { return m_vLastWind; }
+
+  /// Multigrid V-cycles a tick runs at this quality when PressureCycles is 0.
+  static plUInt32 GetDefaultPressureCycles(plGpuFluidQuality::Enum quality);
+
 protected:
   void Update();
   void OnUpdateLocalBounds(plMsgUpdateLocalBounds& msg);
@@ -122,6 +138,10 @@ private:
 
   /// Advances the fixed-tick clock by the frame's time and describes the frame's solver work.
   void FillSimulation(plTime timeDiff, plGpuFluidGasSimulation& out_simulation);
+
+  /// The colliders (and dynamic physics bodies) overlapping the box, as shapes in voxels for every tick of the frame.
+  void GatherSolids(plTime timeDiff, plGpuFluidGasSimulation& inout_simulation);
+
   void ReleaseVolume();
 
   plGpuFluidGpuManager* m_pManager = nullptr;
@@ -137,4 +157,9 @@ private:
   /// The grid extents the owner's local bounds were last computed from; a change to Extents or VoxelSize refreshes them.
   plVec3 m_vBoundsExtents = plVec3::MakeZero();
   mutable bool m_bPublished = false;
+
+  /// Last frame's global transform of every collider and physics body seen, for their velocities.
+  plHashTable<plUInt64, plTransform> m_SolidTransforms;
+  plUInt32 m_uiLastSolids = 0;
+  plVec3 m_vLastWind = plVec3::MakeZero();
 };
