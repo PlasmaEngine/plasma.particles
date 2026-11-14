@@ -19,6 +19,16 @@ PL_BEGIN_STATIC_REFLECTED_ENUM(plGpuFluidDebugSource, 1)
   PL_ENUM_CONSTANT(plGpuFluidDebugSource::None),
   PL_ENUM_CONSTANT(plGpuFluidDebugSource::AnalyticSphere),
 PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plGpuFluidEmitterShape, 1)
+  PL_ENUM_CONSTANT(plGpuFluidEmitterShape::None),
+  PL_ENUM_CONSTANT(plGpuFluidEmitterShape::Sphere),
+  PL_ENUM_CONSTANT(plGpuFluidEmitterShape::Box),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_STATIC_REFLECTED_BITFLAGS(plGpuFluidFaces, 1)
+  PL_BITFLAGS_CONSTANTS(plGpuFluidFaces::NegX, plGpuFluidFaces::PosX, plGpuFluidFaces::NegY, plGpuFluidFaces::PosY, plGpuFluidFaces::NegZ, plGpuFluidFaces::PosZ)
+PL_END_STATIC_REFLECTED_BITFLAGS;
 // clang-format on
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_GpuFluid_GpuFluidDeclarations);

@@ -1,0 +1,45 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Alloc: clears every new brick, all 10 cubed texels of every atlas (a reused slot keeps whatever the last
+// brick left in it, and Metal does not zero private textures) plus its pressure and divergence. Velocity starts at the
+// ambient wind (zero in P1), scalars at 0. One 8 cubed group per active brick, indirect.
+
+RWTexture3D<float4> GpuFluidVelocity0;
+RWTexture3D<float4> GpuFluidVelocity1;
+RWTexture3D<float4> GpuFluidScalar0;
+RWTexture3D<float4> GpuFluidScalar1;
+RWTexture3D<float4> GpuFluidScratch;
+RWStructuredBuffer<float> GpuFluidPressure;
+RWStructuredBuffer<float> GpuFluidDivergence;
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const int3 base = GpuFluidSlotBase(slot);
+  const float4 zero = float4(0.0, 0.0, 0.0, 0.0);
+
+  for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+  {
+    const int3 texel = base + int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+    GpuFluidVelocity0[texel] = zero;
+    GpuFluidVelocity1[texel] = zero;
+    GpuFluidScalar0[texel] = zero;
+    GpuFluidScalar1[texel] = zero;
+    GpuFluidScratch[texel] = zero;
+  }
+
+  GpuFluidPressure[slot * GPU_FLUID_BRICK_CELLS + groupIndex] = 0.0;
+  GpuFluidDivergence[slot * GPU_FLUID_BRICK_CELLS + groupIndex] = 0.0;
+}

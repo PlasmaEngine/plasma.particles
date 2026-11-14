@@ -6,6 +6,7 @@
 #include <Foundation/Threading/Mutex.h>
 #include <Foundation/Types/SharedPtr.h>
 #include <Foundation/Types/UniquePtr.h>
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidGasSolver.h>
 #include <ParticlePlugin/GpuFluid/Gpu/GpuFluidLiquidSolver.h>
 #include <ParticlePlugin/GpuFluid/GpuFluidDeclarations.h>
 #include <RendererCore/Shader/ShaderResource.h>
@@ -31,6 +32,7 @@ struct plGpuFluidAnalyticSphere
 /// Everything a gas volume's GPU work needs for one frame, gathered on the update thread.
 struct plGpuFluidGasFrameInput
 {
+  /// None: the solver runs from m_Simulation. Otherwise the analytic source replaces it.
   plGpuFluidDebugSource::Enum m_Source = plGpuFluidDebugSource::None;
   plGpuFluidAnalyticSphere m_Sphere;
 
@@ -39,6 +41,8 @@ struct plGpuFluidGasFrameInput
 
   /// Smallest brick mean the brick table stores for a kept brick, in atlas density units. Zero would mark it empty.
   float m_fMeanFloor = 1e-4f;
+
+  plGpuFluidGasSimulation m_Simulation;
 };
 
 /// \brief Numbers the GPU counts for a gas volume, two to three frames late.
@@ -47,20 +51,37 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   /// Render frame (plRenderWorld::GetFrameCounter) the numbers were recorded in.
   plUInt64 m_uiFrame = 0;
 
-  plUInt32 m_uiRequestedBricks = 0; ///< bricks whose content asked for a slot
-  plUInt32 m_uiAllocatedBricks = 0; ///< of those, the ones that got one
-  plUInt32 m_uiDeniedBricks = 0;    ///< the ones that found the pool full
-  plUInt32 m_uiNaNCount = 0;        ///< texels that came out NaN or infinite and were zeroed
+  /// Solver ticks run in that frame (0 for the analytic source).
+  plUInt32 m_uiTicks = 0;
 
-  /// Allocated bricks span these, inclusive. Min > max on an axis when nothing is allocated.
+  plUInt32 m_uiRequestedBricks = 0; ///< bricks whose content asked for a slot (analytic source)
+  plUInt32 m_uiAllocatedBricks = 0; ///< bricks with content: kept by the analytic source, above the threshold for the solver
+  plUInt32 m_uiActiveBricks = 0;    ///< bricks the solver ran on
+  plUInt32 m_uiDeniedBricks = 0;    ///< the ones that found the pool full
+  plUInt32 m_uiNaNCount = 0;        ///< interior values that came out NaN or infinite, counted where they were zeroed
+  plUInt32 m_uiOverflowCount = 0;   ///< fixed-point stat contributions that were clamped, or sums that wrapped
+  plUInt32 m_uiSpeedClamped = 0;    ///< face velocities the solver clamped to 32 m/s, over the frame's ticks
+
+  /// Bricks with content span these, inclusive. Min > max on an axis when there are none.
   plVec3U32 m_vBoundsMinBrick = plVec3U32::MakeZero();
   plVec3U32 m_vBoundsMaxBrick = plVec3U32::MakeZero();
 
-  /// Sum of the interior density of the allocated bricks, density times voxels.
+  /// Sum of the interior density, density times voxels.
   float m_fMass = 0.0f;
 
-  /// Largest interior density.
+  /// Density-weighted centre of the content, as a fraction of the grid (0..1 per axis). Zero without mass.
+  plVec3 m_vCentroid = plVec3::MakeZero();
+
   float m_fMaxDensity = 0.0f;
+  float m_fMaxTemperature = 0.0f; ///< normalised
+  float m_fMaxSpeed = 0.0f;       ///< largest face velocity, m/s
+
+  /// |div u| of the frame's last tick before and after its projection, 1/s: the largest, and the mean over the active
+  /// cells.
+  float m_fMaxDivergenceBefore = 0.0f;
+  float m_fMaxDivergenceAfter = 0.0f;
+  float m_fMeanDivergenceBefore = 0.0f;
+  float m_fMeanDivergenceAfter = 0.0f;
 
   bool HasBounds() const { return m_uiAllocatedBricks > 0 && m_vBoundsMinBrick.x <= m_vBoundsMaxBrick.x; }
 };

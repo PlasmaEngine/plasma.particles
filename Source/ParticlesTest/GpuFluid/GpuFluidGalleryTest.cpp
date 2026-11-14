@@ -8,6 +8,8 @@
 #include <Foundation/IO/FileSystem/FileWriter.h>
 #include <Foundation/System/EnvironmentVariableUtils.h>
 #include <Foundation/Types/TagRegistry.h>
+#include <Foundation/Utilities/ConversionUtils.h>
+#include <Foundation/Utilities/Stats.h>
 #include <GameEngine/GameState/GameState.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
 #include <ParticlesTest/GpuFluid/GpuFluidGalleryTest.h>
@@ -15,14 +17,56 @@
 #include <RendererCore/Lights/SkyAtmosphereComponent.h>
 #include <RendererCore/Lights/SkyLightComponent.h>
 #include <RendererCore/Meshes/MeshComponent.h>
+#include <RendererCore/RenderWorld/RenderWorld.h>
 #include <RendererCore/Volumes/VDBVolumeComponent.h>
 #include <Texture/Image/ImageConversion.h>
 
 static plGameEngineTestGpuFluidGallery s_GameEngineTestGpuFluidGallery;
 
+// Size of the gallery's window, and so of every shot and video frame.
+#define PL_GPUFLUID_GALLERY_WIDTH 1280
+#define PL_GPUFLUID_GALLERY_HEIGHT 720
+
 namespace
 {
   const plVec3 s_vUp(0.0f, 0.0f, 1.0f);
+
+  // Smoke Column: a 4 x 4 x 8 m box at 6.25 cm voxels (8 x 8 x 16 = 1024 bricks, inside Medium's 1536), standing on the
+  // floor, 300 ticks (150 frames at the harness's 1/30 s, two ticks each).
+  const plVec3 s_vSmokeExtents(4.0f, 4.0f, 8.0f);
+  constexpr float s_fSmokeVoxel = 0.0625f;
+  constexpr plUInt32 s_uiSmokeBricks = 8 * 8 * 16;
+  constexpr plInt32 s_iSmokeFrames = 150;
+  constexpr plInt32 s_iSmokeVideoFrames = 300;
+
+  // Gas Safety (N12 stress): the source drives its faces at 48 m/s, above the 32 m/s clamp, for 90 frames; a NaN is
+  // injected on frames 45 to 47.
+  constexpr plInt32 s_iSafetyFrames = 90;
+  constexpr plInt32 s_iSafetyInjectFrame = 45;
+  constexpr float s_fSafetySourceSpeed = 48.0f;
+  const plVec3 s_vSmokeTarget(0.0f, 0.0f, 3.7f);
+  constexpr float s_fSmokeFovY = 50.0f;
+
+  /// The camera's slow arc around the column: 50 degrees over the clip, from the front-left to the front-right.
+  plVec3 SmokeOrbit(float t)
+  {
+    const plAngle angle = plAngle::MakeFromDegree(-115.0f + 50.0f * t);
+    return s_vSmokeTarget + plVec3(12.5f * plMath::Cos(angle), 12.5f * plMath::Sin(angle), -1.9f + 0.8f * t);
+  }
+
+  /// Sun for the smoke scenes: low and from the side, so the column's lit and shadowed halves read.
+  const plVec3 s_vSmokeToSun(-0.85f, -0.25f, 0.42f);
+
+  /// A look value of the smoke scenes, overridable for tuning runs as PL_GPUFLUID_TUNE_<NAME>=<value>.
+  float Tune(const char* szName, float fDefault)
+  {
+    plStringBuilder sVariable("PL_GPUFLUID_TUNE_", szName);
+    const plString sValue = plEnvironmentVariableUtils::GetValueString(sVariable, "");
+    double fValue = 0.0;
+    if (!sValue.IsEmpty() && plConversionUtils::StringToFloat(sValue, fValue).Succeeded())
+      return static_cast<float>(fValue);
+    return fDefault;
+  }
 
   /// Height of the spheres' centre: the 4 m boxes stand 0.2 m above the ground.
   constexpr float s_fSphereHeight = 2.2f;
@@ -165,6 +209,22 @@ void plGpuFluidGalleryApplication::Init_FileSystem_ConfigureDataDirs()
   {
     plFileSystem::AddDataDirectory(s_sPackageAssetsDirectory, "GpuFluidTest", "plasma.particles", plDataDirUsage::ReadOnly).AssertSuccess();
   }
+
+  // No pipeline prewarm manifest: it lives in the shader cache per project, and other test applications of the
+  // FluidGallery project (the liquid tests) record pipelines of shaders this one does not mount, which then fail to
+  // load here. Shaders load synchronously in tests anyway.
+  if (auto* pManifest = static_cast<plCVarBool*>(plCVar::FindCVarByName("Rendering.Pipelines.Manifest")))
+    *pManifest = false;
+
+  // 1280 x 720 instead of the project's 960 x 540: the per-run appdata folder (set up just before) is searched first
+  // for the window config, so this changes only this test application, not the shared FluidGallery project.
+  plFileWriter window;
+  if (window.Open(":appdata/RuntimeConfigs/Window.ddl").Succeeded())
+  {
+    const char* szWindow = "WindowDesc\n{\n\tstring %Title{\"GameEngineTest - GpuFluid Gallery\"}\n\tstring %Mode{\"Window\"}\n\tVec2u %Resolution{uint32{" PL_PP_STRINGIFY(PL_GPUFLUID_GALLERY_WIDTH) "," PL_PP_STRINGIFY(
+      PL_GPUFLUID_GALLERY_HEIGHT) "}}\n\tbool %ClipMouseCursor{false}\n\tbool %ShowMouseCursor{true}\n\tbool %SetForegroundOnInit{true}\n\tbool %CenterWindowOnDisplay{true}\n}\n";
+    window.WriteBytes(szWindow, plStringUtils::GetStringElementCount(szWindow)).IgnoreResult();
+  }
 }
 
 void plGpuFluidGalleryApplication::BeforeHighLevelSystemsShutdown()
@@ -227,6 +287,106 @@ void plGpuFluidGalleryApplication::AddSunAndSky(const plVec3& vToSun, float fLux
   plSkyAtmosphereComponent::CreateComponent(pSkyObject, pAtmosphere);
   plSkyLightComponent* pSkyLight = nullptr;
   plSkyLightComponent::CreateComponent(pSkyObject, pSkyLight);
+}
+
+void plGpuFluidGalleryApplication::SetupStage(plUInt32 uiSeed, const plVec3& vToSun, bool bProps)
+{
+  m_pWorld->Clear();
+  m_pWorld->GetRandomNumberGenerator().Initialize(uiSeed);
+  m_pWorld->GetClock().Reset(false);
+
+  // The camera's default lens is wide open, which blurs everything but the focus point.
+  SetCVarBool(s_szDepthOfFieldCVar, false);
+
+  AddSunAndSky(vToSun, 10.0f);
+
+  // A mid grey floor, and a 1 m checker of a darker grey around the origin: something for the eye to measure size and
+  // motion against, and an edge for every shadow to fall across.
+  const plColor floorLight(0.46f, 0.46f, 0.47f);
+  const plColor floorDark(0.27f, 0.27f, 0.28f);
+  AddBox("Ground", plVec3(0.0f, 0.0f, -0.1f), plVec3(2000.0f, 2000.0f, 0.2f), floorLight);
+
+  if (!bProps)
+    return;
+
+  constexpr plInt32 iCheckerHalf = 10;
+  for (plInt32 y = -iCheckerHalf; y < iCheckerHalf; ++y)
+  {
+    for (plInt32 x = -iCheckerHalf; x < iCheckerHalf; ++x)
+    {
+      if (((x + y) & 1) == 0)
+        continue;
+      AddBox("Tile", plVec3(x + 0.5f, y + 0.5f, 0.0025f), plVec3(1.0f, 1.0f, 0.005f), floorDark);
+    }
+  }
+
+  // Props for depth, all clear of the 4 x 4 m footprint the volumes stand on.
+  AddBox("Crate", plVec3(3.6f, 1.8f, 0.5f), plVec3(1.0f), plColor(0.62f, 0.60f, 0.56f));
+  AddBox("Crate Small", plVec3(3.4f, 3.1f, 0.3f), plVec3(0.6f), plColor(0.55f, 0.52f, 0.47f));
+  AddBox("Pillar", plVec3(-3.8f, 2.6f, 2.0f), plVec3(0.6f, 0.6f, 4.0f), plColor(0.70f, 0.70f, 0.72f));
+  AddBox("Slab", plVec3(-3.2f, -3.4f, 0.2f), plVec3(2.0f, 1.0f, 0.4f), plColor(0.50f, 0.50f, 0.52f));
+  AddBox("Wall", plVec3(0.0f, 7.5f, 1.5f), plVec3(12.0f, 0.4f, 3.0f), plColor(0.58f, 0.57f, 0.55f));
+}
+
+plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene()
+{
+  PL_LOCK(m_pWorld->GetWriteMarker());
+  SetupStage(0x47465032u, s_vSmokeToSun, true);
+
+  plGameObjectDesc desc;
+  desc.m_sName.Assign("SmokeColumn");
+  desc.m_bDynamic = true;
+  desc.m_LocalPosition = plVec3(0.0f, 0.0f, 0.5f * s_vSmokeExtents.z);
+  plGameObject* pObject = nullptr;
+  m_hSmokeObject = m_pWorld->CreateObject(desc, pObject);
+
+  plGpuFluidGasVolumeComponent* pGas = nullptr;
+  m_pWorld->GetOrCreateComponentManager<plGpuFluidGasVolumeComponentManager>()->CreateComponent(pObject, pGas);
+  pGas->m_vExtents = s_vSmokeExtents;
+  pGas->m_fVoxelSize = s_fSmokeVoxel;
+  pGas->m_uiMaxBricks = 1536;
+  pGas->m_DebugSource = plGpuFluidDebugSource::None;
+  pGas->m_OpenFaces = plGpuFluidFaces::Default; // open but the floor
+
+  // Warm smoke from a sphere just above the floor, a little off the box's centre so the plume does not start
+  // symmetric. The values below were tuned by eye on the stills and the video; every one can be overridden for a
+  // tuning run as PL_GPUFLUID_TUNE_<NAME>=<value> without rebuilding.
+  pGas->m_fBuoyancy = Tune("BUOYANCY", 6.0f);
+  pGas->m_fDensityWeight = Tune("DENSITYWEIGHT", 0.1f);
+  pGas->m_fCooling = Tune("COOLING", 0.5f);
+  pGas->m_fDissipation = Tune("DISSIPATION", 0.03f);
+  pGas->m_fVelocityDissipation = Tune("VELOCITYDISSIPATION", 0.0f);
+  pGas->m_uiPressureIterations = static_cast<plUInt32>(Tune("ITERATIONS", 40.0f));
+  pGas->m_fEdgeFade = Tune("EDGEFADE", 0.9f);
+
+  pGas->m_EmitterShape = plGpuFluidEmitterShape::Sphere;
+  pGas->m_fEmitterRadius = Tune("RADIUS", 0.5f);
+  pGas->m_fEmitterSoftness = Tune("SOFTNESS", 0.2f);
+  pGas->m_vEmitterOffset = plVec3(Tune("EMITX", 0.37f), Tune("EMITY", 0.21f), -0.5f * s_vSmokeExtents.z + 0.1f + pGas->m_fEmitterRadius);
+  pGas->m_fEmissionRate = Tune("RATE", 5.0f);
+  pGas->m_fEmitterTemperature = 1.0f;
+  pGas->m_vEmitterVelocity = plVec3(0.0f, 0.0f, Tune("VELOCITY", 2.0f));
+  pGas->m_fEmitterNoise = Tune("NOISE", 0.75f);
+  pGas->m_fEmitterNoiseScale = Tune("NOISESCALE", 0.3f);
+
+  pGas->m_fDensityScale = Tune("DENSITYSCALE", 12.0f);
+  const float fAlbedo = Tune("ALBEDO", 0.95f);
+  pGas->m_Albedo = plColor(fAlbedo, fAlbedo, fAlbedo * 1.02f);
+  pGas->m_fAnisotropy = Tune("ANISOTROPY", 0.4f);
+  pGas->m_fEmissionScale = 0.0f;
+  pGas->m_RenderMode = plVDBVolumeRenderMode::RayMarch;
+  pGas->ResetClock();
+
+  return PL_SUCCESS;
+}
+
+plGpuFluidGasVolumeComponent* plGpuFluidGalleryApplication::GetSmokeVolume()
+{
+  plGameObject* pObject = nullptr;
+  plGpuFluidGasVolumeComponent* pGas = nullptr;
+  if (m_pWorld->TryGetObject(m_hSmokeObject, pObject))
+    pObject->TryGetComponentOfBaseType(pGas);
+  return pGas;
 }
 
 plVDBVolumeResourceHandle plGpuFluidGalleryApplication::CreateBakedSphere()
@@ -401,15 +561,10 @@ plResult plGpuFluidGalleryApplication::SetupHandoffScene(float fSeparation, bool
     m_hBakedSphere = CreateBakedSphere();
 
   PL_LOCK(m_pWorld->GetWriteMarker());
-  m_pWorld->Clear();
-  m_pWorld->GetRandomNumberGenerator().Initialize(0x47465031u);
-  m_pWorld->GetClock().Reset(false);
 
-  // The camera's default lens is wide open, which blurs everything but the focus point.
-  SetCVarBool(s_szDepthOfFieldCVar, false);
-
-  AddSunAndSky(plVec3(-0.45f, -0.6f, 0.65f), 10.0f);
-  AddBox("Ground", plVec3(0.0f, 0.0f, -0.1f), plVec3(2000.0f, 2000.0f, 0.2f), plColor(0.32f, 0.30f, 0.28f));
+  // N0 compares single pixels against the noise of two captures, so its stills keep a plain floor: the checker's edges
+  // flicker under TAA jitter by more than the hand-off may differ. The video gets the full stage.
+  SetupStage(0x47465031u, plVec3(-0.45f, -0.6f, 0.65f), bPulse);
 
   // Shared look: both volumes are lit and composited by the same march with the same parameters.
   const float fDensityScale = 4.0f;
@@ -493,11 +648,26 @@ plGpuFluidGasVolumeComponent* plGpuFluidGalleryApplication::GetGpuVolume()
   return pGas;
 }
 
-void plGpuFluidGalleryApplication::SetCamera(const plVec3& vPosition, const plVec3& vTarget)
+void plGpuFluidGalleryApplication::SetCamera(const plVec3& vPosition, const plVec3& vTarget, float fFovY)
 {
   if (plGameState* pGameState = plDynamicCast<plGameState*>(GetActiveGameState()))
   {
-    pGameState->GetMainCamera()->LookAt(vPosition, vTarget, s_vUp);
+    plCamera* pCamera = pGameState->GetMainCamera();
+
+    // The lens the game state set up, so a scene without its own field of view gets it back.
+    if (!m_bCameraDefaultsKnown)
+    {
+      m_DefaultCameraMode = pCamera->GetCameraMode();
+      m_fDefaultFov = pCamera->GetFovOrDim();
+      m_bCameraDefaultsKnown = true;
+    }
+
+    if (fFovY > 0.0f)
+      pCamera->SetCameraMode(plCameraMode::PerspectiveFixedFovY, fFovY, pCamera->GetNearPlane(), pCamera->GetFarPlane());
+    else
+      pCamera->SetCameraMode(m_DefaultCameraMode, m_fDefaultFov, pCamera->GetNearPlane(), pCamera->GetFarPlane());
+
+    pCamera->LookAt(vPosition, vTarget, s_vUp);
   }
 }
 
@@ -525,6 +695,9 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
 {
   AddSubTest("N0 Handoff", SubTests::Handoff);
   AddSubTest("Handoff Sphere Video", SubTests::HandoffSphereVideo);
+  AddSubTest("Smoke Column", SubTests::SmokeColumn);
+  AddSubTest("Smoke Column Video", SubTests::SmokeColumnVideo);
+  AddSubTest("Gas Safety", SubTests::GasSafety);
 }
 
 plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -555,6 +728,42 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
       m_pOwnApplication->SetEmissive(true);
       return PL_SUCCESS;
     }
+
+    case SubTests::SmokeColumn:
+    case SubTests::SmokeColumnVideo:
+    case SubTests::GasSafety:
+    {
+      m_GasSamples.Clear();
+      m_uiFirstRenderFrame = plRenderWorld::GetFrameCounter();
+      m_uiInjectRenderFrame = 0;
+
+      // The march's lighting for the smoke scenes, all put back after the sub-test:
+      // - self-shadow taps read the full-resolution atlas (lod 0) instead of the per-brick means, and twelve of them;
+      // - no ambient occlusion: the march samples it from the per-brick means without filtering, which draws every
+      //   brick face that lines up with the view as a seam through the smoke; the sky term is halved instead, so the
+      //   shadowed side of the plume still reads darker than the lit one.
+      SetCVarForSubTest("Rendering.VDBVolumes.RayMarchShadowSteps", static_cast<plInt32>(Tune("SHADOWSTEPS", 12.0f)));
+      SetCVarForSubTest("Rendering.VDBVolumes.SelfShadowLod", Tune("SHADOWLOD", 0.0f));
+      SetCVarForSubTest("Rendering.VDBVolumes.AmbientOcclusion", Tune("AO", 0.0f));
+      SetCVarForSubTest("Rendering.VDBVolumes.AmbientStrength", Tune("AMBIENT", 0.5f));
+      if (const float fStrength = Tune("SHADOWSTRENGTH", -1.0f); fStrength >= 0.0f)
+        SetCVarForSubTest("Rendering.VDBVolumes.SelfShadowStrength", fStrength);
+      if (const float fBlend = Tune("TAABLEND", -1.0f); fBlend >= 0.0f)
+        SetCVarForSubTest("Rendering.TAA.BaseBlend", fBlend);
+
+      PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSmokeColumnScene());
+      m_pOwnApplication->SetCamera(SmokeOrbit(0.5f), s_vSmokeTarget, s_fSmokeFovY);
+
+      if (iIdentifier == SubTests::GasSafety)
+      {
+        PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
+        plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+        if (pGas == nullptr)
+          return PL_FAILURE;
+        pGas->m_vEmitterVelocity = plVec3(0.0f, 0.0f, s_fSafetySourceSpeed);
+      }
+      return PL_SUCCESS;
+    }
   }
 
   return PL_FAILURE;
@@ -569,7 +778,63 @@ plResult plGameEngineTestGpuFluidGallery::DeInitializeSubTest(plInt32 iIdentifie
     m_bRestoreDepthOfField = false;
   }
 
+  // Last set, first restored, so a CVar set twice ends at its original value.
+  for (plUInt32 i = m_RestoreCVarNames.GetCount(); i-- > 0;)
+  {
+    plCVar* pCVar = plCVar::FindCVarByName(m_RestoreCVarNames[i]);
+    const plVariant& value = m_RestoreCVarValues[i];
+    if (pCVar == nullptr)
+      continue;
+
+    switch (pCVar->GetType())
+    {
+      case plCVarType::Bool:
+        *static_cast<plCVarBool*>(pCVar) = value.Get<bool>();
+        break;
+      case plCVarType::Int:
+        *static_cast<plCVarInt*>(pCVar) = value.Get<plInt32>();
+        break;
+      case plCVarType::Float:
+        *static_cast<plCVarFloat*>(pCVar) = value.Get<float>();
+        break;
+      default:
+        break;
+    }
+  }
+  m_RestoreCVarNames.Clear();
+  m_RestoreCVarValues.Clear();
+
   return SUPER::DeInitializeSubTest(iIdentifier);
+}
+
+void plGameEngineTestGpuFluidGallery::SetCVarForSubTest(const char* szName, const plVariant& value)
+{
+  plCVar* pCVar = plCVar::FindCVarByName(szName);
+  if (!PL_TEST_BOOL_MSG(pCVar != nullptr, "CVar '%s' not found", szName))
+    return;
+
+  plVariant previous;
+  switch (pCVar->GetType())
+  {
+    case plCVarType::Bool:
+      previous = static_cast<plCVarBool*>(pCVar)->GetValue();
+      *static_cast<plCVarBool*>(pCVar) = value.ConvertTo<bool>();
+      break;
+    case plCVarType::Int:
+      previous = static_cast<plCVarInt*>(pCVar)->GetValue();
+      *static_cast<plCVarInt*>(pCVar) = value.ConvertTo<plInt32>();
+      break;
+    case plCVarType::Float:
+      previous = static_cast<plCVarFloat*>(pCVar)->GetValue();
+      *static_cast<plCVarFloat*>(pCVar) = value.ConvertTo<float>();
+      break;
+    default:
+      PL_TEST_FAILURE("Unsupported CVar type", "%s", szName);
+      return;
+  }
+
+  m_RestoreCVarNames.PushBack(szName);
+  m_RestoreCVarValues.PushBack(previous);
 }
 
 plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, plUInt32 uiInvocationCount)
@@ -582,6 +847,12 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
       return RunHandoff();
     case SubTests::HandoffSphereVideo:
       return RunHandoffSphereVideo();
+    case SubTests::SmokeColumn:
+      return RunSmokeColumn(false);
+    case SubTests::SmokeColumnVideo:
+      return RunSmokeColumn(true);
+    case SubTests::GasSafety:
+      return RunGasSafety();
   }
 
   return plTestAppRun::Quit;
@@ -898,4 +1169,329 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunHandoffSphereVideo()
   m_pOwnApplication->SetCamera(Orbit(static_cast<float>(m_iPhaseFrame) / static_cast<float>(s_uiVideoFrames - 1)), vTarget);
   ++m_iPhaseFrame;
   return plTestAppRun::Continue;
+}
+
+//////////////////////////////////////////////////////////////////////////
+// P1: Smoke Column
+
+void plGameEngineTestGpuFluidGallery::CollectGasSample()
+{
+  plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+  plGpuFluidGasStats stats;
+  if (pGas == nullptr || !pGas->GetStats(stats) || stats.m_uiTicks == 0)
+    return;
+
+  if (!m_GasSamples.IsEmpty() && m_GasSamples.PeekBack().m_uiFrame == stats.m_uiFrame)
+    return;
+
+  // Every frame runs two ticks of 1/60 s under the harness's fixed 1/30 s step, the first one included.
+  const plUInt64 uiFrames = stats.m_uiFrame >= m_uiFirstRenderFrame ? stats.m_uiFrame - m_uiFirstRenderFrame + 1 : 0;
+
+  GasSample& sample = m_GasSamples.ExpandAndGetRef();
+  sample.m_fSeconds = static_cast<float>(uiFrames) * (2.0f / 60.0f);
+  sample.m_uiFrame = stats.m_uiFrame;
+  sample.m_fMass = stats.m_fMass;
+  sample.m_fCentroidZ = stats.m_vCentroid.z * pGas->GetGridExtents().z;
+  sample.m_fMaxDensity = stats.m_fMaxDensity;
+  sample.m_fMaxSpeed = stats.m_fMaxSpeed;
+  sample.m_fDivBefore = stats.m_fMaxDivergenceBefore;
+  sample.m_fDivAfter = stats.m_fMaxDivergenceAfter;
+  sample.m_fMeanDivBefore = stats.m_fMeanDivergenceBefore;
+  sample.m_fMeanDivAfter = stats.m_fMeanDivergenceAfter;
+  sample.m_uiNaN = stats.m_uiNaNCount;
+  sample.m_uiOverflow = stats.m_uiOverflowCount;
+  sample.m_uiSpeedClamped = stats.m_uiSpeedClamped;
+  sample.m_uiContentBricks = stats.m_uiAllocatedBricks;
+  sample.m_uiActiveBricks = stats.m_uiActiveBricks;
+}
+
+plTestAppRun plGameEngineTestGpuFluidGallery::RunSmokeColumn(bool bVideo)
+{
+  if (bVideo && plEnvironmentVariableUtils::GetValueInt("PL_GPUFLUID_VIDEO", 0) != 1)
+  {
+    plTestFramework::Output(plTestOutput::Details, "Skipped: set PL_GPUFLUID_VIDEO=1 to record the frames.");
+    return plTestAppRun::Quit;
+  }
+
+  // PL_GPUFLUID_TUNE_FRAMES lengthens the checked run for tuning (the checks only look at its first five seconds).
+  const plInt32 iFrames = bVideo ? s_iSmokeVideoFrames : plMath::Max(s_iSmokeFrames, static_cast<plInt32>(Tune("FRAMES", static_cast<float>(s_iSmokeFrames))));
+  // The video's first frame is the fresh-resource frame, whose screenshot is still black: it runs but is not saved, so
+  // the clip is frames 1 to iFrames.
+  const plInt32 iVideoFrame = m_iFrame - 1;
+  if (bVideo)
+    m_pOwnApplication->SetCamera(SmokeOrbit(plMath::Max(0.0f, static_cast<float>(iVideoFrame) / static_cast<float>(iFrames - 1))), s_vSmokeTarget, s_fSmokeFovY);
+
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetReadMarker());
+
+    // N12: the first frame only creates the GPU resources and allocates the grid; nothing may reach the march.
+    if (m_iFrame == 0)
+    {
+      if (plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume())
+        PL_TEST_BOOL_MSG(!pGas->WasPublished(), "The smoke volume was published on its fresh-resource frame");
+    }
+
+    CollectGasSample();
+  }
+
+  if (bVideo && iVideoFrame >= 0)
+  {
+    plStringBuilder sName;
+    sName.SetFormat("SmokeColumn/frame_{}", plArgU(static_cast<plUInt32>(iVideoFrame), 5, true));
+    PL_TEST_BOOL(m_pOwnApplication->SaveShot(sName).Succeeded());
+
+    if (iVideoFrame == 0)
+    {
+      plFileWriter title;
+      if (title.Open(":imgout/GpuFluidGallery/SmokeColumn/title.txt").Succeeded())
+      {
+        const char* szTitle = "P1 Smoke Column: GPU gas solver, 4 x 4 x 8 m at 6.25 cm (1024 bricks), 60 Hz ticks, VDB march with self-shadowing\n";
+        title.WriteBytes(szTitle, plStringUtils::GetStringElementCount(szTitle)).IgnoreResult();
+      }
+    }
+  }
+  else if (!bVideo && (m_iFrame == 30 || m_iFrame == 60 || m_iFrame == 90 || m_iFrame == 120 || m_iFrame == 149 || m_iFrame == 210 || m_iFrame == iFrames - 1))
+  {
+    plStringBuilder sName;
+    sName.SetFormat("SmokeColumn_f{}", plArgU(static_cast<plUInt32>(m_iFrame), 3, true));
+    PL_TEST_BOOL(m_pOwnApplication->SaveShot(sName).Succeeded());
+  }
+
+  if (m_iFrame + 1 < iFrames + (bVideo ? 1 : 0))
+    return plTestAppRun::Continue;
+
+  if (bVideo)
+  {
+    plUInt32 uiNaN = 0;
+    for (const GasSample& sample : m_GasSamples)
+      uiNaN = plMath::Max(uiNaN, sample.m_uiNaN);
+    plTestFramework::Output(plTestOutput::Message, "Smoke video: %u frames, %u readbacks, largest NaN count %u", iFrames, m_GasSamples.GetCount(), uiNaN);
+    PL_TEST_INT(uiNaN, 0);
+    PL_TEST_BOOL(m_GasSamples.GetCount() > static_cast<plUInt32>(iFrames / 2));
+  }
+  else
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetReadMarker());
+    EvaluateSmokeColumn();
+  }
+
+  return plTestAppRun::Quit;
+}
+
+void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
+{
+  const plDynamicArray<GasSample>& samples = m_GasSamples;
+
+  WriteGasCsv(samples, ":imgout/GpuFluidGallery/SmokeColumn.csv");
+
+  if (!PL_TEST_BOOL_MSG(samples.GetCount() >= static_cast<plUInt32>(s_iSmokeFrames / 2), "Only %u stats readbacks in %d frames", samples.GetCount(), s_iSmokeFrames))
+    return;
+
+  // N12 and the grid: no NaN and no fixed-point overflow ever, every brick of the box simulated, density within its
+  // clamp. (Gas Safety shows that both counters do count.)
+  plUInt32 uiNaN = 0;
+  plUInt32 uiOverflow = 0;
+  float fMaxDensity = 0.0f;
+  for (const GasSample& s : samples)
+  {
+    uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
+    uiOverflow = plMath::Max(uiOverflow, s.m_uiOverflow);
+    fMaxDensity = plMath::Max(fMaxDensity, s.m_fMaxDensity);
+    PL_TEST_INT(s.m_uiActiveBricks, s_uiSmokeBricks);
+  }
+  PL_TEST_INT(uiNaN, 0);
+  PL_TEST_INT(uiOverflow, 0);
+
+  plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+  const float fDensityMax = pGas != nullptr ? pGas->m_fDensityMax : 4.0f;
+  PL_TEST_BOOL_MSG(fMaxDensity <= fDensityMax * 1.001f, "Density %.3f above its clamp %.3f", fMaxDensity, fDensityMax);
+  PL_TEST_BOOL_MSG(fMaxDensity > 0.1f, "The source added almost nothing (peak density %.4f)", fMaxDensity);
+
+  auto SampleAt = [&](float fSeconds) -> const GasSample*
+  {
+    for (const GasSample& s : samples)
+    {
+      if (s.m_fSeconds >= fSeconds)
+        return &s;
+    }
+    return nullptr;
+  };
+
+  // Mass grows while the source runs: every half second over the first four.
+  {
+    const GasSample* pPrevious = SampleAt(0.5f);
+    for (float t = 1.0f; t <= 4.0f + 1e-3f; t += 0.5f)
+    {
+      const GasSample* pSample = SampleAt(t);
+      if (!PL_TEST_BOOL_MSG(pPrevious != nullptr && pSample != nullptr, "No readback near %.1f s", t))
+        break;
+      PL_TEST_BOOL_MSG(pSample->m_fMass > pPrevious->m_fMass, "Mass fell from %.1f (%.2f s) to %.1f (%.2f s) while emitting", pPrevious->m_fMass, pPrevious->m_fSeconds, pSample->m_fMass, pSample->m_fSeconds);
+      pPrevious = pSample;
+    }
+  }
+
+  // The plume rises: its centroid goes up monotonically over the first two seconds (every quarter second).
+  {
+    plStringBuilder sRise;
+    const GasSample* pPrevious = SampleAt(0.25f);
+    for (float t = 0.5f; t <= 2.0f + 1e-3f; t += 0.25f)
+    {
+      const GasSample* pSample = SampleAt(t);
+      if (!PL_TEST_BOOL_MSG(pPrevious != nullptr && pSample != nullptr, "No readback near %.2f s", t))
+        break;
+      sRise.AppendFormat(" {}:{}", plArgF(pSample->m_fSeconds, 2), plArgF(pSample->m_fCentroidZ, 3));
+      PL_TEST_BOOL_MSG(pSample->m_fCentroidZ > pPrevious->m_fCentroidZ, "Centroid fell from %.3f m (%.2f s) to %.3f m (%.2f s)", pPrevious->m_fCentroidZ, pPrevious->m_fSeconds, pSample->m_fCentroidZ, pSample->m_fSeconds);
+      pPrevious = pSample;
+    }
+    plTestFramework::Output(plTestOutput::Message, "Smoke centroid height (s:m):%s", sRise.GetData());
+  }
+
+  // The projection removes at least 90% of the largest divergence, on every readback after the first half second.
+  {
+    float fWorstRatio = plMath::MaxValue<float>();
+    float fWorstBefore = 0.0f;
+    float fWorstAfter = 0.0f;
+    plDynamicArray<float> ratios;
+    for (const GasSample& s : samples)
+    {
+      if (s.m_fSeconds < 0.5f)
+        continue;
+      const float fRatio = s.m_fDivBefore / plMath::Max(s.m_fDivAfter, 1e-12f);
+      ratios.PushBack(fRatio);
+      if (fRatio < fWorstRatio)
+      {
+        fWorstRatio = fRatio;
+        fWorstBefore = s.m_fDivBefore;
+        fWorstAfter = s.m_fDivAfter;
+      }
+    }
+
+    if (PL_TEST_BOOL(!ratios.IsEmpty()))
+    {
+      ratios.Sort();
+      const GasSample& last = samples.PeekBack();
+      plTestFramework::Output(plTestOutput::Message, "Smoke divergence: max |div| before / after projection, worst %.1fx (%.3f -> %.4f 1/s), median %.1fx; last readback max %.3f -> %.4f, mean %.4f -> %.5f 1/s",
+        fWorstRatio, fWorstBefore, fWorstAfter, ratios[ratios.GetCount() / 2], last.m_fDivBefore, last.m_fDivAfter, last.m_fMeanDivBefore, last.m_fMeanDivAfter);
+      PL_TEST_BOOL_MSG(fWorstRatio >= 10.0f, "The projection cut the largest divergence only %.1fx (limit 10x)", fWorstRatio);
+    }
+  }
+
+  const GasSample& last = samples.PeekBack();
+  plTestFramework::Output(plTestOutput::Message, "Smoke end (%.2f s): mass %.1f, centroid %.2f m, peak density %.3f, peak speed %.2f m/s, %u of %u bricks with content, NaN %u",
+    last.m_fSeconds, last.m_fMass, last.m_fCentroidZ, last.m_fMaxDensity, last.m_fMaxSpeed, last.m_uiContentBricks, last.m_uiActiveBricks, uiNaN);
+}
+
+void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
+{
+  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped\n");
+  for (const GasSample& s : samples)
+  {
+    sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
+    sCsv.AppendFormat("{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped);
+  }
+
+  plFileWriter csv;
+  if (csv.Open(sPath).Succeeded())
+    csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
+}
+
+//////////////////////////////////////////////////////////////////////////
+// P1: Gas Safety (N12)
+//
+// The guards must be seen to work, not only to stay quiet:
+// - stress: the source drives its faces at 48 m/s, so the 32 m/s clamp fires every tick; the clamp counter must count,
+//   and no NaN and no fixed-point overflow may follow, with every speed the readback sees finite;
+// - injection: GpuFluid.Debug.InjectNaN writes a NaN into the density on frames 45 to 47; the NaN count must go above
+//   0 in the readbacks of those frames, and back to 0 a few frames later, the solver having zeroed it.
+// The timing of the gas is GpuFluid Tier Timing's.
+
+plTestAppRun plGameEngineTestGpuFluidGallery::RunGasSafety()
+{
+  // Three frames in a row, so a readback the ring has to skip cannot hide the injection. The CVar turns itself off.
+  if (m_iFrame >= s_iSafetyInjectFrame && m_iFrame < s_iSafetyInjectFrame + 3)
+  {
+    SetCVarBool("GpuFluid.Debug.InjectNaN", true);
+    if (m_iFrame == s_iSafetyInjectFrame)
+      m_uiInjectRenderFrame = plRenderWorld::GetFrameCounter();
+  }
+
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetReadMarker());
+    CollectGasSample();
+  }
+
+  if (m_iFrame + 1 < s_iSafetyFrames)
+    return plTestAppRun::Continue;
+
+  const plDynamicArray<GasSample>& samples = m_GasSamples;
+  WriteGasCsv(samples, ":imgout/GpuFluidGallery/GasSafety.csv");
+
+  if (!PL_TEST_BOOL_MSG(samples.GetCount() >= static_cast<plUInt32>(s_iSafetyFrames / 2), "Only %u stats readbacks in %d frames", samples.GetCount(), s_iSafetyFrames))
+    return plTestAppRun::Quit;
+
+  // The injecting ticks run in the render frames of the three updates that consumed the CVar, or one later: two frames
+  // of slack after the last. From eight frames after the first on, the field must be clean again.
+  const plUInt64 uiInjectFirst = m_uiInjectRenderFrame;
+  const plUInt64 uiInjectLast = m_uiInjectRenderFrame + 4;
+  const plUInt64 uiCleanFrom = m_uiInjectRenderFrame + 10;
+
+  plUInt32 uiNaNBefore = 0;
+  plUInt32 uiNaNInjected = 0;
+  plUInt32 uiNaNAfter = 0;
+  plUInt32 uiCleanReadbacks = 0;
+  plUInt32 uiOverflow = 0;
+  plUInt32 uiClampedReadbacks = 0;
+  plUInt32 uiMaxClamped = 0;
+  float fMaxSpeed = 0.0f;
+  bool bFiniteSpeed = true;
+
+  for (const GasSample& s : samples)
+  {
+    uiOverflow = plMath::Max(uiOverflow, s.m_uiOverflow);
+    uiMaxClamped = plMath::Max(uiMaxClamped, s.m_uiSpeedClamped);
+    uiClampedReadbacks += s.m_uiSpeedClamped > 0 ? 1 : 0;
+    bFiniteSpeed = bFiniteSpeed && plMath::IsFinite(s.m_fMaxSpeed);
+    fMaxSpeed = plMath::Max(fMaxSpeed, s.m_fMaxSpeed);
+
+    if (s.m_uiFrame < uiInjectFirst)
+      uiNaNBefore = plMath::Max(uiNaNBefore, s.m_uiNaN);
+    else if (s.m_uiFrame <= uiInjectLast)
+      uiNaNInjected = plMath::Max(uiNaNInjected, s.m_uiNaN);
+    else if (s.m_uiFrame >= uiCleanFrom)
+    {
+      uiNaNAfter = plMath::Max(uiNaNAfter, s.m_uiNaN);
+      ++uiCleanReadbacks;
+    }
+
+    PL_TEST_INT(s.m_uiActiveBricks, s_uiSmokeBricks);
+  }
+
+  plTestFramework::Output(plTestOutput::Message,
+    "Gas safety: %u readbacks; source at %.0f m/s: clamp fired on %u readbacks (up to %u faces a frame), largest face speed after the projection %.2f m/s, overflow %u; "
+    "NaN before the injection %u, at it %u (render frame %llu), after it %u over %u readbacks",
+    samples.GetCount(), s_fSafetySourceSpeed, uiClampedReadbacks, uiMaxClamped, fMaxSpeed, uiOverflow, uiNaNBefore, uiNaNInjected,
+    static_cast<unsigned long long>(m_uiInjectRenderFrame), uiNaNAfter, uiCleanReadbacks);
+
+  // The stress itself.
+  PL_TEST_BOOL_MSG(uiClampedReadbacks > 0, "The source at %.0f m/s never reached the 32 m/s clamp", s_fSafetySourceSpeed);
+  PL_TEST_INT(uiOverflow, 0);
+  PL_TEST_INT(uiNaNBefore, 0);
+  PL_TEST_BOOL_MSG(bFiniteSpeed, "A readback's largest speed is not finite");
+
+  // The injection is seen, and cleaned up.
+  PL_TEST_BOOL_MSG(m_uiInjectRenderFrame > 0, "The NaN was never injected");
+  PL_TEST_BOOL_MSG(uiNaNInjected > 0, "The injected NaN was not counted");
+  PL_TEST_BOOL_MSG(uiCleanReadbacks > 0, "No readback after the injection");
+  PL_TEST_INT(uiNaNAfter, 0);
+
+  return plTestAppRun::Quit;
 }

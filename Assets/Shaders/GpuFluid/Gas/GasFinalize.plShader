@@ -1,0 +1,164 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Finalize, once per frame after the last tick. One 8 cubed group per active brick (indirect).
+//
+// - NaN guard: every texel of the current scalars and velocity (apron included) that is NaN or infinite is zeroed;
+//   interior ones are counted. GasForces and GasDivergence count and zero what each tick produces; this one catches
+//   what the projection's last kernels could still write.
+// - Overflow: a density beyond the fixed-point range (64), a clamped |div| contribution, or a global sum that wraps
+//   adds to GPU_FLUID_STAT_OVERFLOW.
+// - Per brick: peak density, temperature and face speed, mean density.
+// - Brick table: rgb = atlas brick / 255, a = max(mean, floor) when the peak is above the allocation threshold, else 0,
+//   so the march skips the brick.
+// - Stats: bounds of the bricks with content, mass, density-weighted centroid, maxima, and the largest and summed |div u|
+//   after the projection (the "after" half of the projection check), all integer atomics or float maxima as uint.
+//
+// Params: 0 x allocation threshold, y brick mean floor
+
+RWTexture3D<float4> GpuFluidScalarTarget;
+RWTexture3D<float4> GpuFluidVelocityTarget;
+RWTexture3D<float4> GpuFluidIndirectionOutput;
+RWByteAddressBuffer GpuFluidStats;
+
+groupshared uint gs_uiPeakDensity;
+groupshared uint gs_uiPeakTemperature;
+groupshared uint gs_uiPeakSpeed;
+groupshared uint gs_uiDensitySum; // fixed point GPU_FLUID_MEAN_SCALE
+groupshared uint gs_uiCentroid[3]; // fixed point GPU_FLUID_MASS_SCALE
+groupshared uint gs_uiNaN;
+groupshared uint gs_uiMaxDivergence;
+groupshared uint gs_uiSumDivergence;
+groupshared uint gs_uiOverflow;
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
+  const float4 rules = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+
+  if (groupIndex == 0)
+  {
+    gs_uiPeakDensity = 0;
+    gs_uiPeakTemperature = 0;
+    gs_uiPeakSpeed = 0;
+    gs_uiDensitySum = 0;
+    gs_uiCentroid[0] = 0;
+    gs_uiCentroid[1] = 0;
+    gs_uiCentroid[2] = 0;
+    gs_uiNaN = 0;
+    gs_uiMaxDivergence = 0;
+    gs_uiSumDivergence = 0;
+    gs_uiOverflow = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint3 brick = GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]);
+  const int3 base = GpuFluidSlotBase(slot);
+
+  // NaN guard over all stored texels.
+  for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+  {
+    const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+    const bool bInterior = all(stored >= GPU_FLUID_BRICK_APRON) && all(stored < GPU_FLUID_BRICK_APRON + GPU_FLUID_BRICK_SIZE);
+
+    if (!GpuFluidIsFinite(GpuFluidScalarTarget[base + stored]))
+    {
+      GpuFluidScalarTarget[base + stored] = float4(0.0, 0.0, 0.0, 0.0);
+      if (bInterior)
+        InterlockedAdd(gs_uiNaN, 1u);
+    }
+
+    if (!GpuFluidIsFinite(GpuFluidVelocityTarget[base + stored]))
+    {
+      GpuFluidVelocityTarget[base + stored] = float4(0.0, 0.0, 0.0, 0.0);
+      if (bInterior)
+        InterlockedAdd(gs_uiNaN, 1u);
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  // This thread's interior cell.
+  {
+    const int3 local = int3(groupThreadId);
+    const int3 texel = base + local + GPU_FLUID_BRICK_APRON;
+    const float4 s = GpuFluidScalarTarget[texel];
+    const float3 minus = GpuFluidVelocityTarget[texel].xyz;
+    const float plusX = GpuFluidVelocityTarget[texel + int3(1, 0, 0)].x;
+    const float plusY = GpuFluidVelocityTarget[texel + int3(0, 1, 0)].y;
+    const float plusZ = GpuFluidVelocityTarget[texel + int3(0, 0, 1)].z;
+
+    const float density = max(s.r, 0.0);
+    InterlockedMax(gs_uiPeakDensity, asuint(density));
+    InterlockedMax(gs_uiPeakTemperature, asuint(max(s.g, 0.0)));
+    InterlockedMax(gs_uiPeakSpeed, asuint(max(max(abs(minus.x), abs(minus.y)), abs(minus.z))));
+    if (density > 64.0)
+      InterlockedAdd(gs_uiOverflow, 1u); // beyond the fixed-point range of the sums below
+    InterlockedAdd(gs_uiDensitySum, (uint)round(min(density, 64.0) * GPU_FLUID_MEAN_SCALE));
+
+    // Density-weighted cell centre, as a fraction of the grid, so the sums stay within the mass's range.
+    const float3 gridVoxels = float3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
+    const float3 position = (float3(brick * GPU_FLUID_BRICK_SIZE + uint3(local)) + 0.5) / gridVoxels;
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+      InterlockedAdd(gs_uiCentroid[axis], (uint)round(min(density, 64.0) * position[axis] * GPU_FLUID_MASS_SCALE));
+
+    // Finite here: the guard above zeroed every non-finite face.
+    const float divergence = abs((plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx);
+    const float scaled = round(divergence * GPU_FLUID_DIV_SCALE);
+    if (scaled > 1048576.0)
+      InterlockedAdd(gs_uiOverflow, 1u);
+    InterlockedMax(gs_uiMaxDivergence, asuint(divergence));
+    InterlockedAdd(gs_uiSumDivergence, (uint)min(scaled, 1048576.0));
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex != 0)
+    return;
+
+  const float peak = asfloat(gs_uiPeakDensity);
+  const float mean = float(gs_uiDensitySum) / (GPU_FLUID_MEAN_SCALE * GPU_FLUID_BRICK_CELLS);
+  const bool bContent = peak > rules.x || asfloat(gs_uiPeakTemperature) > rules.x;
+
+  const float3 atlasBrick = float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks()));
+  GpuFluidIndirectionOutput[brick] = float4(atlasBrick / 255.0, bContent ? max(mean, rules.y) : 0.0);
+
+  GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_ACTIVE_BRICKS * 4, 1u);
+
+  if (bContent)
+  {
+    GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_CONTENT_BRICKS * 4, 1u);
+    GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 0, brick.x);
+    GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 4, brick.y);
+    GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 8, brick.z);
+    GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 0, brick.x);
+    GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 4, brick.y);
+    GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 8, brick.z);
+  }
+
+  // The global sums: a wrap counts as an overflow.
+  uint overflow = gs_uiOverflow;
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_MASS, (uint)round(float(gs_uiDensitySum) * (GPU_FLUID_MASS_SCALE / GPU_FLUID_MEAN_SCALE)), overflow);
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 0, gs_uiCentroid[0], overflow);
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 1, gs_uiCentroid[1], overflow);
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 2, gs_uiCentroid[2], overflow);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_DENSITY * 4, gs_uiPeakDensity);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_TEMPERATURE * 4, gs_uiPeakTemperature);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_SPEED * 4, gs_uiPeakSpeed);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_DIV_POST * 4, gs_uiMaxDivergence);
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_DIV_POST_SUM, gs_uiSumDivergence, overflow);
+  if (gs_uiNaN > 0)
+    GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);
+  if (overflow > 0)
+    GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_OVERFLOW * 4, overflow);
+}

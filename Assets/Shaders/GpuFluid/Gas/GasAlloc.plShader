@@ -1,0 +1,120 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+
+#define GPU_FLUID_SPARSE_WRITABLE
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Alloc of a gas volume. Three modes (GpuFluidGasPass.x), one dispatch each, in this order:
+//
+// 0 Reset:   zeroes the grid counters. One group.
+// 1 Assign:  gives every virtual brick a pool slot (P1: the whole box, slot = linear brick index, so the result does
+//            not depend on group order), fills the page table, the slot -> brick map and the brick table's RGB.
+//            Bricks beyond the pool capacity stay unallocated and count as denied. One thread per virtual brick.
+//            P2 replaces this mode with the mark / scan / assign allocator; modes 0 and 2 stay.
+// 2 Lists:   compacts the active list, rebuilds the 27-entry neighbour table of every active slot, and writes the
+//            dispatch arguments (one group per active brick, folded into 2D). One thread per pool slot.
+
+#define GPU_FLUID_ALLOC_RESET 0
+#define GPU_FLUID_ALLOC_ASSIGN 1
+#define GPU_FLUID_ALLOC_LISTS 2
+
+RWStructuredBuffer<uint> GpuFluidPageTableOutput;
+RWStructuredBuffer<uint> GpuFluidActiveListOutput;
+RWStructuredBuffer<uint> GpuFluidBrickCoordsOutput;
+RWStructuredBuffer<uint> GpuFluidNeighborsOutput;
+RWStructuredBuffer<uint> GpuFluidCountersOutput;
+RWStructuredBuffer<uint> GpuFluidDispatchArgsOutput;
+RWTexture3D<float4> GpuFluidIndirectionOutput; // RGBA16F: rgb = atlas brick / 255, a = brick mean (0 = empty)
+
+[numthreads(64, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const uint3 grid = GpuFluidGrid();
+  const uint capacity = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasGrid).w;
+  const uint index = dispatchThreadId.x;
+
+  if (mode == GPU_FLUID_ALLOC_RESET)
+  {
+    if (index < GPU_FLUID_COUNTER_WORDS)
+      GpuFluidCountersOutput[index] = 0;
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_ASSIGN)
+  {
+    const uint brickCount = grid.x * grid.y * grid.z;
+    if (index >= brickCount)
+      return;
+
+    const uint3 brick = uint3(index % grid.x, (index / grid.x) % grid.y, index / (grid.x * grid.y));
+
+    if (index < capacity)
+    {
+      const uint slot = index;
+      GpuFluidPageTableOutput[index] = slot;
+      GpuFluidBrickCoordsOutput[slot] = GpuFluidPackBrick(brick);
+
+      // A stays 0 until Finalize has seen content: an empty brick is skipped by the march.
+      GpuFluidIndirectionOutput[brick] = float4(float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks())) / 255.0, 0.0);
+
+      uint previous;
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE], 1u, previous);
+    }
+    else
+    {
+      GpuFluidPageTableOutput[index] = GPU_FLUID_INVALID_SLOT;
+      GpuFluidIndirectionOutput[brick] = float4(0.0, 0.0, 0.0, 0.0);
+
+      uint previous;
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED], 1u, previous);
+    }
+    return;
+  }
+
+  if (mode == GPU_FLUID_ALLOC_LISTS)
+  {
+    const uint activeCount = GpuFluidCountersOutput[GPU_FLUID_COUNTER_ACTIVE];
+
+    if (index == 0)
+    {
+      const uint groupsX = min(activeCount, (uint)GPU_FLUID_DISPATCH_FOLD);
+      const uint groupsY = (activeCount + GPU_FLUID_DISPATCH_FOLD - 1) / GPU_FLUID_DISPATCH_FOLD;
+      GpuFluidDispatchArgsOutput[0] = max(groupsX, 1u);
+      GpuFluidDispatchArgsOutput[1] = max(groupsY, 1u);
+      GpuFluidDispatchArgsOutput[2] = 1;
+      GpuFluidDispatchArgsOutput[3] = activeCount;
+    }
+
+    if (index >= activeCount)
+      return;
+
+    // P1 assigns slot = brick index to the first `capacity` bricks, so the active list is the identity.
+    const uint slot = index;
+    GpuFluidActiveListOutput[index] = slot;
+
+    const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoordsOutput[slot]));
+    for (int n = 0; n < GPU_FLUID_NEIGHBOR_COUNT; ++n)
+    {
+      const int3 d = int3(n % 3, (n / 3) % 3, n / 9) - 1;
+      const int3 other = brick + d;
+
+      uint value;
+      if (any(other < 0) || any(other >= int3(grid)))
+        value = GPU_FLUID_NEIGHBOR_OUTSIDE;
+      else
+      {
+        const uint otherSlot = GpuFluidPageTableOutput[GpuFluidBrickLinear(uint3(other), grid)];
+        value = otherSlot == GPU_FLUID_INVALID_SLOT ? GPU_FLUID_NEIGHBOR_UNALLOCATED : otherSlot;
+      }
+
+      GpuFluidNeighborsOutput[slot * GPU_FLUID_NEIGHBOR_COUNT + n] = value;
+    }
+  }
+}

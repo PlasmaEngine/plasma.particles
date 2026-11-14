@@ -1,0 +1,143 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+#include <Shaders/GpuFluid/GpuFluidNoise.hlsli>
+
+// Phase Gas/Emit: one source (a sphere or a box with a smooth edge) adds density, temperature and fuel to the current
+// scalars and drives the current velocity towards its own, both in place. One dispatch per source, one 8 cubed group per
+// active brick (indirect); a brick the source cannot reach returns at once.
+//
+// All 10 cubed texels of a brick are written, apron included. Each texel's change depends only on its own position and
+// value, so an apron texel changes exactly like the neighbour's interior texel it copies, and no halo is needed after.
+//
+// The domain's face rules hold for what is written: no gas goes into apron texels beyond an open face (they stay 0),
+// and the normal component of a face on a closed wall, or of the ghost face behind it, is never driven, so even a
+// source touching a wall gives the advection no flow through it.
+//
+// Params: 0 centre xyz (voxels), radius (voxels)     1 box half extents xyz (voxels), edge softness (voxels)
+//         2 density rate (1/s), temperature, fuel rate (1/s), noise strength (0..1)
+//         3 velocity xyz (m/s), noise frequency (1/voxel)
+// Pass:   y shape (GPU_FLUID_EMITTER_*), w bit 0: drive the velocity, w bit 1: test hook, write NaN into the density of
+//         the cell that holds the source's centre (GpuFluid.Debug.InjectNaN), so the NaN guards are seen to count
+
+RWTexture3D<float4> GpuFluidScalarTarget;   // R density, G temperature, B fuel, A burn
+RWTexture3D<float4> GpuFluidVelocityTarget; // MAC staggered, m/s
+
+float EmitterWeight(float3 p)
+{
+  const float4 p0 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const float4 p1 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1);
+  const uint shape = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y;
+  const float softness = max(p1.w, 1e-3);
+
+  float3 x;
+  if (shape == GPU_FLUID_EMITTER_BOX)
+  {
+    x = saturate((p1.xyz - abs(p - p0.xyz)) / softness);
+  }
+  else
+  {
+    x = saturate((p0.w - length(p - p0.xyz)) / softness).xxx;
+  }
+
+  const float3 s = x * x * (3.0 - 2.0 * x);
+  return s.x * s.y * s.z;
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const float4 step = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep);
+  const float4 p0 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const float4 p1 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1);
+  const float4 p2 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams2);
+  const float4 p3 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams3);
+  const uint shape = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y;
+  const bool bDriveVelocity = (GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & 1u) != 0;
+  const bool bInjectNaN = (GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & 2u) != 0;
+
+  const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+  const int3 gridVoxels = int3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
+  const int3 nanCell = int3(floor(p0.xyz));
+
+  // Reach of the source, against the stored brick (apron included): uniform across the group.
+  {
+    const float3 reach = shape == GPU_FLUID_EMITTER_BOX ? p1.xyz : p0.www;
+    const float3 brickMin = float3(brick * GPU_FLUID_BRICK_SIZE) - 1.0;
+    const float3 brickMax = brickMin + GPU_FLUID_BRICK_STORE;
+    if (any(brickMax < p0.xyz - reach) || any(brickMin > p0.xyz + reach))
+      return;
+  }
+
+  const float dt = step.x;
+  const float time = step.w;
+  const float noiseStrength = saturate(p2.w);
+  const float noiseFrequency = p3.w;
+  const int3 base = GpuFluidSlotBase(slot);
+
+  // Turbulent jitter scales with the source's own speed, with a floor so a still source still stirs.
+  const float jitterSpeed = noiseStrength * max(length(p3.xyz), 0.5);
+
+  for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+  {
+    const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+    const int3 iCell = brick * GPU_FLUID_BRICK_SIZE + stored - GPU_FLUID_BRICK_APRON;
+    const float3 cell = float3(iCell);
+    const float3 centre = cell + 0.5;
+
+    // The faces sit half a voxel below the centre on their own axis; the softness band covers that.
+    float wCentre = EmitterWeight(centre);
+    float3 wFace = float3(EmitterWeight(float3(cell.x, centre.y, centre.z)), EmitterWeight(float3(centre.x, cell.y, centre.z)), EmitterWeight(float3(centre.x, centre.y, cell.z)));
+
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+    {
+      // Beyond an open face the scalars are 0 (GasHalo's rule).
+      if ((iCell[axis] < 0 && GpuFluidFaceOpen(axis, -1)) || (iCell[axis] >= gridVoxels[axis] && GpuFluidFaceOpen(axis, 1)))
+        wCentre = 0.0;
+
+      // The wall face (texel 0 on the -side, texel N on the +side) and the ghost face behind a -side wall carry no flow.
+      if ((iCell[axis] <= 0 && !GpuFluidFaceOpen(axis, -1)) || (iCell[axis] >= gridVoxels[axis] && !GpuFluidFaceOpen(axis, 1)))
+        wFace[axis] = 0.0;
+    }
+
+    const bool bNaNTexel = bInjectNaN && all(iCell == nanCell);
+
+    if (max(wCentre, max(max(wFace.x, wFace.y), wFace.z)) <= 0.0 && !bNaNTexel)
+      continue;
+
+    // Noise drifts with the flow direction over time, so the puffs it carves look like they leave the source.
+    const float3 noisePos = centre * noiseFrequency + time * float3(0.13, 0.29, -0.71);
+
+    if (wCentre > 0.0 || bNaNTexel)
+    {
+      const float puff = 1.0 + noiseStrength * GpuFluidValueNoise(noisePos * 0.5, 7u).w;
+
+      float4 scalar = GpuFluidScalarTarget[base + stored];
+      scalar.r += max(p2.x * puff, 0.0) * wCentre * dt;
+      scalar.g = max(scalar.g, p2.y * wCentre);
+      scalar.b += p2.z * wCentre * dt;
+      if (bNaNTexel)
+        scalar.r = GpuFluidNaN();
+      GpuFluidScalarTarget[base + stored] = scalar;
+    }
+
+    if (bDriveVelocity && max(max(wFace.x, wFace.y), wFace.z) > 0.0)
+    {
+      const float3 target = clamp(p3.xyz + jitterSpeed * GpuFluidCurlNoise(noisePos), -GPU_FLUID_MAX_SPEED, GPU_FLUID_MAX_SPEED);
+
+      float4 velocity = GpuFluidVelocityTarget[base + stored];
+      velocity.xyz = lerp(velocity.xyz, target, wFace);
+      GpuFluidVelocityTarget[base + stored] = velocity;
+    }
+  }
+}
