@@ -106,7 +106,7 @@ protected:
     HandoffSphereVideo,
     SmokeColumn,
     SmokeColumnVideo,
-    GasTiming,
+    GasSafety,
   };
 
   /// One stats readback of a simulated volume, with the simulation time it was recorded at.
@@ -123,6 +123,8 @@ protected:
     float m_fMeanDivBefore = 0.0f;
     float m_fMeanDivAfter = 0.0f;
     plUInt32 m_uiNaN = 0;
+    plUInt32 m_uiOverflow = 0;
+    plUInt32 m_uiSpeedClamped = 0;
     plUInt32 m_uiContentBricks = 0;
     plUInt32 m_uiActiveBricks = 0;
   };
@@ -136,13 +138,16 @@ private:
   plTestAppRun RunHandoff();
   plTestAppRun RunHandoffSphereVideo();
   plTestAppRun RunSmokeColumn(bool bVideo);
-  plTestAppRun RunGasTiming();
+  plTestAppRun RunGasSafety();
 
   /// Takes the smoke volume's latest readback into m_GasSamples when it is new. World read lock held.
   void CollectGasSample();
 
   /// The Smoke Column checks over m_GasSamples.
   void EvaluateSmokeColumn();
+
+  /// One row per readback.
+  static void WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath);
 
   /// Sets a bool, int or float CVar for the running sub-test; DeInitializeSubTest puts the old value back.
   void SetCVarForSubTest(const char* szName, const plVariant& value);
@@ -161,8 +166,8 @@ private:
   plDynamicArray<plVariant> m_RestoreCVarValues;
   plUInt64 m_uiFirstRenderFrame = 0;
   plDynamicArray<GasSample> m_GasSamples;
-  plDynamicArray<plString> m_TimingNames;
-  plDynamicArray<plDynamicArray<double>> m_TimingValues;
+  /// Gas Safety: the render frame the NaN was injected on (0 before).
+  plUInt64 m_uiInjectRenderFrame = 0;
   plImage m_GpuAlone;
   plImage m_GpuAgain;
   plImage m_GpuEmissive;

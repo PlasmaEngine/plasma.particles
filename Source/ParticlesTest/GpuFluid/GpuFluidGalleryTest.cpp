@@ -38,8 +38,12 @@ namespace
   constexpr plUInt32 s_uiSmokeBricks = 8 * 8 * 16;
   constexpr plInt32 s_iSmokeFrames = 150;
   constexpr plInt32 s_iSmokeVideoFrames = 300;
-  constexpr plInt32 s_iTimingWarmupFrames = 60;
-  constexpr plInt32 s_iTimingFrames = 180;
+
+  // Gas Safety (N12 stress): the source drives its faces at 48 m/s, above the 32 m/s clamp, for 90 frames; a NaN is
+  // injected on frames 45 to 47.
+  constexpr plInt32 s_iSafetyFrames = 90;
+  constexpr plInt32 s_iSafetyInjectFrame = 45;
+  constexpr float s_fSafetySourceSpeed = 48.0f;
   const plVec3 s_vSmokeTarget(0.0f, 0.0f, 3.7f);
   constexpr float s_fSmokeFovY = 50.0f;
 
@@ -693,7 +697,7 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
   AddSubTest("Handoff Sphere Video", SubTests::HandoffSphereVideo);
   AddSubTest("Smoke Column", SubTests::SmokeColumn);
   AddSubTest("Smoke Column Video", SubTests::SmokeColumnVideo);
-  AddSubTest("Gas Timing", SubTests::GasTiming);
+  AddSubTest("Gas Safety", SubTests::GasSafety);
 }
 
 plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -727,16 +731,11 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
 
     case SubTests::SmokeColumn:
     case SubTests::SmokeColumnVideo:
-    case SubTests::GasTiming:
+    case SubTests::GasSafety:
     {
       m_GasSamples.Clear();
-      m_TimingNames.Clear();
-      m_TimingValues.Clear();
       m_uiFirstRenderFrame = plRenderWorld::GetFrameCounter();
-
-      // Per-pass GPU times reach plStats only with this on.
-      if (iIdentifier == SubTests::GasTiming)
-        SetCVarForSubTest("Rendering.Profiling.GPUStats", true);
+      m_uiInjectRenderFrame = 0;
 
       // The march's lighting for the smoke scenes, all put back after the sub-test:
       // - self-shadow taps read the full-resolution atlas (lod 0) instead of the per-brick means, and twelve of them;
@@ -754,6 +753,15 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
 
       PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSmokeColumnScene());
       m_pOwnApplication->SetCamera(SmokeOrbit(0.5f), s_vSmokeTarget, s_fSmokeFovY);
+
+      if (iIdentifier == SubTests::GasSafety)
+      {
+        PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
+        plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+        if (pGas == nullptr)
+          return PL_FAILURE;
+        pGas->m_vEmitterVelocity = plVec3(0.0f, 0.0f, s_fSafetySourceSpeed);
+      }
       return PL_SUCCESS;
     }
   }
@@ -843,8 +851,8 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
       return RunSmokeColumn(false);
     case SubTests::SmokeColumnVideo:
       return RunSmokeColumn(true);
-    case SubTests::GasTiming:
-      return RunGasTiming();
+    case SubTests::GasSafety:
+      return RunGasSafety();
   }
 
   return plTestAppRun::Quit;
@@ -1191,6 +1199,8 @@ void plGameEngineTestGpuFluidGallery::CollectGasSample()
   sample.m_fMeanDivBefore = stats.m_fMeanDivergenceBefore;
   sample.m_fMeanDivAfter = stats.m_fMeanDivergenceAfter;
   sample.m_uiNaN = stats.m_uiNaNCount;
+  sample.m_uiOverflow = stats.m_uiOverflowCount;
+  sample.m_uiSpeedClamped = stats.m_uiSpeedClamped;
   sample.m_uiContentBricks = stats.m_uiAllocatedBricks;
   sample.m_uiActiveBricks = stats.m_uiActiveBricks;
 }
@@ -1276,30 +1286,25 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
 {
   const plDynamicArray<GasSample>& samples = m_GasSamples;
 
-  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks\n");
-  for (const GasSample& s : samples)
-  {
-    sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
-    sCsv.AppendFormat("{},{},{},{},{},{},{}\n", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
-  }
-
-  plFileWriter csv;
-  if (csv.Open(":imgout/GpuFluidGallery/SmokeColumn.csv").Succeeded())
-    csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
+  WriteGasCsv(samples, ":imgout/GpuFluidGallery/SmokeColumn.csv");
 
   if (!PL_TEST_BOOL_MSG(samples.GetCount() >= static_cast<plUInt32>(s_iSmokeFrames / 2), "Only %u stats readbacks in %d frames", samples.GetCount(), s_iSmokeFrames))
     return;
 
-  // N12 and the grid: no NaN ever, every brick of the box simulated, density within its clamp.
+  // N12 and the grid: no NaN and no fixed-point overflow ever, every brick of the box simulated, density within its
+  // clamp. (Gas Safety shows that both counters do count.)
   plUInt32 uiNaN = 0;
+  plUInt32 uiOverflow = 0;
   float fMaxDensity = 0.0f;
   for (const GasSample& s : samples)
   {
     uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
+    uiOverflow = plMath::Max(uiOverflow, s.m_uiOverflow);
     fMaxDensity = plMath::Max(fMaxDensity, s.m_fMaxDensity);
     PL_TEST_INT(s.m_uiActiveBricks, s_uiSmokeBricks);
   }
   PL_TEST_INT(uiNaN, 0);
+  PL_TEST_INT(uiOverflow, 0);
 
   plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
   const float fDensityMax = pGas != nullptr ? pGas->m_fDensityMax : 4.0f;
@@ -1380,11 +1385,41 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
     last.m_fSeconds, last.m_fMass, last.m_fCentroidZ, last.m_fMaxDensity, last.m_fMaxSpeed, last.m_uiContentBricks, last.m_uiActiveBricks, uiNaN);
 }
 
-//////////////////////////////////////////////////////////////////////////
-// P1: Gas Timing
-
-plTestAppRun plGameEngineTestGpuFluidGallery::RunGasTiming()
+void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
 {
+  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped\n");
+  for (const GasSample& s : samples)
+  {
+    sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
+    sCsv.AppendFormat("{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped);
+  }
+
+  plFileWriter csv;
+  if (csv.Open(sPath).Succeeded())
+    csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
+}
+
+//////////////////////////////////////////////////////////////////////////
+// P1: Gas Safety (N12)
+//
+// The guards must be seen to work, not only to stay quiet:
+// - stress: the source drives its faces at 48 m/s, so the 32 m/s clamp fires every tick; the clamp counter must count,
+//   and no NaN and no fixed-point overflow may follow, with every speed the readback sees finite;
+// - injection: GpuFluid.Debug.InjectNaN writes a NaN into the density on frames 45 to 47; the NaN count must go above
+//   0 in the readbacks of those frames, and back to 0 a few frames later, the solver having zeroed it.
+// The timing of the gas is GpuFluid Tier Timing's.
+
+plTestAppRun plGameEngineTestGpuFluidGallery::RunGasSafety()
+{
+  // Three frames in a row, so a readback the ring has to skip cannot hide the injection. The CVar turns itself off.
+  if (m_iFrame >= s_iSafetyInjectFrame && m_iFrame < s_iSafetyInjectFrame + 3)
+  {
+    SetCVarBool("GpuFluid.Debug.InjectNaN", true);
+    if (m_iFrame == s_iSafetyInjectFrame)
+      m_uiInjectRenderFrame = plRenderWorld::GetFrameCounter();
+  }
+
   m_pOwnApplication->Run();
   if (m_pOwnApplication->WasQuitRequested())
     return plTestAppRun::Quit;
@@ -1394,113 +1429,69 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunGasTiming()
     CollectGasSample();
   }
 
-  if (m_iFrame < s_iTimingWarmupFrames)
+  if (m_iFrame + 1 < s_iSafetyFrames)
     return plTestAppRun::Continue;
 
-  // One sample per frame of every Gas/* phase. A phase runs once per tick, and the profiler names the second
-  // occurrence of a pass in a frame "<name> #2", so the occurrences are summed into one value per frame. Gas/Alloc only
-  // runs on the volume's first frame; its stat merely keeps that value, so it is left out.
-  {
-    plDynamicArray<plString> names;
-    plDynamicArray<plVariant> values;
-    plStats::GetStatsWithPrefix("Renderer/GPU/Gas/", names, values);
+  const plDynamicArray<GasSample>& samples = m_GasSamples;
+  WriteGasCsv(samples, ":imgout/GpuFluidGallery/GasSafety.csv");
 
-    plHybridArray<double, 16> frameValues;
-    frameValues.SetCount(m_TimingNames.GetCount(), 0.0);
-
-    for (plUInt32 i = 0; i < names.GetCount(); ++i)
-    {
-      plStringBuilder sPhase = names[i];
-      sPhase.TrimWordStart("Renderer/GPU/");
-      if (const char* szSuffix = sPhase.FindSubString(" #"))
-        sPhase.SetSubString_FromTo(sPhase.GetData(), szSuffix);
-      else if (const char* szUnit = sPhase.FindSubString("["))
-        sPhase.SetSubString_FromTo(sPhase.GetData(), szUnit);
-
-      if (sPhase == "Gas/Alloc")
-        continue;
-
-      plUInt32 uiIndex = m_TimingNames.IndexOf(sPhase);
-      if (uiIndex == plInvalidIndex)
-      {
-        uiIndex = m_TimingNames.GetCount();
-        m_TimingNames.PushBack(sPhase);
-        m_TimingValues.ExpandAndGetRef();
-        frameValues.PushBack(0.0);
-      }
-      frameValues[uiIndex] += values[i].ConvertTo<double>();
-    }
-
-    for (plUInt32 i = 0; i < frameValues.GetCount(); ++i)
-      m_TimingValues[i].PushBack(frameValues[i]);
-  }
-
-  if (m_iFrame + 1 < s_iTimingWarmupFrames + s_iTimingFrames)
-    return plTestAppRun::Continue;
-
-  const plUInt32 uiBricks = m_GasSamples.IsEmpty() ? 0 : m_GasSamples.PeekBack().m_uiActiveBricks;
-  const plUInt32 uiTicksPerFrame = 2;
-
-  if (!PL_TEST_BOOL_MSG(!m_TimingNames.IsEmpty(), "No Renderer/GPU/Gas/* stats: are GPU timestamps available?"))
+  if (!PL_TEST_BOOL_MSG(samples.GetCount() >= static_cast<plUInt32>(s_iSafetyFrames / 2), "Only %u stats readbacks in %d frames", samples.GetCount(), s_iSafetyFrames))
     return plTestAppRun::Quit;
 
-  auto Percentile = [](plDynamicArray<double> values, double fFraction)
+  // The injecting ticks run in the render frames of the three updates that consumed the CVar, or one later: two frames
+  // of slack after the last. From eight frames after the first on, the field must be clean again.
+  const plUInt64 uiInjectFirst = m_uiInjectRenderFrame;
+  const plUInt64 uiInjectLast = m_uiInjectRenderFrame + 4;
+  const plUInt64 uiCleanFrom = m_uiInjectRenderFrame + 10;
+
+  plUInt32 uiNaNBefore = 0;
+  plUInt32 uiNaNInjected = 0;
+  plUInt32 uiNaNAfter = 0;
+  plUInt32 uiCleanReadbacks = 0;
+  plUInt32 uiOverflow = 0;
+  plUInt32 uiClampedReadbacks = 0;
+  plUInt32 uiMaxClamped = 0;
+  float fMaxSpeed = 0.0f;
+  bool bFiniteSpeed = true;
+
+  for (const GasSample& s : samples)
   {
-    values.Sort();
-    const plUInt32 uiIndex = plMath::Min(values.GetCount() - 1, static_cast<plUInt32>(fFraction * (values.GetCount() - 1) + 0.5));
-    return values[uiIndex];
-  };
+    uiOverflow = plMath::Max(uiOverflow, s.m_uiOverflow);
+    uiMaxClamped = plMath::Max(uiMaxClamped, s.m_uiSpeedClamped);
+    uiClampedReadbacks += s.m_uiSpeedClamped > 0 ? 1 : 0;
+    bFiniteSpeed = bFiniteSpeed && plMath::IsFinite(s.m_fMaxSpeed);
+    fMaxSpeed = plMath::Max(fMaxSpeed, s.m_fMaxSpeed);
 
-  plStringBuilder sCsv;
-  sCsv.AppendFormat("# GpuFluid gas timing, Smoke Column, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, Development build\n", uiBricks,
-    uiTicksPerFrame, s_iTimingWarmupFrames, s_iTimingFrames);
-  sCsv.Append("phase,median_ms_per_frame,p90_ms_per_frame,median_ms_per_tick,us_per_brick_tick,samples\n");
-
-  plDynamicArray<double> totals;
-  totals.SetCount(m_TimingValues.IsEmpty() ? 0 : m_TimingValues[0].GetCount(), 0.0);
-
-  for (plUInt32 i = 0; i < m_TimingNames.GetCount(); ++i)
-  {
-    const plDynamicArray<double>& values = m_TimingValues[i];
-    for (plUInt32 j = 0; j < plMath::Min(values.GetCount(), totals.GetCount()); ++j)
-      totals[j] += values[j];
-
-    const double fMedian = Percentile(values, 0.5);
-    const double fP90 = Percentile(values, 0.9);
-    const double fPerTick = fMedian / uiTicksPerFrame;
-    const double fPerBrickTick = uiBricks > 0 ? fPerTick * 1000.0 / uiBricks : 0.0;
-
-    sCsv.AppendFormat("{},{},{},{},{},{}\n", m_TimingNames[i], plArgF(fMedian, 4), plArgF(fP90, 4), plArgF(fPerTick, 4), plArgF(fPerBrickTick, 4), values.GetCount());
-    plTestFramework::Output(plTestOutput::Message, "Gas timing %s: median %.3f ms, p90 %.3f ms per frame (%u samples)", m_TimingNames[i].GetData(), fMedian, fP90, values.GetCount());
-  }
-
-  if (!totals.IsEmpty())
-  {
-    const double fMedian = Percentile(totals, 0.5);
-    const double fP90 = Percentile(totals, 0.9);
-    const double fPerTick = fMedian / uiTicksPerFrame;
-    sCsv.AppendFormat("Gas total,{},{},{},{},{}\n", plArgF(fMedian, 4), plArgF(fP90, 4), plArgF(fPerTick, 4), plArgF(uiBricks > 0 ? fPerTick * 1000.0 / uiBricks : 0.0, 4), totals.GetCount());
-    plTestFramework::Output(plTestOutput::Message, "Gas timing total: median %.3f ms, p90 %.3f ms per frame, %u bricks, %u ticks per frame", fMedian, fP90, uiBricks, uiTicksPerFrame);
-  }
-
-  // For scale: every pass the GPU timed in the last frame, the gas among the rest of the frame.
-  {
-    plDynamicArray<plString> names;
-    plDynamicArray<plVariant> values;
-    plStats::GetStatsWithPrefix("Renderer/GPU/", names, values);
-    sCsv.Append("# other passes of the last frame (ms)\n");
-    for (plUInt32 i = 0; i < names.GetCount(); ++i)
+    if (s.m_uiFrame < uiInjectFirst)
+      uiNaNBefore = plMath::Max(uiNaNBefore, s.m_uiNaN);
+    else if (s.m_uiFrame <= uiInjectLast)
+      uiNaNInjected = plMath::Max(uiNaNInjected, s.m_uiNaN);
+    else if (s.m_uiFrame >= uiCleanFrom)
     {
-      const double fValue = values[i].ConvertTo<double>();
-      if (fValue >= 0.05)
-        sCsv.AppendFormat("# {},{}\n", names[i], plArgF(fValue, 3));
+      uiNaNAfter = plMath::Max(uiNaNAfter, s.m_uiNaN);
+      ++uiCleanReadbacks;
     }
+
+    PL_TEST_INT(s.m_uiActiveBricks, s_uiSmokeBricks);
   }
 
-  plFileWriter csv;
-  if (csv.Open(":imgout/GpuFluidGallery/gas-timing.csv").Succeeded())
-    csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
+  plTestFramework::Output(plTestOutput::Message,
+    "Gas safety: %u readbacks; source at %.0f m/s: clamp fired on %u readbacks (up to %u faces a frame), largest face speed after the projection %.2f m/s, overflow %u; "
+    "NaN before the injection %u, at it %u (render frame %llu), after it %u over %u readbacks",
+    samples.GetCount(), s_fSafetySourceSpeed, uiClampedReadbacks, uiMaxClamped, fMaxSpeed, uiOverflow, uiNaNBefore, uiNaNInjected,
+    static_cast<unsigned long long>(m_uiInjectRenderFrame), uiNaNAfter, uiCleanReadbacks);
 
-  PL_TEST_INT(uiBricks, s_uiSmokeBricks);
+  // The stress itself.
+  PL_TEST_BOOL_MSG(uiClampedReadbacks > 0, "The source at %.0f m/s never reached the 32 m/s clamp", s_fSafetySourceSpeed);
+  PL_TEST_INT(uiOverflow, 0);
+  PL_TEST_INT(uiNaNBefore, 0);
+  PL_TEST_BOOL_MSG(bFiniteSpeed, "A readback's largest speed is not finite");
+
+  // The injection is seen, and cleaned up.
+  PL_TEST_BOOL_MSG(m_uiInjectRenderFrame > 0, "The NaN was never injected");
+  PL_TEST_BOOL_MSG(uiNaNInjected > 0, "The injected NaN was not counted");
+  PL_TEST_BOOL_MSG(uiCleanReadbacks > 0, "No readback after the injection");
+  PL_TEST_INT(uiNaNAfter, 0);
+
   return plTestAppRun::Quit;
 }
