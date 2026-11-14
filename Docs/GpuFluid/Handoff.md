@@ -103,7 +103,14 @@ The items flagged on the Mac (typed RGBA16F 3D UAV loads, push-constant blocks, 
     - The static SDF bake misses solid cells: Static Solids 83%, Flooding Room 97% (both tests fail on it). The cause is not found yet; it is not culling or the sign pass.
     - Random-seed tanks at quarter and three-quarter fill (P8A minor).
     - The liquid costs about 18 ms a frame at up to 5 substeps.
-- **Next (user, 2026-11-14): a large performance pass to get game ready.** A research agent writes `Docs/GpuFluid/PerfResearch.md`. Time on an idle GPU (ask the user to close the editor).
+- **Performance pass (user, 2026-11-14): Flooding Room under 2 ms reached** (`20925d6`). Video `P8-perf-flooding-room.mp4`.
+  - Release, RTX 4080, idle GPU, liquid sim + surface: Flooding Room 9.1 -> 1.78 ms (Vulkan 1.96), Medium Room 5.67 -> 1.46 ms (Vulkan 1.73). Gas Medium 0.80, High 2.23 ms.
+  - Small launches cost 8-13 us each whatever their size, so most gains came from fewer launches or more threads per launch: restriction per brick and per 8^3 block, prolongation folded into the block post-smoothing (written to a second buffer, so no halo gets the correction twice), the MGPCG updates and r.z folded into Apply and the V-cycle's first and last launches, density by per-cell register scatter.
+  - Defaults now CFL 3, substep down margin 0.95. Tuning switches (env `PL_GPUFLUID_LIQ_<NAME>`): `FUSE_PROLONG`, `FUSE_PCG`, `BLOCK_RESTRICT`, `BRICK_RESTRICT`.
+  - Tried and dropped: one-group bottom of the V-cycle (no gain), per-cell register P2G (slower on DX12), one fine smoothing launch or 3 V-cycles (N2 p95 2e-3, limit 1e-3), LevelSet scatter (no gain: its cost is the 27 kernel evaluations per particle).
+  - Vulkan's P2G scatter is 2x DX12's (0.33 vs 0.17 ms); not found why.
+  - Gotcha: after deleting a shader, rebuild ParticlesTest; an older binary still loads it and the sim runs without that step.
+  - Still open: the bake gap, random-seed tanks N6, the noisy flood settled-level check (0.92-0.97 run to run).
 
 ## Open review findings: P2 (fixed in `2e6eb3e`; kept for reference)
 
