@@ -12,8 +12,8 @@ public class ParticlesTestTarget : TargetRules
         // test finds the engine DLLs through PATH and the package plugin through a plugin search root.
         OutputDirectory = Path.Combine(context.ProjectRoot, "Bin", "Tests", $"{context.Platform}_x64_{context.Configuration}");
         UsePCHFiles = true;
-        UseUnityBuild = true;
-        UseAdaptiveUnityBuild = true;
+        UseUnityBuild = false; // Test fixtures reuse translation-unit-local helper names.
+        UseAdaptiveUnityBuild = false;
         UseIncrementalLinking = true;
         GenerateDebugInfo = true;
 

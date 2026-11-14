@@ -17,9 +17,14 @@ public class ParticlesTestModule : ModuleRules
         PublicIncludePaths.Add(Path.Combine(PlasmaPackageSdk.Root, "Intermediate", "PlasmaBuild", "Generated", "Code", "UnitTests"));
         PublicIncludePaths.Add(Path.Combine(PlasmaPackageSdk.Root, "Intermediate", "PlasmaBuild", "Generated", "Code", "UnitTests", "TestFramework"));
 
-        if (context.Platform == TargetPlatform.Windows)
+        // TestFrameworkEntryPoint_Platform.h
+        var platformFolder = context.Platform == TargetPlatform.Windows ? "Win"
+            : context.Platform == TargetPlatform.Mac ? "OSX"
+            : context.Platform == TargetPlatform.Linux ? "Linux"
+            : null;
+        if (platformFolder != null)
         {
-            PublicIncludePaths.Add(Path.Combine(unitTestsRoot, "TestFramework", "Platform", "Win"));
+            PublicIncludePaths.Add(Path.Combine(unitTestsRoot, "TestFramework", "Platform", platformFolder));
         }
 
         PlasmaPackageSdk.AddImportLibrary(this, context, "plTestFramework");
