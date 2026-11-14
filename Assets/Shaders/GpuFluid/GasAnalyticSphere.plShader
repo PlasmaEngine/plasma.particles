@@ -1,0 +1,152 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidConstants.h>
+
+// P0 handoff source: an analytic sphere written straight into the sparse VDB layout the march reads, so the GPU path
+// can be checked against a baked volume of the same density before any solver exists.
+//
+// One 8x8x8 group per brick of the virtual grid. The group evaluates its 8 cubed cells, keeps the brick only if its
+// peak density is above the allocation threshold, takes an atlas slot with one uint atomic, writes all 10 cubed texels
+// of the slot (apron included, clamped at the grid edge like the importer) and writes the brick table texel for every
+// brick, kept or not, so the table never holds a stale address.
+
+RWTexture3D<float4> GpuFluidAtlasOutput;        // RGBA16F: R density, G temperature
+RWTexture3D<float4> GpuFluidIndirectionOutput;  // RGBA16F: rgb = atlas brick / 255, a = brick mean (0 = empty)
+RWByteAddressBuffer GpuFluidStats;
+
+groupshared uint gs_uiPeakDensity;   // asuint of a non-negative float orders like the float
+groupshared uint gs_uiDensitySum;    // fixed point GPU_FLUID_MEAN_SCALE
+groupshared uint gs_uiNaN;
+groupshared uint gs_uiSlot;
+
+/// Density (x) and temperature (y) of the sphere at the centre of a voxel of the virtual grid.
+float2 EvaluateSphere(int3 voxel)
+{
+  const float4 sphere = GET_PUSH_CONSTANT(plGpuFluidAnalyticConstants, GpuFluidSphere);
+  const float4 shape = GET_PUSH_CONSTANT(plGpuFluidAnalyticConstants, GpuFluidSphereShape);
+
+  const float distance = length(float3(voxel) + 0.5 - sphere.xyz);
+
+  // Full inside radius - softness, smoothstep to zero at the radius.
+  const float x = saturate((sphere.w - distance) / max(shape.x, 1e-3));
+  const float density = shape.y * x * x * (3.0 - 2.0 * x);
+
+  // Hotter towards the centre, on a different curve so a swapped channel would show.
+  const float core = saturate(1.0 - distance / max(sphere.w, 1e-3));
+  const float temperature = shape.z * core * x;
+
+  return float2(density, temperature);
+}
+
+bool IsFiniteValue(float value)
+{
+  return !isnan(value) && !isinf(value);
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  const uint4 brickGrid = GET_PUSH_CONSTANT(plGpuFluidAnalyticConstants, GpuFluidBrickGrid);
+  const uint4 atlasBricks = GET_PUSH_CONSTANT(plGpuFluidAnalyticConstants, GpuFluidAtlasBricks);
+  const float4 rules = GET_PUSH_CONSTANT(plGpuFluidAnalyticConstants, GpuFluidBrickRules);
+
+  const uint3 brick = groupId;
+  const int3 gridVoxels = int3(brickGrid.xyz) * GPU_FLUID_BRICK_SIZE;
+
+  if (groupIndex == 0)
+  {
+    gs_uiPeakDensity = 0;
+    gs_uiDensitySum = 0;
+    gs_uiNaN = 0;
+    gs_uiSlot = GPU_FLUID_INVALID_SLOT;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  // Interior cell of this thread: peak and mean of the brick.
+  {
+    float2 cell = EvaluateSphere(int3(brick * GPU_FLUID_BRICK_SIZE + groupThreadId));
+    if (!IsFiniteValue(cell.x) || !IsFiniteValue(cell.y))
+    {
+      InterlockedAdd(gs_uiNaN, 1u);
+      cell = float2(0.0, 0.0);
+    }
+
+    const float density = max(cell.x, 0.0);
+    InterlockedMax(gs_uiPeakDensity, asuint(density));
+    InterlockedAdd(gs_uiDensitySum, (uint)round(density * GPU_FLUID_MEAN_SCALE));
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0)
+  {
+    const float peak = asfloat(gs_uiPeakDensity);
+    const float mean = float(gs_uiDensitySum) / (GPU_FLUID_MEAN_SCALE * GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE);
+
+    float4 table = float4(0.0, 0.0, 0.0, 0.0);
+
+    if (peak > rules.x)
+    {
+      uint slot;
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_SLOTS_REQUESTED * 4, 1u, slot);
+
+      if (slot < brickGrid.w)
+      {
+        gs_uiSlot = slot;
+
+        const uint3 atlasBrick = uint3(slot % atlasBricks.x, (slot / atlasBricks.x) % atlasBricks.y, slot / (atlasBricks.x * atlasBricks.y));
+
+        // Exact in half precision for every value up to 255. A never reads zero for a kept brick, since zero is
+        // what marks a brick as absent; the floor is in the same units as the atlas density.
+        table = float4(float3(atlasBrick) / 255.0, max(mean, rules.y));
+
+        GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 0, brick.x);
+        GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 4, brick.y);
+        GpuFluidStats.InterlockedMin(GPU_FLUID_STAT_BOUNDS_MIN * 4 + 8, brick.z);
+        GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 0, brick.x);
+        GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 4, brick.y);
+        GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 8, brick.z);
+        GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_MASS * 4, (uint)round(mean * GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE * GPU_FLUID_MASS_SCALE));
+        GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_DENSITY * 4, asuint(peak));
+      }
+      else
+      {
+        GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_DENIED * 4, 1u);
+      }
+    }
+
+    if (gs_uiNaN > 0)
+      GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);
+
+    GpuFluidIndirectionOutput[brick] = table;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint slot = gs_uiSlot;
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  // All 10 cubed texels of the slot, apron included: a reused slot keeps whatever the last brick left in it.
+  const uint3 atlasBrick = uint3(slot % atlasBricks.x, (slot / atlasBricks.x) % atlasBricks.y, slot / (atlasBricks.x * atlasBricks.y));
+  const uint3 atlasBase = atlasBrick * GPU_FLUID_BRICK_STORE;
+  const uint storeCount = GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE;
+
+  for (uint i = groupIndex; i < storeCount; i += GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE * GPU_FLUID_BRICK_SIZE)
+  {
+    const uint3 local = uint3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
+
+    // The apron reaches one voxel outside the brick; clamping at the grid's edge matches the sampler's clamp mode.
+    const int3 source = clamp(int3(brick * GPU_FLUID_BRICK_SIZE + local) - GPU_FLUID_BRICK_APRON, int3(0, 0, 0), gridVoxels - 1);
+
+    float2 value = EvaluateSphere(source);
+    if (!IsFiniteValue(value.x) || !IsFiniteValue(value.y))
+      value = float2(0.0, 0.0);
+
+    GpuFluidAtlasOutput[atlasBase + local] = float4(max(value.x, 0.0), saturate(value.y), 0.0, 0.0);
+  }
+}

@@ -2,6 +2,7 @@
 
 #include <Core/ResourceManager/ResourceManager.h>
 #include <Foundation/Configuration/Startup.h>
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidGpuManager.h>
 #include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
 #include <RendererCore/Pipeline/RenderPipelineInjection.h>
@@ -54,10 +55,13 @@ PL_BEGIN_SUBSYSTEM_DECLARATION(Particle, ParticlePlugin)
 
   ON_HIGHLEVELSYSTEMS_STARTUP
   {
+    plGpuFluidGpuManager::Startup();
   }
 
   ON_HIGHLEVELSYSTEMS_SHUTDOWN
   {
+    // While the device is still up: every GpuFluid texture, buffer and render graph goes here.
+    plGpuFluidGpuManager::Shutdown();
   }
 
 PL_END_SUBSYSTEM_DECLARATION;

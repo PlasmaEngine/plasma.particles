@@ -1,0 +1,25 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidConstants.h>
+
+// Resets a volume's stats at the start of its GPU frame. A dispatch rather than a CPU upload, so the reset is ordered
+// after last frame's readback copy and before this frame's counters on every backend.
+
+RWByteAddressBuffer GpuFluidStats;
+
+[numthreads(GPU_FLUID_STAT_WORD_COUNT, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint word = dispatchThreadId.x;
+  if (word >= GPU_FLUID_STAT_WORD_COUNT)
+    return;
+
+  const bool bMin = word >= GPU_FLUID_STAT_BOUNDS_MIN && word < GPU_FLUID_STAT_BOUNDS_MIN + 3;
+  GpuFluidStats.Store(word * 4, bMin ? 0xFFFFFFFFu : 0u);
+}
