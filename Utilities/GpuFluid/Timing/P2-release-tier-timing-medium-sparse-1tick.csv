@@ -1,0 +1,68 @@
+# GpuFluid tier timing, tier Medium, sparse gate scene (mean active bricks over the measured frames), 989 active bricks, 1 ticks per frame, 150 warm-up + 180 measured frames, Metal, Dev build, Rendering.Pipeline.Injections off
+# gas settings: PressureSolver=1 PressureCycles=0 MGShortCycles=0 MGPreSmooth=2 MGPostSmooth=2 VelocityMacCormack=-1 Vorticity=-1
+# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs
+tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples
+Medium,Gas/Advect,1,1.3579,1.6998,1.3579,1.3730,180
+Medium,Gas/Alloc Clear,1,0.0149,0.0372,0.0149,0.0151,180
+Medium,Gas/Alloc Upload,1,0.0083,0.1133,0.0083,0.0084,180
+Medium,Gas/Alloc,1,0.0447,0.1167,0.0447,0.0452,180
+Medium,Gas/Emit,1,0.0453,0.0981,0.0453,0.0458,180
+Medium,Gas/Finalize,1,0.1764,0.2534,0.1764,0.1783,180
+Medium,Gas/Forces,1,0.8816,1.1640,0.8816,0.8914,180
+Medium,Gas/Pressure,1,1.9443,2.4985,1.9443,1.9660,180
+Medium,Gas tick phases,1,4.2536,5.4340,4.2536,4.3009,180
+Medium,Gas frame total,1,4.4840,5.7628,4.4840,4.5339,180
+# other passes of the last frame (ms)
+# Renderer/GPU/AntialiasingPass[ms],0.123
+# Renderer/GPU/BloomDownscale #2[ms],0.175
+# Renderer/GPU/BloomDownscale #3[ms],0.087
+# Renderer/GPU/BloomDownscale #4[ms],0.133
+# Renderer/GPU/BloomDownscale #6[ms],0.146
+# Renderer/GPU/BloomDownscale[ms],0.074
+# Renderer/GPU/BloomUpscale #3[ms],0.137
+# Renderer/GPU/ColorHistorySource[ms],0.063
+# Renderer/GPU/Contact Shadow Resolve[ms],0.070
+# Renderer/GPU/Contact Shadow Trace[ms],0.565
+# Renderer/GPU/DepthPrePass[ms],0.372
+# Renderer/GPU/DownscaleDepth #3[ms],0.161
+# Renderer/GPU/EditorRenderPass[ms],1.130
+# Renderer/GPU/Gas/Advect[ms],1.724
+# Renderer/GPU/Gas/Alloc Clear[ms],0.120
+# Renderer/GPU/Gas/Alloc[ms],0.191
+# Renderer/GPU/Gas/Finalize[ms],0.260
+# Renderer/GPU/Gas/Forces[ms],1.209
+# Renderer/GPU/Gas/Pressure[ms],2.764
+# Renderer/GPU/GpuFluid Stats Readback[ms],0.097
+# Renderer/GPU/HiZ Publish[ms],0.093
+# Renderer/GPU/HiZ Reduce #2[ms],0.053
+# Renderer/GPU/HiZ Reduce #8[ms],0.140
+# Renderer/GPU/HiZ Reduce #9[ms],0.104
+# Renderer/GPU/LitOpaqueStatic[ms],1.152
+# Renderer/GPU/OpaqueForwardRenderPass[ms],0.531
+# Renderer/GPU/ReflectionFilterSpecular[ms],0.182
+# Renderer/GPU/SSAO Blur[ms],0.145
+# Renderer/GPU/SSAO[ms],0.108
+# Renderer/GPU/SimplePass[ms],0.091
+# Renderer/GPU/SkyAtmo Copy Scene Color[ms],0.145
+# Renderer/GPU/SkyAtmo Sky[ms],0.166
+# Renderer/GPU/TAA Resolve[ms],0.788
+# Renderer/GPU/VDB Copy Scene Color[ms],0.131
+# Renderer/GPU/VDB March[ms],1.144
+# Renderer/GPU/VDB Shadow Moments[ms],0.153
+# Renderer/GPU/VFog Copy Scene Color[ms],0.138
+# Renderer/GPU/VFog Inject[ms],0.065
+# Renderer/GPU/VFog Integrate[ms],0.206
+# Renderer/GPU/VFog Temporal[ms],0.243
+# Renderer/GPU/VSM Atlas Clear[ms],5.335
+# Renderer/GPU/VSM Compose Pages[ms],0.258
+# Renderer/GPU/VSM PageMark[ms],0.089
+# Renderer/GPU/VSM Static Region[ms],0.211
+# Renderer/GPU/View: GpuFluid[ms],6.627
+# Renderer/GPU/View: MainView[ms],8.902
+# Renderer/GPU/View: Reflection Probe Filter 0[ms],0.216
+# Renderer/GPU/View: Reflection Probe Render 0[ms],1.574
+# Renderer/GPU/View: VSM Region 1[ms],0.651
+# Renderer/GPU/View: VSM Region 2[ms],0.795
+# Renderer/GPU/View: VSM Region 3[ms],0.429
+# Renderer/GPU/WeatherScreenEffects Copy[ms],0.056
+# Renderer/GPU/_TotalTracked[ms],30.993

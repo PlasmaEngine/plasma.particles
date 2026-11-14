@@ -29,9 +29,10 @@
 //   design's gas pressure is sparse MG only, MGPCG is the liquid's dense solver (L10, liquid track P7), and its rows
 //   belong in that track's N3 sweep.
 // - N4 Gas Mass: a closed box (every face a wall, no dissipation), a source for half a second, then 300 ticks in all:
-//   the mass may drift by at most s_fN4MassTolerance. N4 Gas Mass Velocity SL: the same with the velocity advected
-//   semi-Lagrangian (scalars still MacCormack), against the tighter s_fN4MassToleranceVelocitySL, so a regression in the
-//   scalar advection's conservation is not hidden by the larger drift of the defaults.
+//   with the Medium defaults (velocity semi-Lagrangian, the closed-box mass correction) the mass may drift by at most
+//   s_fN4MassTolerance. N4 Gas Mass Velocity SL and N4 Gas Mass Velocity MacCormack run the same box without the
+//   correction, so the advection's own conservation is held to its measured value (s_fN4MassToleranceVelocitySL,
+//   s_fN4MassToleranceVelocityMacCormack) and a regression in it is not hidden by the correction.
 // - N9 Colliders: a plume rising into a sphere collider centred above its source, no noise: the density-weighted
 //   centroid stays within a voxel of the middle in x and y, gas reaches the sphere and gets past it, and the gas the
 //   solid deletes from its cells (GPU_FLUID_STAT_SOLID_CLEARED) stays a small fraction of what the source emitted. (No

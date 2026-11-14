@@ -81,10 +81,12 @@ Keep each mp4 under 15 MB, and delete the frames once encoded: disk is tight.
   SOR iterations are swept against the GPU time of Gas/Pressure (`N3_Poisson.csv`), and each stage of a V-cycle is timed
   on its own (the "N3 profile" line). No MGPCG rows: the gas pressure is multigrid only; MGPCG is the liquid's solver.
 - **N4 Gas Mass**: a closed 2 m box, no dissipation, a source for 0.5 s, 300 ticks; the largest mass drift after 0.7 s
-  must stay within the tolerance stored in the test (the first measured run plus 50%). `N4_GasMass.csv`. The drift of
-  the defaults (+40%) comes from the MacCormack velocity together with vorticity confinement, see `s_fN4MassTolerance`.
-  **N4 Gas Mass Velocity SL** runs the same box with `GpuFluid.Gas.VelocityMacCormack false` against a tighter
-  tolerance (+12% measured), so a regression in the scalar advection shows. `N4_GasMassVelocitySL.csv`.
+  must stay within the tolerance stored in the test (the measured run plus 50%). `N4_GasMass.csv`. Since P2 the defaults
+  are Medium's (velocity semi-Lagrangian) with the closed-box mass correction: largest drift 0.0044. **N4 Gas Mass
+  Velocity SL** (`GpuFluid.Gas.VelocityMacCormack 0`, no correction: +16.5%) and **N4 Gas Mass Velocity MacCormack**
+  (`1`, no correction: +59.5%) hold the advection's own conservation to its measured values. See
+  `s_fN4MassTolerance` for why: the atlas writes truncate on this Mac (now rounded by hand), and the advection gains
+  gas in a stirred closed box.
 - **N9 Colliders**: a plume centred under a sphere collider, no source noise: the centroid stays within a voxel of the
   middle in x and y, the solid has the sphere's cell count, gas reaches it and gets past it, and the gas the solid
   deletes from its cells stays below 1e-3 of what the source emitted (the "lost to the solids" line; the `emitted` and
@@ -99,10 +101,38 @@ Keep each mp4 under 15 MB, and delete the frames once encoded: disk is tight.
 Gas solver CVars for comparisons (all read every frame): `GpuFluid.Gas.PressureSolver` (0 red-black SOR, 1 multigrid),
 `GpuFluid.Gas.PressureCycles`, `GpuFluid.Gas.MGShortCycles`, `GpuFluid.Gas.MGPreSmooth`, `GpuFluid.Gas.MGPostSmooth`,
 `GpuFluid.Gas.MGCoarseSweeps`, `GpuFluid.Gas.MGFinalSweeps`, `GpuFluid.Gas.MGDenseGroupCells`,
-`GpuFluid.Gas.VelocityMacCormack`, `GpuFluid.Gas.Vorticity`, `GpuFluid.Gas.VorticityRate`,
-`GpuFluid.Gas.ProfilePressure` (each step of Gas/Pressure in a pass of its own). They can be given on the command line
+`GpuFluid.Gas.VelocityMacCormack` (-1 the quality's default: High and up, 0 off, 1 on), `GpuFluid.Gas.MassCorrection`,
+`GpuFluid.Gas.ExactSampling`, `GpuFluid.Gas.Vorticity`, `GpuFluid.Gas.VorticityRate`, `GpuFluid.Gas.ProfilePressure`
+(each step of Gas/Pressure in a pass of its own), `GpuFluid.Gas.ProfileKernels` (each kernel of Gas/Advect and
+Gas/Forces in a pass of its own; the split itself costs about 0.1 ms per pass). They can be given on the command line
 after the filter, e.g. `run_gallery.sh out "^N2 Divergence$" -GpuFluid.Gas.PressureCycles 1` (in zsh, split a variable
 holding several with `${=args}`).
+
+## Sub-tests (P2)
+
+The grid is sparse unless a volume sets `AllocateAll` (the closed-box mode; the P1 and P3 scenes do, so their numbers
+stay those of the whole box). The pool is the quality's cap (Low 512, Medium 1536, High 3072, Ultra 6144) unless
+`MaxBricks` is set.
+
+- **N1 Allocation**: a sparse 12 x 12 x 16 m plume box at 12.5 cm (2304 virtual bricks). Every frame the allocator's
+  state is read back (`m_bDebugGridReadback`) and checked: page table and active list agree and hold each slot once,
+  active + free = pool, A > 0 exactly for allocated bricks with content, every neighbour the last Finalize asked for is
+  allocated unless the frame denied a request. Then the source stops and the gas fades fast: 60 ticks later no brick
+  may be left. `N1_Allocation.csv` (the `alloc_*` and `denied_b*` columns).
+- **N1 Allocation Cap**: the same plume in a 64 brick pool: no NaN or overflow, the pool fills, requests are denied, and
+  a bucket is only denied once every request of every later bucket was (bucket 3 first). `N1_AllocationCap.csv`.
+- **N11 Determinism**: the plume four times, hashed every frame in virtual brick order (GasHash): twice with the
+  defaults and a 1024 pool, then with `GpuFluid.Gas.ExactSampling` and pools of 1024 and 512. Each pair must match on
+  every frame. Hardware filtering differs in the last bits between pools (the atlas coordinate's rounding depends on
+  the slot), so cross-pool determinism needs exact sampling, which costs about 3.6 times the advection.
+- **Moving Emitter Video**: with `PL_GPUFLUID_VIDEO=1`, hero demo (a): a source driving across a 64 x 48 m courtyard at
+  25 cm (6144 virtual bricks, the Medium pool), walls, pillars, a gatehouse and a well as colliders, a 1.5 m/s wind;
+  `GpuFluid.Debug.Bricks` draws the brick edges into the gas from 4.5 to 10 s and `GpuFluid.Debug.BrickStats` shows
+  the allocation. 450 frames into `GpuFluidGallery/MovingEmitter/`.
+
+Debug CVars: `GpuFluid.Debug.Bricks` (the brick view: the edges of every allocated brick drawn into the gas, glowing by
+the bucket that keeps it), `GpuFluid.Debug.BrickStats` (the allocation as on-screen text), `GpuFluid.Debug.BrickLines`
+(the bricks as debug line boxes, for the editor; on Metal the VDB march then draws no gas in that view).
 
 ## Timing (`GpuFluid Tier Timing`)
 
@@ -119,6 +149,13 @@ per frame), µs per brick and run, the tick phases together per tick, and the wh
 (`tier-timing-<tier>.csv`) goes to `$W/Output/GpuFluid/` and `<out>/GpuFluid/`, followed by every other GPU pass of the
 last frame for scale. Needs the engine's Metal timestamp fence (feature/gpu-fluid 37a09cea); without it Metal reports a
 fraction of each pass. Release numbers need Release builds of the engine and the package.
+
+**Gas Medium Sparse** (P2, the performance gate of plan amendment A1.1): the sparse gate scene (`SetupGateScene`, a
+16 x 16 x 8 m box at 6.25 cm, two plumes, the Medium pool of 1536) after 150 warm-up frames; the bricks are the mean
+over the measured frames, logged with their min and max ("active bricks over the measured frames"). The scene's look
+values are `PL_GPUFLUID_TUNE_GATESOURCES`, `GATERADIUS`, `GATEDISSIPATION`, `GATECOOLING` and `GATESPACING`. One tick
+per frame instead of two: `-GpuFluid.Debug.StepTime 0.0333334` (the sub-test then fails its two-ticks check). The P2
+Release CSVs are in `Timing/`.
 
 The smoke scenes set a few VDB march CVars for their duration (twelve full-resolution self-shadow taps, no ambient
 occlusion, half the sky term) and put them back afterwards. Look values can be tried without a rebuild, for instance:

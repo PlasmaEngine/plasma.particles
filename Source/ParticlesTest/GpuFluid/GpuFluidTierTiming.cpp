@@ -325,9 +325,9 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
   };
 
   plStringBuilder sCsv;
-  sCsv.AppendFormat("# GpuFluid tier timing, tier {}, Smoke Column, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, {} build, "
+  sCsv.AppendFormat("# GpuFluid tier timing, tier {}, {}, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, {} build, "
                     "Rendering.Pipeline.Injections off\n# gas settings:{}\n",
-    szTier, uiBricks, uiTicks, m_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
+    szTier, tier.m_bSparse ? "sparse gate scene (mean active bricks over the measured frames)" : "Smoke Column (whole box)", uiBricks, uiTicks, m_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
   sCsv.Append("# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs\n");
   sCsv.Append("tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples\n");
 
