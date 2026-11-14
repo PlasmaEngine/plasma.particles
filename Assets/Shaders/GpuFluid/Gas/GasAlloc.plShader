@@ -20,13 +20,19 @@ ALL
 //  3 MARK_ALL      bucket 0 for every brick of the grid (AllocateAll: the closed-box mode keeps the whole box). One thread
 //                  per request word.
 //  4 FREE          every slot with a brick: no request in any bucket this frame adds one to its idle steps, any request
-//                  resets them; at GPU_FLUID_FREE_IDLE_STEPS the slot is freed (page entry, brick table texel, meta).
-//                  Writes 1 for every slot that is free afterwards into the slot scan. One thread per pool slot.
+//                  resets them; at GPU_FLUID_FREE_IDLE_STEPS the slot is freed (page entry, brick table texel, meta; the
+//                  mass it still held is counted as dropped). Writes 1 for every slot that is free afterwards into the
+//                  slot scan, counts them, and flags every slot without a source request in its eviction class (idle,
+//                  proximity only, flux, content). One thread per pool slot.
 //  5 PENDING       the requests for bricks without a slot, each in the first bucket that asked for it, and their count
 //                  per word (the request scan's input); clears the requests for the next Finalize. One thread per
 //                  request word.
-//    [scan of the free flags -> free rank per slot, total F; scan of the pending counts -> first rank per word, total R]
-//  6 FREE_LIST     the free slots in ascending order: free list[rank] = slot. One thread per pool slot.
+//    [scan of the pending counts -> first rank per word, total R; scan of the eviction flags -> rank by class, slot]
+// 11 EVICT         when the sources' pending bricks (bucket 0) outnumber the free slots, the evictable slots of rank below
+//                  the difference are freed like FREE does, so a source never starves behind thin gas or margins.
+//    [scan of the free flags -> free rank per slot, total F]
+//  6 FREE_LIST     the free slots in ascending order (descending with Pass.w bit 0, a test hook that gives every brick
+//                  other slots): free list[rank] = slot. One thread per pool slot.
 //  7 ASSIGN        request k (bucket order, then virtual index) takes free slot k while k < F, else it is denied (counted
 //                  per bucket). A new slot gets its page entry, brick, meta and brick table texel (A = 0), and goes on the
 //                  new list, which GasClear clears. One thread per bucket word.
@@ -40,7 +46,8 @@ ALL
 // Every count is an integer atomic and every slot choice comes from a scan, so the allocation is the same whatever order
 // the groups run in, and the same for every pool size while the pool has room (N11).
 //
-// Pass: y request words per bucket, z emitter list entries, w unused.   Params0: x byte offset of the free total in the
+// Pass: y request words per bucket, z emitter list entries, w bit 0 free list in descending slot order (test hook).
+// Params0: x byte offset of the free total in the
 // slot scan's scratch, y byte offset of the request total in the request scan's scratch, z 1: the debug readback's
 // virtual part.
 
@@ -55,6 +62,7 @@ ALL
 #define GPU_FLUID_ALLOC_LISTS 8
 #define GPU_FLUID_ALLOC_ARGS 9
 #define GPU_FLUID_ALLOC_DEBUG 10
+#define GPU_FLUID_ALLOC_EVICT 11
 
 RWStructuredBuffer<uint> GpuFluidPageTableOutput;
 RWStructuredBuffer<uint> GpuFluidActiveListOutput;
@@ -78,6 +86,7 @@ RWStructuredBuffer<uint> GpuFluidBrickMeta;    // 4 words per slot (GPU_FLUID_ME
 StructuredBuffer<uint> GpuFluidEmitterBricks;  // linear virtual bricks the sources overlap
 RWByteAddressBuffer GpuFluidStats;
 RWStructuredBuffer<uint> GpuFluidGridDebug;
+RWByteAddressBuffer GpuFluidEvictScan;         // per eviction class and pool slot: 1 when evictable, scanned in place to the rank
 
 void WriteArgs(uint first, uint count, uint z)
 {
@@ -108,6 +117,21 @@ bool IsRequested(uint bucket, uint brickLinear, uint words)
 {
   const uint word = GpuFluidRequests.Load((bucket * words + (brickLinear >> 5)) * 4);
   return (word & (1u << (brickLinear & 31u))) != 0;
+}
+
+/// Takes a slot's brick away (freeing or eviction): page entry, brick, brick table texel and meta. The gas the brick still
+/// held at the last Finalize is counted as dropped.
+void FreeSlot(uint slot, uint3 brick, uint brickLinear)
+{
+  const uint mass = GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASS];
+  if (mass > 0)
+    GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_MASS_DROPPED * 4, mass);
+
+  GpuFluidPageTableOutput[brickLinear] = GPU_FLUID_INVALID_SLOT;
+  GpuFluidBrickCoordsOutput[slot] = GPU_FLUID_INVALID_SLOT;
+  GpuFluidIndirectionOutput[brick] = float4(0.0, 0.0, 0.0, 0.0);
+  [unroll] for (uint i = 0; i < 4; ++i)
+    GpuFluidBrickMeta[slot * 4 + i] = 0;
 }
 
 [numthreads(64, 1, 1)]
@@ -181,10 +205,16 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (index >= capacity)
       return;
 
+    // The eviction classes of this slot: none unless it keeps a brick no source overlaps.
+    [unroll] for (uint c = 0; c < GPU_FLUID_EVICT_CLASSES; ++c)
+      GpuFluidEvictScan.Store((c * capacity + index) * 4, 0u);
+
+    uint previous;
     const uint packed = GpuFluidBrickCoordsOutput[index];
     if (packed == GPU_FLUID_INVALID_SLOT)
     {
       GpuFluidSlotScan.Store(index * 4, 1u);
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREE], 1u, previous);
       return;
     }
 
@@ -198,24 +228,31 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         buckets |= 1u << b;
     }
 
-    const uint idle = buckets != 0 ? 0u : GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_IDLE] + 1;
+    const uint idle = buckets != 0 ? 0u : (GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_BUCKETS] >> GPU_FLUID_META_IDLE_SHIFT) + 1;
     if (idle >= GPU_FLUID_FREE_IDLE_STEPS)
     {
-      GpuFluidPageTableOutput[brickLinear] = GPU_FLUID_INVALID_SLOT;
-      GpuFluidBrickCoordsOutput[index] = GPU_FLUID_INVALID_SLOT;
-      GpuFluidIndirectionOutput[brick] = float4(0.0, 0.0, 0.0, 0.0);
-      [unroll] for (uint i = 0; i < 4; ++i)
-        GpuFluidBrickMeta[index * 4 + i] = 0;
+      FreeSlot(index, brick, brickLinear);
       GpuFluidSlotScan.Store(index * 4, 1u);
-
-      uint previous;
       InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREED], 1u, previous);
+      InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREE], 1u, previous);
       return;
     }
 
-    GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_IDLE] = idle;
-    GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_BUCKETS] = buckets;
+    GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_BUCKETS] = buckets | (idle << GPU_FLUID_META_IDLE_SHIFT);
     GpuFluidSlotScan.Store(index * 4, 0u);
+
+    // A source's brick is never evicted; the others by class: idle, proximity only, flux, content.
+    if ((buckets & (1u << GPU_FLUID_BUCKET_EMITTER)) == 0)
+    {
+      uint evictClass = 3;
+      if (buckets == 0)
+        evictClass = 0;
+      else if (buckets == (1u << GPU_FLUID_BUCKET_PROXIMITY))
+        evictClass = 1;
+      else if ((buckets & (1u << GPU_FLUID_BUCKET_ALIVE)) == 0)
+        evictClass = 2;
+      GpuFluidEvictScan.Store((evictClass * capacity + index) * 4, 1u);
+    }
     return;
   }
 
@@ -261,14 +298,58 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     return;
   }
 
+  if (mode == GPU_FLUID_ALLOC_EVICT)
+  {
+    if (index >= capacity)
+      return;
+
+    // The sources' bricks that the free slots cannot hold.
+    const uint sourceRequests = GpuFluidCountersOutput[GPU_FLUID_COUNTER_REQUESTS_BUCKET + GPU_FLUID_BUCKET_EMITTER];
+    const uint freeSlots = GpuFluidCountersOutput[GPU_FLUID_COUNTER_FREE];
+    const uint deficit = sourceRequests > freeSlots ? sourceRequests - freeSlots : 0u;
+    if (deficit == 0)
+      return;
+
+    const uint packed = GpuFluidBrickCoordsOutput[index];
+    if (packed == GPU_FLUID_INVALID_SLOT)
+      return;
+    const uint buckets = GpuFluidBrickMeta[index * 4 + GPU_FLUID_META_BUCKETS] & GPU_FLUID_META_BUCKET_BITS;
+    if ((buckets & (1u << GPU_FLUID_BUCKET_EMITTER)) != 0)
+      return;
+
+    uint evictClass = 3;
+    if (buckets == 0)
+      evictClass = 0;
+    else if (buckets == (1u << GPU_FLUID_BUCKET_PROXIMITY))
+      evictClass = 1;
+    else if ((buckets & (1u << GPU_FLUID_BUCKET_ALIVE)) == 0)
+      evictClass = 2;
+
+    // Rank among the evictable slots, by class and then slot index.
+    if (GpuFluidEvictScan.Load((evictClass * capacity + index) * 4) >= deficit)
+      return;
+
+    const uint3 brick = GpuFluidUnpackBrick(packed);
+    FreeSlot(index, brick, GpuFluidBrickLinear(brick, grid));
+    GpuFluidSlotScan.Store(index * 4, 1u);
+
+    uint previous;
+    InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_EVICTED], 1u, previous);
+    return;
+  }
+
   const uint freeTotal = GpuFluidSlotScratch.Load(uint(params.x));
   const uint requestTotal = GpuFluidRequestScratch.Load(uint(params.y));
   const uint assigned = min(freeTotal, requestTotal);
+  const bool bReverseSlots = (pass.w & 1u) != 0;
 
   if (mode == GPU_FLUID_ALLOC_FREE_LIST)
   {
     if (index < capacity && GpuFluidBrickCoordsOutput[index] == GPU_FLUID_INVALID_SLOT)
-      GpuFluidFreeList[GpuFluidSlotScan.Load(index * 4)] = index;
+    {
+      const uint freeRank = GpuFluidSlotScan.Load(index * 4);
+      GpuFluidFreeList[bReverseSlots ? freeTotal - 1 - freeRank : freeRank] = index;
+    }
     return;
   }
 
@@ -298,7 +379,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
         const uint3 brick = BrickOfLinear(brickLinear, grid);
         GpuFluidPageTableOutput[brickLinear] = slot;
         GpuFluidBrickCoordsOutput[slot] = GpuFluidPackBrick(brick);
-        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_IDLE] = 0;
+        GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASS] = 0;
         GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_ALIVE] = 0;
         GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASK] = 0;
         GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_BUCKETS] = 1u << bucket;
@@ -335,9 +416,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
       return;
 
     // Slots below this one that hold a brick now: the ones that already did, plus the free ones that were assigned
-    // (assignment takes the free slots in ascending order).
+    // (assignment takes the free slots in ascending order, or the last ones in descending order).
     const uint freeBefore = GpuFluidSlotScan.Load(index * 4);
-    const uint rank = (index - freeBefore) + min(freeBefore, assigned);
+    const uint firstAssignedRank = freeTotal - assigned;
+    const uint assignedBefore = bReverseSlots ? max(freeBefore, firstAssignedRank) - firstAssignedRank : min(freeBefore, assigned);
+    const uint rank = (index - freeBefore) + assignedBefore;
     GpuFluidActiveListOutput[rank] = index;
 
     const int3 brick = int3(GpuFluidUnpackBrick(packed));
@@ -390,6 +473,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_FREE * 4, freeTotal);
     GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_REQUESTS * 4, requestTotal);
     GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_ACTIVE * 4, active);
+    GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_EVICTED * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_EVICTED]);
     [unroll] for (uint b = 0; b < GPU_FLUID_ALLOC_BUCKETS; ++b)
     {
       GpuFluidStats.Store((GPU_FLUID_STAT_DENIED_BUCKET + b) * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED_BUCKET + b]);

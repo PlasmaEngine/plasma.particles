@@ -48,6 +48,7 @@ struct plGpuFluidGpuManager::GasVolume
   bool m_bStatsValid = false;
   plGpuFluidGasStats m_Stats;
   float m_fVoxelSize = 0.0625f;
+  float m_fTickSeconds = plGpuFluidGasTick;
   bool m_bGridDebugValid = false;
   plGpuFluidGridDebug m_GridDebug;
   bool m_bPublishBrickView = false; ///< the last frame's Finalize wrote the brick view, which is published instead
@@ -225,6 +226,7 @@ void plGpuFluidGpuManager::SetGasFrameInput(plGpuFluidVolumeId id, const plGpuFl
   (*pVolume)->m_Input[uiIndex] = input;
   (*pVolume)->m_bInputValid[uiIndex] = true;
   (*pVolume)->m_fVoxelSize = input.m_Simulation.m_fVoxelSize;
+  (*pVolume)->m_fTickSeconds = input.m_Simulation.m_fTickSeconds;
 }
 
 bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPublish& out_publish) const
@@ -252,7 +254,7 @@ bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPub
   if (volume.m_bStatsValid && volume.m_Stats.HasBounds())
   {
     const float fBrickMetres = plMath::Max(volume.m_fVoxelSize, 1e-4f) * plGpuFluidBrickSize;
-    const float fLatencySeconds = 3.0f * plGpuFluidMaxGasTicksPerFrame * plGpuFluidGasTick;
+    const float fLatencySeconds = 3.0f * plGpuFluidMaxGasTicksPerFrame * plMath::Max(volume.m_fTickSeconds, plGpuFluidGasTick);
     const float fGrow = 1.0f + plMath::Ceil(volume.m_Stats.m_fMaxSpeed * fLatencySeconds / fBrickMetres);
 
     const plVec3 vGrid(static_cast<float>(volume.m_Settings.m_vBrickGrid.x), static_cast<float>(volume.m_Settings.m_vBrickGrid.y), static_cast<float>(volume.m_Settings.m_vBrickGrid.z));
@@ -585,6 +587,8 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_uiFreeSlots = pWords[GPU_FLUID_STAT_ALLOC_FREE];
   stats.m_uiAllocRequests = pWords[GPU_FLUID_STAT_ALLOC_REQUESTS];
   stats.m_uiAllocActive = pWords[GPU_FLUID_STAT_ALLOC_ACTIVE];
+  stats.m_uiEvictedBricks = pWords[GPU_FLUID_STAT_ALLOC_EVICTED];
+  stats.m_fMassDropped = static_cast<float>(static_cast<double>(pWords[GPU_FLUID_STAT_MASS_DROPPED]) / GPU_FLUID_MASS_SCALE);
   for (plUInt32 b = 0; b < 4; ++b)
   {
     stats.m_uiDeniedPerBucket[b] = pWords[GPU_FLUID_STAT_DENIED_BUCKET + b];
@@ -775,6 +779,7 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
         alloc.m_bAllocateAll = input.m_bAllocateAll;
         alloc.m_bDebugReadback = input.m_bDebugGrid;
         alloc.m_bDebugVirtual = input.m_bDebugGridVirtual;
+        alloc.m_bReverseSlots = input.m_bReverseSlots;
         CollectEmitterBricks(input.m_Simulation, volume.m_Settings.m_vBrickGrid, alloc.m_EmitterBricks);
 
         // In the closed-box mode nothing changes once the box is allocated.

@@ -319,6 +319,7 @@ plResult plGpuFluidGalleryApplication::SetupPoissonScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 512;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_EmitterShape = plGpuFluidEmitterShape::None;
   pGas->m_OpenFaces = AllFaces();
@@ -348,6 +349,7 @@ plResult plGpuFluidGalleryApplication::SetupClosedBoxScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 64;
   pGas->m_bAllocateAll = true; // the closed-box mode
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // 300 ticks in 150 frames, as measured in P3
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = NoFaces(); // every face a wall
   pGas->m_fBuoyancy = Tune("N4BUOYANCY", 6.0f);
@@ -389,6 +391,7 @@ plResult plGpuFluidGalleryApplication::SetupObstacleScene(bool bNoise, bool bMov
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 1536;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default;
   pGas->m_fBuoyancy = Tune("BUOYANCY", 6.0f);
@@ -451,6 +454,7 @@ plResult plGpuFluidGalleryApplication::SetupCorridorScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 1536;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = NoFaces();
   // A hot layer that stays hot (little cooling) and stirred only gently (half the confinement), so it stratifies under

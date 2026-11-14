@@ -180,9 +180,18 @@ struct plGpuFluidGasSimulation
   /// ticks).
   float m_fAllocLookahead = 2.0f * 2.0f / 60.0f;
 
-  /// GpuFluid.Debug.Bricks: GasFinalize writes the brick view (the gas without its heat, the brick edges as gas as hot as
-  /// the bucket that keeps the brick) into Scratch, which the volume then publishes instead of the scalars.
+  /// GpuFluid.Debug.Bricks: GasFinalize writes the brick view (the gas's density without emission, the brick edges as a
+  /// faint gas glowing in the colour of the bucket that keeps the brick) into Scratch, which the volume then publishes
+  /// instead of the scalars, with the emission channel.
   bool m_bBrickView = false;
+
+  /// The brick view's edge density in atlas units: the volume sets it so an edge crossing (about a voxel) has an optical
+  /// depth of about 1%, whatever its density scale and voxel size.
+  float m_fBrickViewEdgeDensity = 0.01f;
+
+  /// The brick view's gas density (atlas units) above which an edge's glow fades with the density around it: an optical
+  /// depth of about 0.02 per voxel, so the edges inside thick smoke do not light it up.
+  float m_fBrickViewGasDensity = 0.1f;
 
   /// Closed-box mass correction (GpuFluid.Gas.MassCorrection, only for volumes with every face closed and the whole
   /// box allocated): GasForces scales the density so the advection does not change the total mass.

@@ -46,6 +46,10 @@ struct plGpuFluidAllocInput
 
   /// Include the per virtual brick part (page table, brick table A) in it.
   bool m_bDebugVirtual = false;
+
+  /// Test hook (N11): free slots are handed out in descending slot order, so every brick gets other slots than with the
+  /// default ascending order while the simulation stays the same.
+  bool m_bReverseSlots = false;
 };
 
 /// The grid debug readback, decoded (two to three frames late). See GPU_FLUID_DEBUG_* in GpuFluidConstants.h.
@@ -57,9 +61,10 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGridDebug
 
   plUInt32 m_Counters[16] = {};
 
-  /// Per pool slot: the packed brick (x | y << 10 | z << 20) or 0xFFFFFFFF when free, and the meta words (idle steps,
-  /// alive, neighbour request mask, buckets that requested it).
+  /// Per pool slot: the packed brick (x | y << 10 | z << 20) or 0xFFFFFFFF when free, and the meta words (mass at the last
+  /// Finalize in GPU_FLUID_MASS_SCALE, idle steps, alive, neighbour request mask, buckets that requested it).
   plDynamicArray<plUInt32> m_SlotBrick;
+  plDynamicArray<plUInt32> m_SlotMass;
   plDynamicArray<plUInt32> m_SlotIdle;
   plDynamicArray<plUInt32> m_SlotAlive;
   plDynamicArray<plUInt32> m_SlotMask;
@@ -85,19 +90,20 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGridDebug
 /// | ActiveList    | active index -> pool slot, ascending                                       |
 /// | BrickCoords   | pool slot -> packed virtual brick, 0xFFFFFFFF when free                    |
 /// | Neighbors     | 27 per pool slot: slot, or "unallocated" / "outside the domain"            |
-/// | Counters      | active, denied, colour counts, new, freed, denied per bucket               |
+/// | Counters      | active, denied, colour counts, new, freed, free, evicted, denied and requests per bucket |
 /// | DispatchArgs  | three sets (x, y, z, count): every active brick, the same in slabs, the new list (2D fold) |
 /// | ColourList    | the active slots by brick colour (coordinate sum parity): 0 at the front, 1 at the back |
 /// | ColourArgs    | DispatchArgs for each brick colour (the multigrid's block red-black launches) |
 /// | Requests      | 4 priority buckets x 1 bit per virtual brick (GasFinalize, the emitter list) |
-/// | Pending, RequestScan, SlotScan, FreeList, NewList | the allocation's work lists (GasAlloc.plShader) |
-/// | BrickMeta     | 4 words per slot: idle steps, alive, neighbour request mask, buckets       |
+/// | Pending, RequestScan, SlotScan, EvictScan, FreeList, NewList | the allocation's work lists (GasAlloc.plShader) |
+/// | BrickMeta     | 4 words per slot: mass, alive, neighbour request mask, buckets and idle steps |
 /// | Indirection   | the VDB brick table (RGBA16F): rgb = atlas brick / 255, a = brick mean      |
 ///
 /// Every frame that runs ticks, Gas/Alloc frees idle slots and assigns free ones to the requests, deterministically
 /// (design plan section 3): the pool never resizes, and the k-th request in bucket order, then virtual order, takes the
-/// k-th free slot. The solver clears the new bricks (it owns the atlases), and GasFinalize marks the next frame's
-/// requests.
+/// k-th free slot. When the sources' bricks (bucket 0) do not fit into the free slots, slots of bricks no source overlaps
+/// are evicted for them (idle first, then proximity only, flux, content), so a full pool never starves a source. The
+/// solver clears the new bricks (it owns the atlases), and GasFinalize marks the next frame's requests.
 ///
 /// GPU resources are created and destroyed on the render thread.
 class PL_PARTICLEPLUGIN_DLL plGpuFluidSparseGrid
@@ -163,6 +169,8 @@ private:
   plGALBufferHandle m_hRequestScratch;
   plGALBufferHandle m_hSlotScan;
   plGALBufferHandle m_hSlotScratch;
+  plGALBufferHandle m_hEvictScan;
+  plGALBufferHandle m_hEvictScratch;
   plGALBufferHandle m_hFreeList;
   plGALBufferHandle m_hNewList;
   plGALBufferHandle m_hBrickMeta;
@@ -172,6 +180,7 @@ private:
 
   plGpuFluidScan::Layout m_RequestLayout;
   plGpuFluidScan::Layout m_SlotLayout;
+  plGpuFluidScan::Layout m_EvictLayout;
   plGpuFluidScan m_Scan;
 
   plGpuFluidReadbackRing m_DebugReadback;

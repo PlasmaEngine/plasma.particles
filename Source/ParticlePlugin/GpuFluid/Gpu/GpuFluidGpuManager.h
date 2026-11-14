@@ -54,6 +54,9 @@ struct plGpuFluidGasFrameInput
   /// N11: hash the gas state in virtual brick order after the frame (plGpuFluidGasStats::m_uiStateHash).
   bool m_bHashState = false;
 
+  /// N11: free slots are handed out in descending order (plGpuFluidAllocInput::m_bReverseSlots).
+  bool m_bReverseSlots = false;
+
   plGpuFluidGasSimulation m_Simulation;
 };
 
@@ -105,6 +108,8 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   plUInt32 m_uiDeniedPerBucket[4] = {};
   plUInt32 m_uiRequestsPerBucket[4] = {}; ///< requests for bricks without a slot, each counted in the first bucket that asked
   plUInt32 m_uiAllocActive = 0;
+  plUInt32 m_uiEvictedBricks = 0; ///< slots taken from bricks without a source for the sources' bricks (full pool)
+  float m_fMassDropped = 0.0f;    ///< density (times voxels) the freed and evicted bricks still held at their last Finalize
 
   /// The state hash (plGpuFluidGasFrameInput::m_bHashState) of the atlases in virtual brick order, of frame
   /// m_uiHashFrame (0 until one arrived).

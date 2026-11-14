@@ -29,7 +29,8 @@ ALL
 //
 // Pass: x the mode of GpuFluidHaloTarget, y the mode of GpuFluidHaloTarget2 + 1 (0: one target only), w bit 0: over the
 // bricks assigned this frame (the new list) instead of every active brick, after GasClear, so a new brick's apron holds
-// its neighbours' faces before the first tick reads it.
+// its neighbours' faces before the first tick reads it; w bit 1 (with bit 0): the new brick also writes its cleared
+// cells into the facing aprons of its allocated neighbours, so both copies of every shared texel agree.
 //
 // Interiors are only read, aprons only written, and every brick writes its own apron. The one exception is the keep
 // mode's read of a +side face's normal component from a neighbour's apron texel: the neighbour rewrites that texel in
@@ -169,4 +170,23 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   if (pass.y != 0 && HaloValue(GpuFluidHaloTarget2, pass.y - 1, source, ambient, value))
     GpuFluidHaloTarget2[base + stored] = value;
+
+  // Pass.w bit 1 (with bit 0, after GasClear): the new brick also writes its cleared cells into the aprons of the bricks
+  // around it that have a slot, which still hold what the last frame's halo or GasProject wrote against open air there.
+  // Apron texel i of this brick, beyond it in direction d, pairs with the neighbour's apron texel over this brick's
+  // interior cell local - d (both sets have 488 texels), so every such texel is written once per new brick. Two new
+  // neighbours write the same values into each other's aprons as their own pulls above.
+  if ((pass.w & 2u) != 0 && !any(source.m_bBeyond))
+  {
+    const int3 dir = int3(local >= GPU_FLUID_BRICK_SIZE) - int3(local < 0);
+    const uint neighbour = GpuFluidNeighbor(slot, dir);
+    if (neighbour < GPU_FLUID_NEIGHBOR_OUTSIDE)
+    {
+      const int3 cell = local - dir;
+      const int3 neighbourTexel = GpuFluidSlotBase(neighbour) + cell - dir * GPU_FLUID_BRICK_SIZE + GPU_FLUID_BRICK_APRON;
+      GpuFluidHaloTarget[neighbourTexel] = GpuFluidHaloTarget[base + cell + GPU_FLUID_BRICK_APRON];
+      if (pass.y != 0)
+        GpuFluidHaloTarget2[neighbourTexel] = GpuFluidHaloTarget2[base + cell + GPU_FLUID_BRICK_APRON];
+    }
+  }
 }
