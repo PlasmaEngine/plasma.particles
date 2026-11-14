@@ -1,0 +1,35 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#define GPU_FLUID_SCAN_KERNEL
+#include <Shaders/GpuFluid/GpuFluidScan.hlsli>
+
+// Adds the scanned block sums back onto a level of the scan: element i gets the exclusive sum of every block before
+// its own. Same group shape as the block pass.
+
+RWByteAddressBuffer GpuFluidScanOutput;
+RWByteAddressBuffer GpuFluidScanBlockSums;
+
+[numthreads(GPU_FLUID_SCAN_THREADS, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  const uint4 range = GET_PUSH_CONSTANT(plGpuFluidScanConstants, GpuFluidScanRange);
+  const uint count = range.x;
+  const uint offset = GpuFluidScanBlockSums.Load(range.w + groupId.x * 4);
+  const uint first = groupId.x * GPU_FLUID_SCAN_BLOCK + groupIndex * GPU_FLUID_SCAN_PER_THREAD;
+
+  [unroll] for (uint i = 0; i < GPU_FLUID_SCAN_PER_THREAD; ++i)
+  {
+    const uint element = first + i;
+    if (element < count)
+    {
+      const uint address = range.z + element * 4;
+      GpuFluidScanOutput.Store(address, GpuFluidScanOutput.Load(address) + offset);
+    }
+  }
+}

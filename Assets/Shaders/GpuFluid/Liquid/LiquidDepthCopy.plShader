@@ -1,0 +1,35 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+
+[RENDERSTATE]
+
+DepthTest = false
+DepthWrite = false
+CullMode = CullMode_None
+
+[VERTEXSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleVertexShader.h>
+
+[PIXELSHADER]
+
+#include <Shaders/Pipeline/FullscreenTriangleInterpolator.h>
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+
+// The opaque scene's depth, copied into a float target (plGpuFluidLiquidPass), so the liquid can read it while it
+// writes the depth buffer.
+
+Texture2DArray GpuFluidLiqOpaqueDepth BIND_GROUP(BG_RENDER_PASS);
+
+float main(PS_IN Input) : SV_Target0
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = Input.RenderTargetArrayIndex;
+#endif
+  return GpuFluidLiqOpaqueDepth.Load(int4(int2(Input.Position.xy), s_ActiveCameraEyeIndex, 0)).r;
+}

@@ -1,0 +1,58 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// Restriction to coarse level L = GpuFluidLiqPass.x from level L - 1: the coarse cell's type from its 8 children, its
+// right-hand side = scale * the sum of the children's residuals (scale 0.5 is four times the mean, which keeps the
+// unit-spacing stencil consistent across levels), and a zero initial guess for the correction.
+
+RWByteAddressBuffer GpuFluidLiqMgFineX;
+RWByteAddressBuffer GpuFluidLiqMgFineB;
+RWByteAddressBuffer GpuFluidLiqMgFineType;
+
+[numthreads(GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint level = MgLevel();
+  const uint3 dims = LiqLevelDims(level);
+  const uint3 fineDims = LiqLevelDims(level - 1);
+  const bool bFine = level == 1;
+
+  const int3 cell = int3(dispatchThreadId);
+  if (!LiqInsideDims(cell, dims))
+    return;
+
+  float sum = 0.0;
+  bool bAnyLiquid = false;
+  bool bAnyAir = false;
+
+  [unroll] for (uint o = 0; o < 8; ++o)
+  {
+    const int3 child = cell * 2 + int3(o & 1u, (o >> 1) & 1u, (o >> 2) & 1u);
+    const uint t = LiqTypeAt(GpuFluidLiqMgFineType, child, fineDims, bFine);
+    if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      bAnyLiquid = true;
+      sum += MgResidual(GpuFluidLiqMgFineType, GpuFluidLiqMgFineX, GpuFluidLiqMgFineB, child, fineDims, bFine);
+    }
+    else if (t == GPU_FLUID_LIQUID_CELL_AIR)
+    {
+      bAnyAir = true;
+    }
+  }
+
+  // McAdams et al. 2010: a coarse cell touching the free surface is Dirichlet (air). The coarse liquid region then lies
+  // inside the fine one, so the coarse operator never asks for more correction than the fine problem has; a coarse
+  // liquid region that reached past the surface over-corrects there and diverges on thin sheets.
+  const bool bLiquid = bAnyLiquid && !bAnyAir;
+  const uint type = bLiquid ? GPU_FLUID_LIQUID_CELL_LIQUID : (bAnyAir ? GPU_FLUID_LIQUID_CELL_AIR : GPU_FLUID_LIQUID_CELL_SOLID);
+  const uint index = LiqCellIndexIn(cell, dims);
+  GpuFluidLiqMgType.Store(index * 4, type);
+  GpuFluidLiqMgB.Store(index * 4, asuint(bLiquid ? MgRestrictScale() * sum : 0.0));
+  GpuFluidLiqMgX.Store(index * 4, 0u);
+}

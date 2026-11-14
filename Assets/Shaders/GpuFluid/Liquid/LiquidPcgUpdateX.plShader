@@ -1,0 +1,35 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
+
+// x += alpha p, r -= alpha q at the liquid cells (x bound as GpuFluidLiqMgX, the pressure), and z = 0 for the next
+// preconditioner V-cycle.
+
+RWByteAddressBuffer GpuFluidLiqPcgR;
+RWByteAddressBuffer GpuFluidLiqPcgZ;
+RWByteAddressBuffer GpuFluidLiqPcgP;
+RWByteAddressBuffer GpuFluidLiqPcgQ;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint index = LiqCellIndex(cell);
+  GpuFluidLiqPcgZ.Store(index * 4, 0u);
+  if (!PcgIsLiquid(cell))
+    return;
+
+  const float alpha = PcgScalar(GPU_FLUID_LIQUID_PCG_ALPHA);
+  const float x = asfloat(GpuFluidLiqMgX.Load(index * 4)) + alpha * asfloat(GpuFluidLiqPcgP.Load(index * 4));
+  const float r = asfloat(GpuFluidLiqPcgR.Load(index * 4)) - alpha * asfloat(GpuFluidLiqPcgQ.Load(index * 4));
+  GpuFluidLiqMgX.Store(index * 4, asuint(x));
+  GpuFluidLiqPcgR.Store(index * 4, asuint(r));
+}

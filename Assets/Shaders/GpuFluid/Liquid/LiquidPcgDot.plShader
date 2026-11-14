@@ -1,0 +1,29 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
+
+// Per active brick: the sum of r * z over its liquid cells, into the brick's partial (LiquidPcgReduce adds them up).
+
+RWByteAddressBuffer GpuFluidLiqPcgR;
+RWByteAddressBuffer GpuFluidLiqPcgZ;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  int3 cell;
+  const bool bCell = LiqBrickCell(groupId, groupThreadId, cell);
+
+  float value = 0.0;
+  if (bCell && PcgIsLiquid(cell))
+  {
+    const uint index = LiqCellIndex(cell);
+    value = asfloat(GpuFluidLiqPcgR.Load(index * 4)) * asfloat(GpuFluidLiqPcgZ.Load(index * 4));
+  }
+
+  PcgStorePartial(groupIndex, bCell, cell, value);
+}

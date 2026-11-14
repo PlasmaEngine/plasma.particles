@@ -1,0 +1,54 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Active bricks: those holding particles plus one brick around them. Every grid kernel of the substep runs on this
+// list only. The list order follows the atomics; each brick's work is independent of the order, and the smoother
+// colours cells, so the result does not depend on it.
+
+RWByteAddressBuffer GpuFluidLiqBrickOccupied;
+RWByteAddressBuffer GpuFluidLiqBrickActive;
+RWByteAddressBuffer GpuFluidLiqBrickListOut;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint3 bricks = LiqBricks();
+  const uint brick = dispatchThreadId.x;
+  if (brick >= bricks.x * bricks.y * bricks.z)
+    return;
+
+  const int3 b = int3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y));
+
+  bool bActive = false;
+  for (int z = -1; z <= 1; ++z)
+  {
+    for (int y = -1; y <= 1; ++y)
+    {
+      for (int x = -1; x <= 1; ++x)
+      {
+        const int3 nb = b + int3(x, y, z);
+        if (LiqInsideDims(nb, bricks))
+          bActive = bActive || GpuFluidLiqBrickOccupied.Load(LiqCellIndexIn(nb, bricks) * 4) != 0;
+      }
+    }
+  }
+
+  if (GpuFluidLiqBrickOccupied.Load(brick * 4) != 0)
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_OCCUPIED * 4, 1u);
+
+  GpuFluidLiqBrickActive.Store(brick * 4, bActive ? 1u : 0u);
+
+  if (bActive)
+  {
+    uint slot;
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS * 4, 1u, slot);
+    GpuFluidLiqBrickListOut.Store(slot * 4, brick);
+  }
+}

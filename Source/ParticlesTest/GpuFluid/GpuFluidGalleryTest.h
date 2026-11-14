@@ -89,10 +89,12 @@ protected:
   virtual void Init_FileSystem_ConfigureDataDirs() override;
   virtual void BeforeHighLevelSystemsShutdown() override;
 
-private:
+public:
+  /// Scene helpers, shared with the liquid gallery (GpuFluidLiquidGalleryTest.cpp). World write lock held.
   plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color);
   void AddSunAndSky(const plVec3& vToSun, float fLux);
 
+private:
   /// Clears the world and builds the shared stage: a grey floor, the sun and the sky; with bProps also a 1 m checker
   /// around the origin and a few boxes for scale and depth.
   void SetupStage(plUInt32 uiSeed, const plVec3& vToSun, bool bProps);

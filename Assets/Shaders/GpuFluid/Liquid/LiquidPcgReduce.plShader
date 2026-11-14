@@ -1,0 +1,65 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// One group: the sum of the partials of the active bricks, in a fixed order (thread t adds bricks t, t + 256, ...,
+// then a groupshared tree), and from it the MGPCG scalars. GpuFluidLiqPass.y: GPU_FLUID_LIQUID_PCG_REDUCE_*.
+// A step whose denominator is not positive (the solve has converged to round-off, or there is no liquid) is zero, so
+// the iterations that follow leave x as it is.
+
+RWByteAddressBuffer GpuFluidLiqPcgScalars;
+RWByteAddressBuffer GpuFluidLiqPcgPartials;
+
+groupshared float gs_fSum[GPU_FLUID_LIQUID_COARSEST_GROUP];
+
+[numthreads(GPU_FLUID_LIQUID_COARSEST_GROUP, 1, 1)]
+void main(uint groupIndex : SV_GroupIndex)
+{
+  const uint3 bricks = LiqBricks();
+  const uint count = bricks.x * bricks.y * bricks.z;
+
+  float sum = 0.0;
+  for (uint b = groupIndex; b < count; b += GPU_FLUID_LIQUID_COARSEST_GROUP)
+  {
+    if (GpuFluidLiqBrickActive.Load(b * 4) != 0)
+      sum += asfloat(GpuFluidLiqPcgPartials.Load(b * 4));
+  }
+  gs_fSum[groupIndex] = sum;
+  GroupMemoryBarrierWithGroupSync();
+
+  [unroll] for (uint stride = GPU_FLUID_LIQUID_COARSEST_GROUP / 2; stride > 0; stride >>= 1)
+  {
+    if (groupIndex < stride)
+      gs_fSum[groupIndex] += gs_fSum[groupIndex + stride];
+    GroupMemoryBarrierWithGroupSync();
+  }
+
+  if (groupIndex != 0)
+    return;
+
+  const float total = LiqIsFinite3(float3(gs_fSum[0], 0, 0)) ? gs_fSum[0] : 0.0;
+  const uint mode = LIQ_CONST(GpuFluidLiqPass).y;
+  const float rz = asfloat(GpuFluidLiqPcgScalars.Load(GPU_FLUID_LIQUID_PCG_RZ * 4));
+
+  if (mode == GPU_FLUID_LIQUID_PCG_REDUCE_START)
+  {
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_RZ * 4, asuint(total));
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_BETA * 4, asuint(0.0));
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_ALPHA * 4, asuint(0.0));
+  }
+  else if (mode == GPU_FLUID_LIQUID_PCG_REDUCE_ALPHA)
+  {
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_PQ * 4, asuint(total));
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_ALPHA * 4, asuint(total > 1e-30 && rz > 0.0 ? rz / total : 0.0));
+  }
+  else
+  {
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_BETA * 4, asuint(rz > 1e-30 && total > 0.0 ? total / rz : 0.0));
+    GpuFluidLiqPcgScalars.Store(GPU_FLUID_LIQUID_PCG_RZ * 4, asuint(total));
+  }
+}

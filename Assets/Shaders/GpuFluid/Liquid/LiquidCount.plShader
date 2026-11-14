@@ -1,0 +1,56 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Counting sort, step 1: each particle takes a rank inside its cell. A particle outside the domain is removed: it
+// counts as drained when it left through an open face, as lost otherwise (it escaped a wall, or it is NaN). Marks
+// the bricks that hold particles.
+
+ByteAddressBuffer GpuFluidLiqPositions;
+RWByteAddressBuffer GpuFluidLiqCellCount;
+RWByteAddressBuffer GpuFluidLiqRank;
+RWByteAddressBuffer GpuFluidLiqBrickOccupied;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  uint index;
+  if (!LiqParticleIndex(groupId, groupIndex, index))
+    return;
+
+  const float3 position = asfloat(GpuFluidLiqPositions.Load3(index * GPU_FLUID_LIQUID_POSITION_BYTES));
+  const float3 g = LiqGridPosition(position);
+  const float3 n = float3(LiqCells());
+
+  uint rank = GPU_FLUID_LIQUID_REMOVED;
+
+  if (!LiqIsFinite3(position))
+  {
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_LOST * 4, 1u);
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_NAN * 4, 1u);
+  }
+  else if (any(g < 0.0) || any(g >= n))
+  {
+    uint sides = 0;
+    sides |= g.x < 0.0 ? GPU_FLUID_LIQUID_OPEN_NEG_X : (g.x >= n.x ? GPU_FLUID_LIQUID_OPEN_POS_X : 0u);
+    sides |= g.y < 0.0 ? GPU_FLUID_LIQUID_OPEN_NEG_Y : (g.y >= n.y ? GPU_FLUID_LIQUID_OPEN_POS_Y : 0u);
+    sides |= g.z < 0.0 ? GPU_FLUID_LIQUID_OPEN_NEG_Z : (g.z >= n.z ? GPU_FLUID_LIQUID_OPEN_POS_Z : 0u);
+    const bool bDrained = (sides & LiqOpenMask()) != 0;
+    GpuFluidLiqCounters.InterlockedAdd((bDrained ? GPU_FLUID_LIQUID_CTR_DRAINED : GPU_FLUID_LIQUID_CTR_LOST) * 4, 1u);
+  }
+  else
+  {
+    const int3 cell = LiqParticleCell(position);
+    GpuFluidLiqCellCount.InterlockedAdd(LiqCellIndex(cell) * 4, 1u, rank);
+    GpuFluidLiqBrickOccupied.Store(LiqBrickIndex(cell) * 4, 1u);
+  }
+
+  GpuFluidLiqRank.Store(index * 4, rank);
+}

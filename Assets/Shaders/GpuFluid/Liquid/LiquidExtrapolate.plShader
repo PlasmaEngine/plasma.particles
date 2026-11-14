@@ -1,0 +1,76 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// One layer of velocity extrapolation into the air, ping-pong: a valid face keeps its value, an invalid face takes
+// the mean of its valid same-component neighbours (six, along the three axes) and becomes valid. Run three times for
+// three layers.
+
+RWByteAddressBuffer GpuFluidLiqVelIn;
+RWByteAddressBuffer GpuFluidLiqValidIn;
+RWByteAddressBuffer GpuFluidLiqVelOut;
+RWByteAddressBuffer GpuFluidLiqValidOut;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  uint lowValid = 0;
+  [unroll] for (uint s = 0; s < 6; ++s)
+  {
+    uint comp;
+    int3 face;
+    if (!LiqOwnedFace(cell, s, comp, face))
+      continue;
+
+    const uint bit = 1u << comp;
+    float value = asfloat(GpuFluidLiqVelIn.Load(LiqFaceAddress(comp, face)));
+    bool bValid = (GpuFluidLiqValidIn.Load(LiqFaceIndex(face) * 4) & bit) != 0;
+
+    if (!bValid)
+    {
+      float sum = 0.0;
+      uint count = 0;
+      [unroll] for (uint n = 0; n < 6; ++n)
+      {
+        const int3 offset = LiqAxis(n >> 1) * ((n & 1u) != 0 ? 1 : -1);
+        const int3 nb = face + offset;
+        if (!LiqFaceExists(comp, nb))
+          continue;
+        if ((GpuFluidLiqValidIn.Load(LiqFaceIndex(nb) * 4) & bit) == 0)
+          continue;
+        sum += asfloat(GpuFluidLiqVelIn.Load(LiqFaceAddress(comp, nb)));
+        ++count;
+      }
+
+      if (count > 0)
+      {
+        value = sum / float(count);
+        bValid = true;
+      }
+      else
+      {
+        value = 0.0;
+      }
+    }
+
+    GpuFluidLiqVelOut.Store(LiqFaceAddress(comp, face), asuint(value));
+
+    const uint validBit = bValid ? bit : 0u;
+    if (s < 3)
+      lowValid |= validBit;
+    else
+      GpuFluidLiqValidOut.Store(LiqFaceIndex(face) * 4, validBit);
+  }
+
+  GpuFluidLiqValidOut.Store(LiqFaceIndex(cell) * 4, lowValid);
+}

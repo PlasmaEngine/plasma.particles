@@ -1,0 +1,21 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// One colour of a red-black Gauss-Seidel sweep on the fine level, over the active bricks.
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  MgSmoothCell(cell, LiqCells(), true);
+}

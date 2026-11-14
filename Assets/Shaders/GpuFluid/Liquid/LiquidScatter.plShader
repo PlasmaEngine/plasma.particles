@@ -1,0 +1,45 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Counting sort, step 3: every kept particle moves to cellStart[cell] + rank in the other set, so the particles of a
+// cell are contiguous and the set is compacted. The order inside a cell depends on the atomics of the count pass;
+// nothing downstream depends on it (P2G sums integers).
+
+ByteAddressBuffer GpuFluidLiqPositions;
+ByteAddressBuffer GpuFluidLiqVelocities;
+ByteAddressBuffer GpuFluidLiqAffine;
+RWByteAddressBuffer GpuFluidLiqRank;
+RWByteAddressBuffer GpuFluidLiqCellStart;
+RWByteAddressBuffer GpuFluidLiqPositionsOut;
+RWByteAddressBuffer GpuFluidLiqVelocitiesOut;
+RWByteAddressBuffer GpuFluidLiqAffineOut;
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  uint index;
+  if (!LiqParticleIndex(groupId, groupIndex, index))
+    return;
+
+  const uint rank = GpuFluidLiqRank.Load(index * 4);
+  if (rank == GPU_FLUID_LIQUID_REMOVED)
+    return;
+
+  const uint3 positionBits = GpuFluidLiqPositions.Load3(index * GPU_FLUID_LIQUID_POSITION_BYTES);
+  const int3 cell = LiqParticleCell(asfloat(positionBits));
+  const uint target = GpuFluidLiqCellStart.Load(LiqCellIndex(cell) * 4) + rank;
+  if (target >= LiqCapacity())
+    return;
+
+  GpuFluidLiqPositionsOut.Store3(target * GPU_FLUID_LIQUID_POSITION_BYTES, positionBits);
+  GpuFluidLiqVelocitiesOut.Store3(target * GPU_FLUID_LIQUID_VELOCITY_BYTES, GpuFluidLiqVelocities.Load3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES));
+  GpuFluidLiqAffineOut.Store4(target * GPU_FLUID_LIQUID_AFFINE_BYTES, GpuFluidLiqAffine.Load4(index * GPU_FLUID_LIQUID_AFFINE_BYTES));
+  GpuFluidLiqAffineOut.Store(target * GPU_FLUID_LIQUID_AFFINE_BYTES + 16, GpuFluidLiqAffine.Load(index * GPU_FLUID_LIQUID_AFFINE_BYTES + 16));
+}

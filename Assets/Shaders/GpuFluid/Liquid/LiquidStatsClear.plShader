@@ -1,0 +1,34 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Start of a liquid volume's GPU frame: resets the stats it reads back, the per-frame counters, and on a reset
+// (GpuFluidLiqPass.x = 1) every counter, seeded and drained included.
+
+RWByteAddressBuffer GpuFluidLiqStats;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint word = dispatchThreadId.x;
+  const bool bReset = LIQ_CONST(GpuFluidLiqPass).x != 0;
+
+  if (word < GPU_FLUID_LIQUID_STAT_WORD_COUNT)
+  {
+    const bool bMin = word >= GPU_FLUID_LIQUID_STAT_BOUNDS_MIN && word < GPU_FLUID_LIQUID_STAT_BOUNDS_MIN + 3;
+    GpuFluidLiqStats.Store(word * 4, bMin ? 0xFFFFFFFFu : 0u);
+  }
+
+  if (word < GPU_FLUID_LIQUID_CTR_WORDS)
+  {
+    const bool bPerFrame = word == GPU_FLUID_LIQUID_CTR_NAN || word == GPU_FLUID_LIQUID_CTR_OVERFLOW;
+    if (bReset || bPerFrame)
+      GpuFluidLiqCounters.Store(word * 4, 0u);
+  }
+}

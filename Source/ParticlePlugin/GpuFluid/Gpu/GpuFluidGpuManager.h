@@ -7,6 +7,7 @@
 #include <Foundation/Types/SharedPtr.h>
 #include <Foundation/Types/UniquePtr.h>
 #include <ParticlePlugin/GpuFluid/Gpu/GpuFluidGasSolver.h>
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidLiquidSolver.h>
 #include <ParticlePlugin/GpuFluid/GpuFluidDeclarations.h>
 #include <RendererCore/Shader/ShaderResource.h>
 #include <RendererFoundation/RendererFoundationDLL.h>
@@ -147,6 +148,18 @@ public:
   /// False until the first readback has arrived.
   bool GetGasStats(plGpuFluidVolumeId id, plGpuFluidGasStats& out_stats) const;
 
+  /// Registers a liquid volume. Its GPU resources are created on the render thread at the next BeginRender.
+  plGpuFluidVolumeId CreateLiquidVolume(const plGpuFluidLiquidSettings& settings);
+
+  /// The work of the frame being updated. Update thread.
+  void SetLiquidFrameInput(plGpuFluidVolumeId id, const plGpuFluidLiquidFrameInput& input);
+
+  /// False while the volume has nothing on the GPU yet: its points must not be drawn then.
+  bool GetLiquidPublish(plGpuFluidVolumeId id, plGpuFluidLiquidPublish& out_publish) const;
+
+  /// False until the first readback of the volume's current simulation has arrived.
+  bool GetLiquidStats(plGpuFluidVolumeId id, plGpuFluidLiquidStats& out_stats) const;
+
   plUInt32 GetNumVolumes() const;
 
   /// Frames a retired volume's resources outlive it.
@@ -154,6 +167,10 @@ public:
 
 private:
   struct GasVolume;
+  struct LiquidVolume;
+
+  void RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt64 uiFrame, bool& inout_bAnyPass);
+  void ReadLiquidStats(LiquidVolume& ref_volume);
 
   static void OnRenderEvent(const plRenderWorldRenderEvent& e);
   void BeginRender(plUInt64 uiFrame);
@@ -174,6 +191,16 @@ private:
     plUInt64 m_uiDestroyAtFrame = 0;
   };
   plDynamicArray<Retired> m_Retired;
+
+  plHashTable<plGpuFluidVolumeId, plUniquePtr<LiquidVolume>> m_LiquidVolumes;
+
+  struct RetiredLiquid
+  {
+    plUniquePtr<LiquidVolume> m_pVolume;
+    plUInt64 m_uiDestroyAtFrame = 0;
+  };
+  plDynamicArray<RetiredLiquid> m_RetiredLiquid;
+  plGpuFluidLiquidShaders m_LiquidShaders;
 
   plSharedPtr<plRenderGraph> m_pGraph;
   plShaderResourceHandle m_hAnalyticSphereShader;

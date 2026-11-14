@@ -50,6 +50,30 @@ struct plGpuFluidGpuManager::GasVolume
   float m_fVoxelSize = 0.0625f;
 };
 
+struct plGpuFluidGpuManager::LiquidVolume
+{
+  plGpuFluidVolumeId m_Id = 0;
+  plGpuFluidLiquidSettings m_Settings;
+
+  // Render thread.
+  plGpuFluidLiquidSolver m_Solver;
+  plGpuFluidReadbackRing m_Readback;
+  plDynamicArray<plUInt8> m_ReadbackScratch;
+  bool m_bResourcesCreated = false;
+  bool m_bHasLastInput = false;
+  plGpuFluidLiquidFrameInput m_LastInput;
+  plUInt32 m_uiLastResetCounter = 0xFFFFFFFFu;
+  plUInt64 m_uiResetFrame = 0;
+
+  // Under the manager's mutex.
+  plGpuFluidLiquidFrameInput m_Input[2];
+  bool m_bInputValid[2] = {false, false};
+  bool m_bPublishable = false;
+  bool m_bStatsValid = false;
+  plGpuFluidLiquidStats m_Stats;
+  plGpuFluidLiquidPublish m_Publish;
+};
+
 namespace
 {
   plMutex s_ManagersMutex;
@@ -133,6 +157,16 @@ void plGpuFluidGpuManager::DestroyVolume(plGpuFluidVolumeId id)
 {
   PL_LOCK(m_Mutex);
 
+  plUniquePtr<LiquidVolume> pLiquid;
+  if (m_LiquidVolumes.Remove(id, &pLiquid) && pLiquid != nullptr)
+  {
+    // Render data naming its buffers can still be waiting to render.
+    RetiredLiquid& retired = m_RetiredLiquid.ExpandAndGetRef();
+    retired.m_pVolume = std::move(pLiquid);
+    retired.m_uiDestroyAtFrame = plRenderWorld::GetFrameCounter() + s_uiRetireFrames;
+    return;
+  }
+
   plUniquePtr<GasVolume> pVolume;
   if (!m_GasVolumes.Remove(id, &pVolume) || pVolume == nullptr)
     return;
@@ -211,7 +245,153 @@ bool plGpuFluidGpuManager::GetGasStats(plGpuFluidVolumeId id, plGpuFluidGasStats
 plUInt32 plGpuFluidGpuManager::GetNumVolumes() const
 {
   PL_LOCK(m_Mutex);
-  return m_GasVolumes.GetCount();
+  return m_GasVolumes.GetCount() + m_LiquidVolumes.GetCount();
+}
+
+plGpuFluidVolumeId plGpuFluidGpuManager::CreateLiquidVolume(const plGpuFluidLiquidSettings& settings)
+{
+  PL_LOCK(m_Mutex);
+
+  plUniquePtr<LiquidVolume> pVolume = PL_DEFAULT_NEW(LiquidVolume);
+  pVolume->m_Id = m_NextId++;
+  pVolume->m_Settings = settings;
+
+  const plGpuFluidVolumeId id = pVolume->m_Id;
+  m_LiquidVolumes.Insert(id, std::move(pVolume));
+  return id;
+}
+
+void plGpuFluidGpuManager::SetLiquidFrameInput(plGpuFluidVolumeId id, const plGpuFluidLiquidFrameInput& input)
+{
+  PL_LOCK(m_Mutex);
+
+  plUniquePtr<LiquidVolume>* pVolume = nullptr;
+  if (!m_LiquidVolumes.TryGetValue(id, pVolume))
+    return;
+
+  const plUInt32 uiIndex = plRenderWorld::GetDataIndexForExtraction();
+  (*pVolume)->m_Input[uiIndex] = input;
+  (*pVolume)->m_bInputValid[uiIndex] = true;
+}
+
+bool plGpuFluidGpuManager::GetLiquidPublish(plGpuFluidVolumeId id, plGpuFluidLiquidPublish& out_publish) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plUniquePtr<LiquidVolume>* pVolume = nullptr;
+  if (!m_LiquidVolumes.TryGetValue(id, pVolume) || !(*pVolume)->m_bPublishable)
+    return false;
+
+  out_publish = (*pVolume)->m_Publish;
+  return true;
+}
+
+bool plGpuFluidGpuManager::GetLiquidStats(plGpuFluidVolumeId id, plGpuFluidLiquidStats& out_stats) const
+{
+  PL_LOCK(m_Mutex);
+
+  const plUniquePtr<LiquidVolume>* pVolume = nullptr;
+  if (!m_LiquidVolumes.TryGetValue(id, pVolume) || !(*pVolume)->m_bStatsValid)
+    return false;
+
+  out_stats = (*pVolume)->m_Stats;
+  return true;
+}
+
+void plGpuFluidGpuManager::ReadLiquidStats(LiquidVolume& ref_volume)
+{
+  plUInt64 uiFrame = 0;
+  if (!ref_volume.m_Readback.Poll(ref_volume.m_ReadbackScratch, uiFrame) || ref_volume.m_ReadbackScratch.GetCount() < GPU_FLUID_LIQUID_STATS_BYTES)
+    return;
+
+  // Numbers recorded before the last reset describe a simulation that is gone.
+  if (uiFrame < ref_volume.m_uiResetFrame)
+    return;
+
+  ref_volume.m_Solver.DecodeStats(ref_volume.m_ReadbackScratch, ref_volume.m_Stats);
+  ref_volume.m_Stats.m_uiFrame = uiFrame;
+  ref_volume.m_Stats.m_fFrontBinSize = ref_volume.m_LastInput.m_fFrontBinSize;
+  ref_volume.m_bStatsValid = true;
+
+  plStats::SetStat("GpuFluid/Liquid/Particles", ref_volume.m_Stats.m_uiAlive);
+  plStats::SetStat("GpuFluid/Liquid/ActiveBricks", ref_volume.m_Stats.m_uiActiveBricks);
+  plStats::SetStat("GpuFluid/Liquid/Substeps", ref_volume.m_Stats.m_uiSubsteps);
+  plStats::SetStat("GpuFluid/Liquid/NaNCount", ref_volume.m_Stats.m_uiNaN);
+}
+
+void plGpuFluidGpuManager::RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt64 uiFrame, bool& inout_bAnyPass)
+{
+  if (m_LiquidVolumes.IsEmpty())
+    return;
+
+  m_LiquidShaders.Load();
+
+  const plUInt32 uiInputIndex = plRenderWorld::GetDataIndexForRendering();
+
+  for (auto it : m_LiquidVolumes)
+  {
+    LiquidVolume& volume = *it.Value();
+
+    if (!volume.m_bResourcesCreated)
+    {
+      volume.m_bResourcesCreated = true; // a failure is not retried every frame
+      volume.m_Solver.Create(volume.m_Settings);
+    }
+
+    ReadLiquidStats(volume);
+
+    // A frame without a new input steps nothing: the solver steps once per tick it is given.
+    bool bNewInput = false;
+    if (volume.m_bInputValid[uiInputIndex])
+    {
+      volume.m_LastInput = volume.m_Input[uiInputIndex];
+      volume.m_bInputValid[uiInputIndex] = false;
+      volume.m_bHasLastInput = true;
+      bNewInput = true;
+    }
+
+    if (!volume.m_Solver.IsCreated() || !volume.m_bHasLastInput)
+    {
+      volume.m_bPublishable = false;
+      continue;
+    }
+
+    if (volume.m_LastInput.m_uiResetCounter != volume.m_uiLastResetCounter)
+    {
+      volume.m_uiLastResetCounter = volume.m_LastInput.m_uiResetCounter;
+      volume.m_uiResetFrame = uiFrame;
+      volume.m_bStatsValid = false;
+    }
+
+    if (bNewInput)
+    {
+      const plGpuFluidLiquidStats* pStats = volume.m_bStatsValid ? &volume.m_Stats : nullptr;
+      const plUInt64 uiAge = pStats != nullptr && uiFrame > pStats->m_uiFrame ? uiFrame - pStats->m_uiFrame : 1;
+      volume.m_Solver.Record(ref_graph, m_LiquidShaders, volume.m_LastInput, pStats, uiAge);
+
+      const plUInt32 uiReadbackSlot = volume.m_Readback.ReserveSlot(uiFrame);
+      if (uiReadbackSlot != plInvalidIndex)
+      {
+        plGpuFluidReadbackRing* pRing = &volume.m_Readback;
+        const plGALBufferHandle hStatsGAL = volume.m_Solver.GetStatsBuffer();
+
+        auto pass = ref_graph.AddTransferPass("GpuFluid Liquid/Readback");
+        pass.ReadBuffer(ref_graph.ImportBuffer(hStatsGAL), plGALResourceState::CopySource);
+        pass.HasSideEffects();
+        pass.SetExecuteCallback([pRing, uiReadbackSlot, hStatsGAL](const plRenderGraphContext& ctx)
+          { pRing->Submit(uiReadbackSlot, *ctx.GetCommandEncoder(), hStatsGAL); });
+      }
+
+      inout_bAnyPass = true;
+    }
+
+    // Drawn from the next extraction on: the points it names are written by this frame's graph, before the views.
+    if (volume.m_Solver.HasRecorded())
+    {
+      volume.m_Solver.GetPublish(volume.m_Publish);
+      volume.m_bPublishable = true;
+    }
+  }
 }
 
 void plGpuFluidGpuManager::OnRenderEvent(const plRenderWorldRenderEvent& e)
@@ -281,6 +461,21 @@ void plGpuFluidGpuManager::DestroyAll()
   for (Retired& retired : m_Retired)
     DestroyResources(*retired.m_pVolume);
   m_Retired.Clear();
+
+  for (auto it : m_LiquidVolumes)
+  {
+    it.Value()->m_Solver.Destroy();
+    it.Value()->m_Readback.Reset();
+  }
+  m_LiquidVolumes.Clear();
+
+  for (RetiredLiquid& retired : m_RetiredLiquid)
+  {
+    retired.m_pVolume->m_Solver.Destroy();
+    retired.m_pVolume->m_Readback.Reset();
+  }
+  m_RetiredLiquid.Clear();
+  m_LiquidShaders.Release();
 
   m_pGraph.Clear();
 }
@@ -359,7 +554,17 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     }
   }
 
-  if (m_GasVolumes.IsEmpty())
+  for (plUInt32 i = m_RetiredLiquid.GetCount(); i-- > 0;)
+  {
+    if (m_RetiredLiquid[i].m_uiDestroyAtFrame <= uiFrame)
+    {
+      m_RetiredLiquid[i].m_pVolume->m_Solver.Destroy();
+      m_RetiredLiquid[i].m_pVolume->m_Readback.Reset();
+      m_RetiredLiquid.RemoveAtAndSwap(i);
+    }
+  }
+
+  if (m_GasVolumes.IsEmpty() && m_LiquidVolumes.IsEmpty())
     return;
 
   if (!m_hAnalyticSphereShader.IsValid())
@@ -521,6 +726,8 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
     // frame's graph and by every later one, always before the views render.
     volume.m_bPublishable = true;
   }
+
+  RecordLiquidVolumes(graph, uiFrame, bAnyPass);
 
   if (bAnyPass)
     plRenderGraphManager::EnqueueRenderGraph(m_pGraph);

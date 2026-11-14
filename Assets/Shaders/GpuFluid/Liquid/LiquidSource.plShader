@@ -1,0 +1,72 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Inflow from one source, before the tick's substeps: GpuFluidLiqPass.x new particles appended to the current set
+// (behind its alive count, as many as fit). A source is a disc across its velocity. Each particle passes the disc at
+// its own moment of the tick, on a ballistic path (gravity included): so a steady source gives a continuous stream
+// that stretches as it falls, not one slug per tick. Positions come from hashes of the tick seed and the index.
+//
+// GpuFluidLiqPassF: xyz centre (domain metres), w radius (m). GpuFluidLiqPass: x count, y seed, z asuint(the tick's
+// time, s). GpuFluidLiqWall.xyz: the velocity (m/s); this kernel's own use of that slot. LiquidSourceFinish then adds
+// the particles to the alive count.
+
+RWByteAddressBuffer GpuFluidLiqParticleArgs;
+RWByteAddressBuffer GpuFluidLiqPositions;
+RWByteAddressBuffer GpuFluidLiqVelocities;
+RWByteAddressBuffer GpuFluidLiqAffine;
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint4 pass = LIQ_CONST(GpuFluidLiqPass);
+  const uint i = dispatchThreadId.x;
+  if (i >= pass.x)
+    return;
+
+  const uint alive = GpuFluidLiqParticleArgs.Load(12);
+  const uint index = alive + i;
+  if (index >= LiqCapacity())
+    return;
+
+  const float4 centreRadius = LIQ_CONST(GpuFluidLiqPassF);
+  const float3 sourceVelocity = LIQ_CONST(GpuFluidLiqWall).xyz;
+  const float3 velocity0 = sourceVelocity;
+  const float tickTime = asfloat(pass.z);
+
+  // A frame across the velocity.
+  const float speed = length(velocity0);
+  const float3 axis = speed > 1.0e-6 ? velocity0 / speed : float3(0, 0, -1);
+  const float3 helper = abs(axis.z) < 0.9 ? float3(0, 0, 1) : float3(1, 0, 0);
+  const float3 tangent = normalize(cross(helper, axis));
+  const float3 bitangent = cross(axis, tangent);
+
+  // Uniform over the disc (sqrt of the radius), uniform in the time since it left.
+  const uint h = LiqHash(pass.y ^ LiqHash(i * 0x9E3779B9u + 0x632be5abu));
+  const float radius = centreRadius.w * sqrt(LiqHashFloat(h));
+  float s, c;
+  sincos(LiqHashFloat(h ^ 0x68e31da4u) * 6.28318530718, s, c);
+  // The time since it leaves, negative: it leaves during the tick about to be simulated, so the stream starts at the
+  // disc when the frame is drawn (it waits upstream, behind the disc, on the trajectory it will follow).
+  const float age = (LiqHashFloat(h ^ 0xb5297a4du) - 1.0) * tickTime;
+
+  const float3 gravity = LiqGravity();
+  const float3 velocity = velocity0 + gravity * age;
+  float3 position = centreRadius.xyz + (tangent * c + bitangent * s) * radius + velocity0 * age + 0.5 * gravity * age * age;
+  const float3 domain = float3(LiqCells()) * LiqDx();
+  position = clamp(position, 0.01 * LiqDx(), domain - 0.01 * LiqDx());
+
+  uint4 affine;
+  uint affine4;
+  LiqPackAffine(float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), GPU_FLUID_LIQUID_FLAG_ALIVE, affine, affine4);
+
+  GpuFluidLiqPositions.Store3(index * GPU_FLUID_LIQUID_POSITION_BYTES, asuint(position));
+  GpuFluidLiqVelocities.Store3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES, asuint(velocity));
+  GpuFluidLiqAffine.Store4(index * GPU_FLUID_LIQUID_AFFINE_BYTES, affine);
+  GpuFluidLiqAffine.Store(index * GPU_FLUID_LIQUID_AFFINE_BYTES + 16, affine4);
+}

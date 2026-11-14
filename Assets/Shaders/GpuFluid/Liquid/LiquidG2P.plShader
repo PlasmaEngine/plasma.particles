@@ -1,0 +1,169 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#define GPU_FLUID_LIQUID_USE_SHAPES
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// G2P: per particle, trilinear (8 taps per MAC component) from the projected, extrapolated grid.
+// - APIC: v_pic = u(x_p), C = sum_i u_i grad(w_ip)^T (exact for multilinear weights);
+// - FLIP blend: v = lerp(v_pic, v_p + u(x_p) - u*(x_p), f);
+// - RK2 advection through the grid;
+// - walls and analytic solids: push out to the margin, remove the inward normal velocity, friction on the rest.
+
+ByteAddressBuffer GpuFluidLiqVelNew;
+ByteAddressBuffer GpuFluidLiqVelOld;
+RWByteAddressBuffer GpuFluidLiqPositions;
+RWByteAddressBuffer GpuFluidLiqVelocities;
+RWByteAddressBuffer GpuFluidLiqAffine;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+/// Component comp of a face velocity set at grid position g (cell units); gradient in cell units.
+float SampleComponent(ByteAddressBuffer set, uint comp, float3 g, out float3 grad)
+{
+  const float3 axis = float3(LiqAxis(comp));
+  const float3 offset = 0.5 - 0.5 * axis;
+  const float3 hi = float3(LiqCells()) - 1.0 + axis; // largest face index per axis
+  const float3 s = clamp(g - offset, 0.0, hi);
+  const int3 base = min(int3(floor(s)), int3(hi) - 1);
+  const float3 f = s - float3(base);
+
+  float value = 0.0;
+  grad = float3(0, 0, 0);
+  [unroll] for (uint i = 0; i < 8; ++i)
+  {
+    const int3 o = int3(i & 1u, (i >> 1) & 1u, (i >> 2) & 1u);
+    const float3 fo = float3(o);
+    const float3 w1 = lerp(1.0 - f, f, fo);
+    const float3 dw = fo * 2.0 - 1.0;
+    const float u = asfloat(set.Load(LiqFaceAddress(comp, base + o)));
+    value += w1.x * w1.y * w1.z * u;
+    grad += float3(dw.x * w1.y * w1.z, w1.x * dw.y * w1.z, w1.x * w1.y * dw.z) * u;
+  }
+  return value;
+}
+
+float3 SampleVelocity(ByteAddressBuffer set, float3 g)
+{
+  float3 unused;
+  return float3(SampleComponent(set, 0, g, unused), SampleComponent(set, 1, g, unused), SampleComponent(set, 2, g, unused));
+}
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  uint index;
+  if (!LiqParticleIndex(groupId, groupIndex, index))
+    return;
+
+  const float dx = LiqDx();
+  const float invDx = LiqInvDx();
+  const float dt = LiqDt();
+
+  const float3 x = asfloat(GpuFluidLiqPositions.Load3(index * GPU_FLUID_LIQUID_POSITION_BYTES));
+  const float3 vOld = asfloat(GpuFluidLiqVelocities.Load3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES));
+  const uint word4 = GpuFluidLiqAffine.Load(index * GPU_FLUID_LIQUID_AFFINE_BYTES + 16);
+  const float3 g = x * invDx;
+
+  float3 gradU, gradV, gradW, unused;
+  const float3 uNew = float3(SampleComponent(GpuFluidLiqVelNew, 0, g, gradU), SampleComponent(GpuFluidLiqVelNew, 1, g, gradV), SampleComponent(GpuFluidLiqVelNew, 2, g, gradW));
+  const float3 uOld = SampleVelocity(GpuFluidLiqVelOld, g);
+
+  const float3 vFlip = vOld + (uNew - uOld);
+  float3 v = lerp(uNew, vFlip, LiqFlipBlend());
+  float3 cx = gradU * invDx;
+  float3 cy = gradV * invDx;
+  float3 cz = gradW * invDx;
+
+  uint clamped = 0;
+  const float speed = length(v);
+  if (speed > GPU_FLUID_LIQUID_MAX_SPEED)
+  {
+    v *= GPU_FLUID_LIQUID_MAX_SPEED / speed;
+    clamped = 1;
+  }
+
+  // RK2 (midpoint) through the projected grid velocity.
+  const float3 gMid = g + 0.5 * dt * uNew * invDx;
+  float3 xNew = x + dt * SampleVelocity(GpuFluidLiqVelNew, gMid);
+
+  const float4 wall = LIQ_CONST(GpuFluidLiqWall);
+  const float margin = wall.x * dx;
+  const float friction = wall.y;
+
+  // Analytic solids first: a solid that ends on a domain wall (a glass standing on the floor) has a face in that wall,
+  // and the push out through it would leave the domain. The walls below have the last word.
+  if (LiqShapeCount() > 0)
+  {
+    const float d = LiqShapeDistance(xNew);
+    if (d < margin)
+    {
+      const float3 n = LiqShapeNormal(xNew);
+      xNew += (margin - d) * n;
+      const float vn = dot(v, n);
+      if (vn < 0.0)
+        v -= vn * n;
+      v = lerp(v, dot(v, n) * n, friction);
+    }
+  }
+
+  // Walls: closed domain faces keep the particle a margin inside; the inward normal velocity goes, friction slows the
+  // tangential part.
+  const float3 extent = float3(LiqCells()) * dx;
+  const uint open = LiqOpenMask();
+  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  {
+    const bool bLowClosed = (open & (1u << (axis * 2))) == 0;
+    const bool bHighClosed = (open & (2u << (axis * 2))) == 0;
+    bool bContact = false;
+    if (bLowClosed && xNew[axis] < margin)
+    {
+      xNew[axis] = margin;
+      v[axis] = max(v[axis], 0.0);
+      bContact = true;
+    }
+    if (bHighClosed && xNew[axis] > extent[axis] - margin)
+    {
+      xNew[axis] = extent[axis] - margin;
+      v[axis] = min(v[axis], 0.0);
+      bContact = true;
+    }
+    if (bContact && friction > 0.0)
+    {
+      const float keep = 1.0 - friction;
+      [unroll] for (uint t = 0; t < 3; ++t)
+      {
+        if (t != axis)
+          v[t] *= keep;
+      }
+    }
+  }
+
+  uint nanCount = 0;
+  if (!LiqIsFinite3(xNew) || !LiqIsFinite3(v) || !LiqIsFinite3(cx) || !LiqIsFinite3(cy) || !LiqIsFinite3(cz))
+  {
+    // Keep the particle where it was, at rest: it is counted, and the count must stay zero.
+    xNew = LiqIsFinite3(x) ? x : 0.5 * extent;
+    v = float3(0, 0, 0);
+    cx = cy = cz = float3(0, 0, 0);
+    nanCount = 1;
+  }
+
+  GpuFluidLiqPositions.Store3(index * GPU_FLUID_LIQUID_POSITION_BYTES, asuint(xNew));
+  GpuFluidLiqVelocities.Store3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES, asuint(v));
+
+  uint4 words;
+  uint packed4;
+  LiqPackAffine(cx, cy, cz, word4 >> 16, words, packed4);
+  GpuFluidLiqAffine.Store4(index * GPU_FLUID_LIQUID_AFFINE_BYTES, words);
+  GpuFluidLiqAffine.Store(index * GPU_FLUID_LIQUID_AFFINE_BYTES + 16, packed4);
+
+  if (clamped != 0)
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_OVERFLOW * 4, clamped);
+  if (nanCount != 0)
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_NAN * 4, nanCount);
+}

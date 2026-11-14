@@ -144,16 +144,28 @@ constexpr float plGpuFluidGasTickLow = 1.0f / 30.0f;
 /// Most gas ticks one frame runs; beyond that the simulation runs in slow motion.
 constexpr plUInt32 plGpuFluidMaxGasTicksPerFrame = 2;
 
-/// \brief Settings of a liquid volume that decide its GPU resources. Not used before P6.
+/// \brief Settings of a liquid volume that decide its GPU resources. Changing any of them recreates the volume.
 struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidSettings
 {
   static constexpr plUInt32 s_uiVersion = 1;
 
-  /// Cells of the dense domain per axis.
+  /// Cells of the dense domain per axis, whole bricks of 8.
   plVec3U32 m_vCells = plVec3U32(128, 96, 64);
 
   /// Most particles the pool holds.
   plUInt32 m_uiMaxParticles = 1024 * 1024;
 
   plGpuFluidQuality::Enum m_Quality = plGpuFluidQuality::Default;
+
+  /// Edge of a cell, in metres.
+  float m_fCellSize = 0.0625f;
+
+  /// Particles a full cell holds at rest (n0): 4 or 8.
+  plUInt32 m_uiParticlesPerCell = 4;
+
+  bool operator==(const plGpuFluidLiquidSettings& other) const
+  {
+    return m_vCells == other.m_vCells && m_uiMaxParticles == other.m_uiMaxParticles && m_Quality == other.m_Quality && m_fCellSize == other.m_fCellSize &&
+           m_uiParticlesPerCell == other.m_uiParticlesPerCell;
+  }
 };

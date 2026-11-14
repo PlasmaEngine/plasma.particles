@@ -1,0 +1,71 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidSurface.hlsli>
+
+// Surface nets, quads: every edge between two samples that crosses the surface gets one quad joining the vertices of
+// the four cubes around it, wound counter-clockwise seen from outside the liquid. The thread of cell c handles the
+// edges from sample c along +x, +y and +z, and on the domain's low sides also the edge from the sample outside.
+//
+// Quad: four vertex indices. GpuFluidLiqPass.y: quad capacity. GpuFluidLiqPassF: x outside value, y far value.
+
+RWByteAddressBuffer GpuFluidLiqSurfCubeMap;
+RWByteAddressBuffer GpuFluidLiqSurfQuads;
+RWByteAddressBuffer GpuFluidLiqSurfCounters;
+
+uint CubeVertex(int3 m)
+{
+  return SurfCubeExists(m) ? GpuFluidLiqSurfCubeMap.Load(SurfCubeIndex(m) * 4) : GPU_FLUID_LIQUID_SURFACE_NO_VERTEX;
+}
+
+void ProcessEdge(int3 e, uint a, uint capacity)
+{
+  const int3 axisA = LiqAxis(a);
+  const float phiLow = SurfPhi(e);
+  const float phiHigh = SurfPhi(e + axisA);
+  const bool bLowInside = phiLow < 0.0;
+  if (bLowInside == (phiHigh < 0.0))
+    return;
+
+  // The other two axes in cyclic order, so (a, b, c) is right handed and the cubes below go counter-clockwise around +a.
+  const int3 axisB = LiqAxis((a + 1) % 3);
+  const int3 axisC = LiqAxis((a + 2) % 3);
+  uint4 quad = uint4(CubeVertex(e - axisB - axisC), CubeVertex(e - axisC), CubeVertex(e), CubeVertex(e - axisB));
+  if (any(quad == GPU_FLUID_LIQUID_SURFACE_NO_VERTEX))
+    return;
+
+  // Liquid on the low side: the outside is towards +a, which the order above faces. Otherwise reverse it.
+  if (!bLowInside)
+    quad = quad.xwzy;
+
+  uint slot;
+  GpuFluidLiqSurfCounters.InterlockedAdd(GPU_FLUID_LIQUID_SURFACE_CTR_QUADS * 4, 1u, slot);
+  if (slot >= capacity)
+  {
+    GpuFluidLiqSurfCounters.InterlockedAdd(GPU_FLUID_LIQUID_SURFACE_CTR_QUAD_OVERFLOW * 4, 1u);
+    return;
+  }
+  GpuFluidLiqSurfQuads.Store4(slot * GPU_FLUID_LIQUID_SURFACE_QUAD_BYTES, quad);
+}
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint capacity = LIQ_CONST(GpuFluidLiqPass).y;
+
+  [loop] for (uint a = 0; a < 3; ++a)
+  {
+    ProcessEdge(cell, a, capacity);
+    const int3 axis = LiqAxis(a);
+    if (dot(cell, axis) == 0)
+      ProcessEdge(cell - axis, a, capacity);
+  }
+}

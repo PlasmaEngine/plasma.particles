@@ -1,0 +1,41 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Start of a substep: zero the per-cell particle counts, the brick occupancy and the per-substep counters.
+
+RWByteAddressBuffer GpuFluidLiqCellCount;
+RWByteAddressBuffer GpuFluidLiqBrickOccupied;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint i = dispatchThreadId.x;
+  const uint3 cells = LiqCells();
+  const uint3 bricks = LiqBricks();
+
+  if (i < cells.x * cells.y * cells.z)
+    GpuFluidLiqCellCount.Store(i * 4, 0u);
+
+  if (i < bricks.x * bricks.y * bricks.z)
+    GpuFluidLiqBrickOccupied.Store(i * 4, 0u);
+
+  // GpuFluidLiqPass.x = 1: the sort that Liquid/Surface runs after the last substep. It keeps the solver's counters of
+  // that substep (volume, residual, ...) and only starts the brick counts over.
+  const bool bSurfaceSort = LIQ_CONST(GpuFluidLiqPass).x == 1;
+  if (bSurfaceSort)
+  {
+    if (i == GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS || i == GPU_FLUID_LIQUID_CTR_OCCUPIED)
+      GpuFluidLiqCounters.Store(i * 4, 0u);
+  }
+  else if (i >= GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP && i <= GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP)
+  {
+    GpuFluidLiqCounters.Store(i * 4, 0u);
+  }
+}

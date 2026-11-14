@@ -1,0 +1,142 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#define GPU_FLUID_LIQUID_USE_SHAPES
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// Cell types: solid when the centre is inside an analytic solid (the domain walls are faces, not cells); liquid when
+// the cell holds particles or, with the level set (GPU_FLUID_LIQUID_FLAG_LEVEL_SET), when phi < 0 at its centre, so an
+// empty cell inside the pool is liquid and not a hole of air the pressure drives a jet into; air otherwise.
+//
+// A liquid cell's type word also holds the free surface's theta towards each air neighbour (GpuFluidLiquidConstants.h):
+// theta = phi_i / (phi_i - phi_j) from the level set, at least the dispatch's minimum, which is also what a cell with
+// particles but its centre outside the surface (phi_i >= 0: spray) gets; the constant code without the level set and
+// towards an open domain side.
+//
+// Also the volume measure the global volume control compares with the seeded volume: a liquid cell surrounded by
+// liquid, solid or wall counts as full, a surface cell as min(n / n0, 1).
+
+RWByteAddressBuffer GpuFluidLiqCellType;
+ByteAddressBuffer GpuFluidLiqCellCount;
+ByteAddressBuffer GpuFluidLiqPhi;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+groupshared uint gs_uiVolume;
+groupshared uint gs_uiLiquid;
+
+bool IsSolidCell(int3 c)
+{
+  return LiqShapeCount() > 0 && LiqShapeDistance((float3(c) + 0.5) * LiqDx()) < 0.0;
+}
+
+/// phi at the centre of cell c in cells, the far value (positive) where it was not computed this substep.
+float PhiAt(int3 c)
+{
+  if (GpuFluidLiqBrickActive.Load(LiqBrickIndex(c) * 4) == 0)
+    return 1.0e3;
+  return asfloat(GpuFluidLiqPhi.Load(LiqCellIndex(c) * 4));
+}
+
+/// Whether the non-solid cell c inside the domain is liquid. GpuFluidLiqPassF.z > 0 (with the level set): phi < 0
+/// alone, so particles outside the surface (loose ones on a resting surface, spray) are not cells of their own that
+/// the pressure has to hold up, and move with the velocity extrapolated from the liquid.
+bool IsLiquidCell(int3 c, uint count, float phi)
+{
+  if (!LiqLevelSetEnabled())
+    return count > 0;
+  if (LIQ_CONST(GpuFluidLiqPassF).z > 0.0)
+    return phi < 0.0;
+  return count > 0 || phi < 0.0;
+}
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  if (groupIndex == 0)
+  {
+    gs_uiVolume = 0;
+    gs_uiLiquid = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  int3 cell;
+  const bool bCell = LiqBrickCell(groupId, groupThreadId, cell);
+
+  if (bCell)
+  {
+    const uint index = LiqCellIndex(cell);
+    const uint count = GpuFluidLiqCellCount.Load(index * 4);
+    const bool bSolid = IsSolidCell(cell);
+    const bool bLevelSet = LiqLevelSetEnabled();
+    const float phi = bLevelSet ? PhiAt(cell) : 0.0;
+    // GpuFluidLiqPassF.x: the smallest theta (a free surface right at a cell centre would make 1 / theta, and the
+    // pressure's sensitivity to the particles' noise, unbounded); y > 0: theta from the level set at all, else the
+    // constant.
+    const float thetaMin = clamp(LIQ_CONST(GpuFluidLiqPassF).x, 1.0 / GPU_FLUID_LIQUID_THETA_STEPS, 1.0);
+    const bool bLevelSetTheta = bLevelSet && LIQ_CONST(GpuFluidLiqPassF).y > 0.0;
+
+    uint type = GPU_FLUID_LIQUID_CELL_AIR;
+    if (bSolid)
+      type = GPU_FLUID_LIQUID_CELL_SOLID;
+    else if (IsLiquidCell(cell, count, phi))
+      type = GPU_FLUID_LIQUID_CELL_LIQUID;
+
+    uint word = type;
+
+    if (type == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      bool bInterior = true;
+      [unroll] for (uint n = 0; n < 6; ++n)
+      {
+        const int3 nb = cell + LiqNeighbourOffset(n);
+        uint code = GPU_FLUID_LIQUID_THETA_CONSTANT;
+        if (!LiqInside(nb))
+        {
+          // Outside the domain: a wall counts as solid, an open side as air (constant theta).
+          bInterior = bInterior && !LiqNeighbourSideOpen(n);
+        }
+        else
+        {
+          const uint nbCount = GpuFluidLiqCellCount.Load(LiqCellIndex(nb) * 4);
+          const float nbPhi = bLevelSet ? PhiAt(nb) : 0.0;
+          const bool bNbSolid = IsSolidCell(nb);
+          const bool bNbLiquid = !bNbSolid && IsLiquidCell(nb, nbCount, nbPhi);
+          bInterior = bInterior && (bNbLiquid || bNbSolid);
+
+          if (bLevelSetTheta && !bNbSolid && !bNbLiquid)
+          {
+            // nbPhi >= 0 here (an air cell). The surface lies theta of the way from this centre to the neighbour's.
+            const float theta = phi < 0.0 ? phi / min(phi - nbPhi, -1.0e-6) : 0.0;
+            const float t = clamp(theta, thetaMin, 1.0);
+            code = clamp((uint)round(t * GPU_FLUID_LIQUID_THETA_STEPS), 1u, (uint)GPU_FLUID_LIQUID_THETA_STEPS);
+          }
+        }
+        word |= code << (GPU_FLUID_LIQUID_THETA_SHIFT + GPU_FLUID_LIQUID_THETA_BITS * n);
+      }
+
+      const float fill = bInterior ? 1.0 : saturate(float(count) / LiqParticlesPerCell());
+      InterlockedAdd(gs_uiVolume, (uint)round(fill * GPU_FLUID_LIQUID_VOLUME_SCALE));
+      InterlockedAdd(gs_uiLiquid, 1u);
+    }
+    else if (type == GPU_FLUID_LIQUID_CELL_AIR && count > 0)
+    {
+      // Particles outside the level set's surface still hold their share of the volume.
+      InterlockedAdd(gs_uiVolume, (uint)round(saturate(float(count) / LiqParticlesPerCell()) * GPU_FLUID_LIQUID_VOLUME_SCALE));
+    }
+
+    GpuFluidLiqCellType.Store(index * 4, word);
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0 && (gs_uiLiquid > 0 || gs_uiVolume > 0))
+  {
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_VOLUME * 4, gs_uiVolume);
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_LIQUID_CELLS * 4, gs_uiLiquid);
+  }
+}

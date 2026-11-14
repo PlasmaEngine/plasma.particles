@@ -1,0 +1,31 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#define GPU_FLUID_SCAN_KERNEL
+#include <Shaders/GpuFluid/GpuFluidScan.hlsli>
+
+// Writes the arguments of an indirect dispatch over a GPU-side count: {groupsX, groupsY, 1, count}. Group counts above
+// GPU_FLUID_SCAN_MAX_GROUPS_X fold into y; a kernel recovers its linear group with GpuFluidLinearGroup(groupId,
+// groupsX) and bounds-checks against the count in the fourth word.
+
+RWByteAddressBuffer GpuFluidScanCount;
+RWByteAddressBuffer GpuFluidScanArgsOutput;
+
+[numthreads(1, 1, 1)]
+void main()
+{
+  const uint4 args = GET_PUSH_CONSTANT(plGpuFluidScanConstants, GpuFluidScanArgs);
+  const uint count = GpuFluidScanCount.Load(args.x);
+  const uint itemsPerGroup = max(args.y, 1u);
+  const uint groups = (count + itemsPerGroup - 1) / itemsPerGroup;
+
+  uint groupsX = min(groups, (uint)GPU_FLUID_SCAN_MAX_GROUPS_X);
+  uint groupsY = groupsX > 0 ? (groups + groupsX - 1) / groupsX : 1u;
+
+  GpuFluidScanArgsOutput.Store4(args.z, uint4(groupsX, max(groupsY, 1u), 1u, count));
+}

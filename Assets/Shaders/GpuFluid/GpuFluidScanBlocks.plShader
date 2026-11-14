@@ -1,0 +1,66 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#define GPU_FLUID_SCAN_KERNEL
+#include <Shaders/GpuFluid/GpuFluidScan.hlsli>
+
+// One level of the exclusive block scan: each group scans GPU_FLUID_SCAN_BLOCK uint counts of the input into the
+// output, and writes the block's total into the block-sum slot of its group. In place (input == output) is allowed:
+// a group reads all of its elements before it writes any. Elements past the count read as zero.
+
+RWByteAddressBuffer GpuFluidScanInput;
+RWByteAddressBuffer GpuFluidScanOutput;
+RWByteAddressBuffer GpuFluidScanBlockSums;
+
+groupshared uint gs_uiScan[2][GPU_FLUID_SCAN_THREADS];
+
+[numthreads(GPU_FLUID_SCAN_THREADS, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  const uint4 range = GET_PUSH_CONSTANT(plGpuFluidScanConstants, GpuFluidScanRange);
+  const uint count = range.x;
+  const uint first = groupId.x * GPU_FLUID_SCAN_BLOCK + groupIndex * GPU_FLUID_SCAN_PER_THREAD;
+
+  uint values[GPU_FLUID_SCAN_PER_THREAD];
+  uint threadSum = 0;
+  [unroll] for (uint i = 0; i < GPU_FLUID_SCAN_PER_THREAD; ++i)
+  {
+    const uint element = first + i;
+    values[i] = element < count ? GpuFluidScanInput.Load(range.y + element * 4) : 0u;
+    threadSum += values[i];
+  }
+
+  // Inclusive Hillis-Steele scan of the per-thread sums, double buffered. Fixed order, so deterministic.
+  uint src = 0;
+  gs_uiScan[0][groupIndex] = threadSum;
+  GroupMemoryBarrierWithGroupSync();
+
+  [unroll] for (uint offset = 1; offset < GPU_FLUID_SCAN_THREADS; offset <<= 1)
+  {
+    uint value = gs_uiScan[src][groupIndex];
+    if (groupIndex >= offset)
+      value += gs_uiScan[src][groupIndex - offset];
+    gs_uiScan[1 - src][groupIndex] = value;
+    src = 1 - src;
+    GroupMemoryBarrierWithGroupSync();
+  }
+
+  const uint inclusive = gs_uiScan[src][groupIndex];
+  uint running = inclusive - threadSum;
+
+  [unroll] for (uint j = 0; j < GPU_FLUID_SCAN_PER_THREAD; ++j)
+  {
+    const uint element = first + j;
+    if (element < count)
+      GpuFluidScanOutput.Store(range.z + element * 4, running);
+    running += values[j];
+  }
+
+  if (groupIndex == GPU_FLUID_SCAN_THREADS - 1)
+    GpuFluidScanBlockSums.Store(range.w + groupId.x * 4, inclusive);
+}
