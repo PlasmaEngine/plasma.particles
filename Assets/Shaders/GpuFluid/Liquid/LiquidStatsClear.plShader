@@ -30,7 +30,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 
   if (word < GPU_FLUID_LIQUID_CTR_WORDS)
   {
-    const bool bPerFrame = word == GPU_FLUID_LIQUID_CTR_NAN || word == GPU_FLUID_LIQUID_CTR_OVERFLOW || word == GPU_FLUID_LIQUID_CTR_IN_SOLID;
+    const bool bPerFrame = word == GPU_FLUID_LIQUID_CTR_NAN || word == GPU_FLUID_LIQUID_CTR_OVERFLOW || word == GPU_FLUID_LIQUID_CTR_IN_SOLID || (word >= GPU_FLUID_LIQUID_CTR_MAX_CELL && word <= GPU_FLUID_LIQUID_CTR_MAX_CELL_SDF);
     // The static solids bake's count belongs to the bake, which a reset of the liquid keeps.
     if ((bReset && word != GPU_FLUID_LIQUID_CTR_SOLID_CELLS) || bPerFrame)
       GpuFluidLiqCounters.Store(word * 4, 0u);

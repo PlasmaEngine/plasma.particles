@@ -98,6 +98,11 @@ private:
     plUInt32 m_uiAwakeBricks = 0;
     plUInt32 m_uiSleepingBricks = 0;
     plUInt32 m_uiInSolid = 0;
+    plUInt32 m_uiMaxCellParticles = 0;
+    plVec3U32 m_vMaxCell = plVec3U32::MakeZero();
+    plUInt32 m_uiMaxCellType = 0;
+    float m_fMaxCellPhi = 0.0f;
+    float m_fMaxCellSdf = 0.0f;
     plUInt32 m_uiSolidCells = 0;
     float m_fProbes[4] = {};   ///< water depth from the particles of each probe's 3 x 3 column (m)
     float m_fProbePhi[4] = {}; ///< the same from the level set's zero crossing

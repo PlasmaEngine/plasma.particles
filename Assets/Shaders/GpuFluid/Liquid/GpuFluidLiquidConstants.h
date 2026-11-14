@@ -150,7 +150,11 @@
 #define GPU_FLUID_LIQUID_CTR_SLEEPING 17      // per substep: occupied bricks that are asleep (LiquidSleep)
 #define GPU_FLUID_LIQUID_CTR_IN_SOLID 18      // per frame: particles left deeper than half a cell inside a solid after G2P (N9)
 #define GPU_FLUID_LIQUID_CTR_SOLID_CELLS 19   // per bake: cells the static solids bake made solid (kept through resets)
-#define GPU_FLUID_LIQUID_CTR_WORDS 20
+#define GPU_FLUID_LIQUID_CTR_MAX_CELL 20      // per frame: most particles in one cell (bits 20-31, saturating) and that cell (bits 0-19)
+#define GPU_FLUID_LIQUID_CTR_MAX_CELL_TYPE 21 // per frame: the classification of that cell (its cell type word) at the last substep
+#define GPU_FLUID_LIQUID_CTR_MAX_CELL_PHI 22  // per frame: asuint of its level set (cells)
+#define GPU_FLUID_LIQUID_CTR_MAX_CELL_SDF 23  // per frame: asuint of its solids' distance (m)
+#define GPU_FLUID_LIQUID_CTR_WORDS 24
 #define GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP 8
 #define GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP 13
 
@@ -202,6 +206,10 @@
 #define GPU_FLUID_LIQUID_STAT_PROBES 40            // 4 words: asuint water depth (m) per probe from the particles of its 3 x 3 column
 #define GPU_FLUID_LIQUID_STAT_IN_SOLID 44          // particle-substeps that ended deeper than half a cell inside a solid this frame
 #define GPU_FLUID_LIQUID_STAT_SOLID_CELLS 45       // cells the last static solids bake made solid
+#define GPU_FLUID_LIQUID_STAT_MAX_CELL 46          // the frame's most particles in one cell (bits 20-31) and that cell (bits 0-19)
+#define GPU_FLUID_LIQUID_STAT_MAX_CELL_TYPE 47     // its cell type word at the last substep
+#define GPU_FLUID_LIQUID_STAT_MAX_CELL_PHI 52      // asuint of its level set (cells)
+#define GPU_FLUID_LIQUID_STAT_MAX_CELL_SDF 53      // asuint of its solids' distance (m)
 #define GPU_FLUID_LIQUID_STAT_PROBES_PHI 48        // 4 words: asuint water depth (m) per probe from the level set's lowest zero crossing
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024

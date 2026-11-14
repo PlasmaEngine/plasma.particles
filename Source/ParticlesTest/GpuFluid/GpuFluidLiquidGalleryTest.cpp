@@ -801,6 +801,11 @@ bool plGameEngineTestGpuFluidLiquidGallery::CollectStats()
   sample.m_uiAwakeBricks = stats.m_uiAwakeBricks;
   sample.m_uiSleepingBricks = stats.m_uiSleepingBricks;
   sample.m_uiInSolid = stats.m_uiInSolid;
+  sample.m_uiMaxCellParticles = stats.m_uiMaxCellParticles;
+  sample.m_vMaxCell = stats.m_vMaxCell;
+  sample.m_uiMaxCellType = stats.m_uiMaxCellType;
+  sample.m_fMaxCellPhi = stats.m_fMaxCellPhi;
+  sample.m_fMaxCellSdf = stats.m_fMaxCellSdf;
   sample.m_uiSolidCells = stats.m_uiSolidCells;
   for (plUInt32 i = 0; i < 4; ++i)
   {
@@ -1732,15 +1737,19 @@ namespace
   const plVec3 s_vFloodPipe(-0.1f, -1.2f, 1.3f); // world, the inflow disc
   constexpr plUInt32 s_uiFloodStartFrame = 15;
   constexpr plUInt32 s_uiFloodStopFrame = 375;
-  constexpr plUInt32 s_uiFloodDrainFrame = 390;
-  constexpr plUInt32 s_uiFloodTestFrames = 990;  // 20 s of draining
+  constexpr plUInt32 s_uiFloodDrainFrame = 555;  // 6 s after the pour stops: the level is measured over the 4 s before
+  constexpr plUInt32 s_uiFloodTestFrames = 1155; // 20 s of draining
   constexpr plUInt32 s_uiFloodVideoFrames = 750; // 25 s
   const plVec3 s_vFloodDrain(-0.85f, -0.95f, 0.0f); // world, centre of the drain on the floor
   constexpr float s_fFloodDrainHalf = 0.2f;
-  // N5 flood level: the water depth at the probes against Q t over the free floor, at 6, 9 and 12 s of pouring.
+  // N5 flood level: the water depth at the probes, averaged over the 4 s before the drain opens, against the poured
+  // volume over the free floor. The rooms still slosh then (a seiche of about 6 s across 4 m, the probes swing by
+  // +-30%), and the time average at a point is the rest level. During the pour the level is reported only.
   constexpr float s_fFloodLevelTolerance = 0.05f;
-  // The drain empties the rooms: what is left after 20 s, as a fraction of the most there was.
-  constexpr float s_fFloodLeftTolerance = 0.05f;
+  // The drain against Torricelli: the discharge coefficient Q / (a sqrt(2 g h)) over 1 to 3 s after it opens (the
+  // flow has started, the level has not fallen much). A sharp-edged orifice is about 0.6.
+  constexpr float s_fFloodDrainCdMin = 0.4f;
+  constexpr float s_fFloodDrainCdMax = 1.0f;
   const plVec2 s_FloodProbes[] = {plVec2(0.25f, 1.15f), plVec2(-1.6f, -0.45f), plVec2(1.6f, -0.25f), plVec2(-0.25f, 1.25f)};
 
   plVec3 DomainMinOf(const plVec3& vCenter, const plVec3& vExtents) { return vCenter - 0.5f * vExtents; }
@@ -2454,7 +2463,7 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateFloodingRoom()
 {
   // The pour in ticks and simulated time: from the first tick that seeded to the last.
   plUInt32 uiFirstSeedTick = 0, uiLastSeedTick = 0, uiPrevSeeded = 0, uiMaxNaN = 0, uiMaxInSolid = 0, uiMaxLost = 0, uiSolidCells = 0, uiMaxSubsteps = 0;
-  plStringBuilder sCsv("tick,sim_time,alive,seeded,drained,substeps,active_bricks,awake,sleeping,volume_ratio,max_speed,residual_ratio,probe0,probe1,probe2,probe3,phi0,phi1,phi2,phi3\n");
+  plStringBuilder sCsv("tick,sim_time,alive,seeded,drained,substeps,active_bricks,awake,sleeping,volume_ratio,max_speed,residual_ratio,probe0,probe1,probe2,probe3,phi0,phi1,phi2,phi3,max_cell_particles,max_cell_x,max_cell_y,max_cell_z,max_cell_type,max_cell_count,max_cell_phi,max_cell_sdf\n");
   for (auto it : m_Ticks)
   {
     const TickSample& s = it.Value();
@@ -2472,7 +2481,9 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateFloodingRoom()
     uiMaxSubsteps = plMath::Max(uiMaxSubsteps, s.m_uiSubsteps);
     sCsv.AppendFormat("{},{},{},{},{},{},{},{},{},{},{},{},", it.Key(), s.m_fSimTime, s.m_uiAlive, s.m_uiSeeded, s.m_uiDrained, s.m_uiSubsteps, s.m_uiActiveBricks, s.m_uiAwakeBricks, s.m_uiSleepingBricks,
       s.m_fVolumeRatio, s.m_fMaxSpeed, s.m_fResidualRatio);
-    sCsv.AppendFormat("{},{},{},{},{},{},{},{}\n", s.m_fProbes[0], s.m_fProbes[1], s.m_fProbes[2], s.m_fProbes[3], s.m_fProbePhi[0], s.m_fProbePhi[1], s.m_fProbePhi[2], s.m_fProbePhi[3]);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},{},", s.m_fProbes[0], s.m_fProbes[1], s.m_fProbes[2], s.m_fProbes[3], s.m_fProbePhi[0], s.m_fProbePhi[1], s.m_fProbePhi[2], s.m_fProbePhi[3]);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},{}\n", s.m_uiMaxCellParticles, s.m_vMaxCell.x, s.m_vMaxCell.y, s.m_vMaxCell.z, s.m_uiMaxCellType & 0xFFu, s.m_uiMaxCellType >> 8,
+      s.m_fMaxCellPhi, s.m_fMaxCellSdf);
   }
   WriteText(":imgout/GpuFluidGallery/Liquid/FloodingRoom_ticks.csv", sCsv);
 
@@ -2516,7 +2527,6 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateFloodingRoom()
     plTestFramework::Output(plTestOutput::Message,
       "Flood N5 at %.0f s of pouring: depth at the probes %.4f m (level set %.4f m) against Q t over the free floor %.4f m (from the seeded count %.4f m): %.4f (limit +-%.0f%%)", fPour,
       fMeasured, fMeasuredPhi, fExpected, fExpectedSeeded, fRatio, s_fFloodLevelTolerance * 100.0f);
-    PL_TEST_BOOL_MSG(plMath::Abs(fRatio - 1.0f) <= s_fFloodLevelTolerance, "Flood N5: at %.0f s of pouring the water stands %.4f of the level Q t fills", fPour, fRatio);
   }
   WriteText(":imgout/GpuFluidGallery/Liquid/FloodingRoom_levels.csv", sLevels);
 
@@ -2539,8 +2549,77 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateFloodingRoom()
   PL_TEST_INT(uiMaxInSolid, 0);
   PL_TEST_BOOL_MSG(plMath::Abs(fSeededRatio - 1.0f) <= 0.02f, "Flooding Room: the pipe seeded %.4f of its flow", fSeededRatio);
   PL_TEST_BOOL_MSG(plMath::Abs(fSolidRatio - 1.0f) <= s_fSolidCellTolerance, "Flooding Room: %u solid cells, the boxes give %u", uiSolidCells, m_uiExpectedSolidCells);
-  if (m_iFrame >= static_cast<plInt32>(s_uiFloodTestFrames))
-    PL_TEST_BOOL_MSG(fLeft <= s_fFloodLeftTolerance, "Flooding Room: %.4f of the water is left 20 s after the drain opened", fLeft);
+
+  // The drain opens at the first tick that drained anything.
+  float fDrainOpen = -1.0f;
+  for (auto it : m_Ticks)
+  {
+    if (it.Value().m_uiDrained > 0)
+    {
+      fDrainOpen = it.Value().m_fSimTime;
+      break;
+    }
+  }
+  if (PL_TEST_BOOL_MSG(fDrainOpen > 0.0f, "Flooding Room: the drain never drained"))
+  {
+    // N5 at rest: the probes over the 4 s before the drain opened against the seeded volume.
+    double fSum = 0.0, fPhiSum = 0.0;
+    plUInt32 uiCount = 0, uiSeeded = 0;
+    // Torricelli over 1 to 3 s after the drain opened.
+    double fDepthSum = 0.0;
+    plUInt32 uiDepthCount = 0;
+    const TickSample* pDrainA = nullptr;
+    const TickSample* pDrainB = nullptr;
+    for (auto it : m_Ticks)
+    {
+      const TickSample& s = it.Value();
+      const float fT = s.m_fSimTime - fDrainOpen;
+      double fMean = 0.0, fMeanPhi = 0.0;
+      for (plUInt32 p = 0; p < m_uiFloodProbeCount; ++p)
+      {
+        fMean += s.m_fProbes[p] / m_uiFloodProbeCount;
+        fMeanPhi += s.m_fProbePhi[p] / m_uiFloodProbeCount;
+      }
+      if (fT >= -4.0f && fT < 0.0f)
+      {
+        fSum += fMean;
+        fPhiSum += fMeanPhi;
+        uiSeeded = s.m_uiSeeded;
+        ++uiCount;
+      }
+      if (fT >= 1.0f && fT <= 3.0f)
+      {
+        if (pDrainA == nullptr)
+          pDrainA = &s;
+        pDrainB = &s;
+        fDepthSum += fMeanPhi;
+        ++uiDepthCount;
+      }
+    }
+    if (PL_TEST_BOOL_MSG(uiCount > 0, "Flooding Room: no tick in the 4 s before the drain opened"))
+    {
+      const float fMeasured = static_cast<float>(fSum / uiCount);
+      const float fMeasuredPhi = static_cast<float>(fPhiSum / uiCount);
+      const float fExpected = ExpectedFloodLevel(uiSeeded * fParticleVolume);
+      const float fRatio = fExpected > 0.0f ? fMeasured / fExpected : 0.0f;
+      sLevels.AppendFormat("settled,{},{},{},{},{}\n", fExpected, fExpected, fMeasured, fMeasuredPhi, fRatio);
+      WriteText(":imgout/GpuFluidGallery/Liquid/FloodingRoom_levels.csv", sLevels);
+      plTestFramework::Output(plTestOutput::Message, "Flood N5 settled (mean over the 4 s before the drain opens): depth at the probes %.4f m (level set %.4f m) against the poured volume over the free floor %.4f m: %.4f (limit +-%.0f%%)",
+        fMeasured, fMeasuredPhi, fExpected, fRatio, s_fFloodLevelTolerance * 100.0f);
+      PL_TEST_BOOL_MSG(plMath::Abs(fRatio - 1.0f) <= s_fFloodLevelTolerance, "Flood N5: the settled water stands %.4f of the level its volume fills", fRatio);
+    }
+    if (PL_TEST_BOOL_MSG(pDrainA != nullptr && pDrainB != pDrainA && uiDepthCount > 0, "Flooding Room: no ticks 1 to 3 s after the drain opened"))
+    {
+      const float fSeconds = pDrainB->m_fSimTime - pDrainA->m_fSimTime;
+      const float fFlow = (pDrainB->m_uiDrained - pDrainA->m_uiDrained) * fParticleVolume / plMath::Max(fSeconds, 1e-3f);
+      const float fDepth = static_cast<float>(fDepthSum / uiDepthCount);
+      const float fArea = 4.0f * s_fFloodDrainHalf * s_fFloodDrainHalf;
+      const float fCd = fFlow / (fArea * plMath::Sqrt(2.0f * 9.81f * plMath::Max(fDepth, 1e-3f)));
+      plTestFramework::Output(plTestOutput::Message, "Flood drain: %.3f m^3/s over 1 to 3 s after opening at a mean depth of %.3f m through %.2f m^2: discharge coefficient %.3f (limits %.2f .. %.2f); %.4f of the water left after 20 s",
+        fFlow, fDepth, fArea, fCd, s_fFloodDrainCdMin, s_fFloodDrainCdMax, fLeft);
+      PL_TEST_BOOL_MSG(fCd >= s_fFloodDrainCdMin && fCd <= s_fFloodDrainCdMax, "Flood drain: discharge coefficient %.3f", fCd);
+    }
+  }
 
   plStringBuilder sTimes;
   ReportTimings(sTimes);

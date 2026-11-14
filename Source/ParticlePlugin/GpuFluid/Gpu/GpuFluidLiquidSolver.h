@@ -242,6 +242,11 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
   float m_fProbeLevels[GPU_FLUID_LIQUID_MAX_PROBES] = {};
   float m_fProbePhiLevels[GPU_FLUID_LIQUID_MAX_PROBES] = {}; ///< the same from the level set's lowest zero crossing
   plUInt32 m_uiInSolid = 0;        ///< particle-substeps of the frame left deeper than half a cell inside a solid (N9)
+  plUInt32 m_uiMaxCellParticles = 0; ///< the frame's most particles in one cell (saturates at 4095): P2G's cost follows it
+  plVec3U32 m_vMaxCell = plVec3U32::MakeZero(); ///< that cell
+  plUInt32 m_uiMaxCellType = 0;  ///< its classification at the last substep (GPU_FLUID_LIQUID_CELL_*), count in bits 8 and up
+  float m_fMaxCellPhi = 0.0f;    ///< its level set (cells)
+  float m_fMaxCellSdf = 0.0f;    ///< its solids' distance (m)
   plUInt32 m_uiSolidCells = 0;     ///< cells the static solids bake made solid (SDF < 0), counted by the last bake
 
   // Filled on the CPU, current (not read back):

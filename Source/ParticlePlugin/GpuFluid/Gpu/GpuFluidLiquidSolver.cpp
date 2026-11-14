@@ -486,6 +486,16 @@ void plGpuFluidLiquidSolver::DecodeStats(plArrayPtr<const plUInt8> data, plGpuFl
   out_stats.m_uiAwakeBricks = pWords[GPU_FLUID_LIQUID_STAT_AWAKE];
   out_stats.m_uiSleepingBricks = pWords[GPU_FLUID_LIQUID_STAT_SLEEPING];
   out_stats.m_uiInSolid = pWords[GPU_FLUID_LIQUID_STAT_IN_SOLID];
+  {
+    const plUInt32 uiPacked = pWords[GPU_FLUID_LIQUID_STAT_MAX_CELL];
+    const plUInt32 uiCell = uiPacked & 0xFFFFFu;
+    out_stats.m_uiMaxCellParticles = uiPacked >> 20;
+    out_stats.m_uiMaxCellType = pWords[GPU_FLUID_LIQUID_STAT_MAX_CELL_TYPE];
+    out_stats.m_fMaxCellPhi = AsFloat(GPU_FLUID_LIQUID_STAT_MAX_CELL_PHI);
+    out_stats.m_fMaxCellSdf = AsFloat(GPU_FLUID_LIQUID_STAT_MAX_CELL_SDF);
+    const plVec3U32 vCells = m_vCells;
+    out_stats.m_vMaxCell = vCells.x * vCells.y > 0 ? plVec3U32(uiCell % vCells.x, (uiCell / vCells.x) % vCells.y, uiCell / (vCells.x * vCells.y)) : plVec3U32::MakeZero();
+  }
   out_stats.m_uiSolidCells = pWords[GPU_FLUID_LIQUID_STAT_SOLID_CELLS];
   for (plUInt32 i = 0; i < GPU_FLUID_LIQUID_MAX_PROBES; ++i)
   {

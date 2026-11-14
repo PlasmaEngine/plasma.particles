@@ -68,6 +68,12 @@ bool IsLiquidCell(int3 c, uint count, float phi)
     return false;
   if (!LiqLevelSetEnabled())
     return count > 0;
+  // A cell holding well over its share of particles is liquid whatever the level set says. In a domain corner the
+  // particles mirrored at three walls put their mean on the corner itself, so phi reads positive at the centre of a
+  // corner cell however full it is: it was air, its particles fell ballistic into the corner and stayed, and the corner
+  // gathered 40K particles (the Flooding Room's water that never drained, and P2G at 100+ ms a frame).
+  if (float(count) >= 2.0 * LiqParticlesPerCell())
+    return true;
   if (phi < LIQ_CONST(GpuFluidLiqPassF).y || (count >= max(LIQ_CONST(GpuFluidLiqPass).y, 1u) && phi < LIQ_CONST(GpuFluidLiqPassF).z))
     return true;
   if (count == 0 || !LiqHasSolids())
@@ -122,6 +128,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       type = GPU_FLUID_LIQUID_CELL_LIQUID;
 
     uint word = type;
+
+    // Diagnostics: how the most crowded cell so far this frame (LiquidCount ran first) is classified.
+    if ((GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_MAX_CELL * 4) & 0xFFFFFu) == (index & 0xFFFFFu))
+    {
+      GpuFluidLiqCounters.Store(GPU_FLUID_LIQUID_CTR_MAX_CELL_TYPE * 4, type | (count << 8));
+      GpuFluidLiqCounters.Store(GPU_FLUID_LIQUID_CTR_MAX_CELL_PHI * 4, asuint(phi));
+      GpuFluidLiqCounters.Store(GPU_FLUID_LIQUID_CTR_MAX_CELL_SDF * 4, asuint(LiqHasSolids() ? LiqSolidDistanceAtCell(cell) : 1.0e6));
+    }
 
     // The volume measure keeps its own liquid cells, every cell holding particles plus the empty ones inside the level
     // set, whatever the pressure's cells are. With phi < tau alone for the pressure the measure's surface cells would

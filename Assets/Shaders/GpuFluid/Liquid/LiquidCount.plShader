@@ -57,6 +57,9 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   {
     const int3 cell = LiqParticleCell(position);
     GpuFluidLiqCellCount.InterlockedAdd(LiqCellIndex(cell) * 4, 1u, rank);
+    // The most crowded cell (P2G gathers over every particle of a cell, so a pile-up is what its cost follows).
+    const uint packed = (min(rank + 1, 4095u) << 20) | (LiqCellIndex(cell) & 0xFFFFFu);
+    GpuFluidLiqCounters.InterlockedMax(GPU_FLUID_LIQUID_CTR_MAX_CELL * 4, packed);
     GpuFluidLiqBrickOccupied.Store(LiqBrickIndex(cell) * 4, 1u);
   }
 
