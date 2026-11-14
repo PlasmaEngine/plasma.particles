@@ -16,8 +16,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
   GPU_FLUID_KERNEL_MODES
   const uint3 dims = LiqLevelDims(MgLevel());
-  const int3 cell = int3(dispatchThreadId);
-  if (!LiqInsideDims(cell, dims))
+  int3 cell;
+  if (!MgRegionCell(MgLevel(), dispatchThreadId, cell) || !LiqInsideDims(cell, dims))
     return;
 
   MgSmoothCell(cell, dims, false);

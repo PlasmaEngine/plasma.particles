@@ -212,6 +212,10 @@ namespace
     pLiquid->m_Tuning.m_uiSurfaceSmoothSteps = static_cast<plUInt32>(TuningFloat("SURFACE_SMOOTH", static_cast<float>(pLiquid->m_Tuning.m_uiSurfaceSmoothSteps)));
     pLiquid->m_Tuning.m_uiSubstepHoldTicks = static_cast<plUInt32>(TuningFloat("HOLD", static_cast<float>(pLiquid->m_Tuning.m_uiSubstepHoldTicks)));
     pLiquid->m_Tuning.m_fSubstepDownMargin = TuningFloat("DOWN_MARGIN", pLiquid->m_Tuning.m_fSubstepDownMargin);
+    pLiquid->m_Tuning.m_fCflNumber = TuningFloat("CFL", pLiquid->m_Tuning.m_fCflNumber);
+    pLiquid->m_Tuning.m_bBlockSmooth = TuningFloat("BLOCK_SMOOTH", pLiquid->m_Tuning.m_bBlockSmooth ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_uiFineSweeps = static_cast<plUInt32>(TuningFloat("FINE_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiFineSweeps)));
+    pLiquid->m_Tuning.m_uiFinePasses = static_cast<plUInt32>(TuningFloat("FINE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiFinePasses)));
 
     // A fixed substep count (min = max), for checking that the rest packing does not follow it.
     const plUInt32 uiForced = static_cast<plUInt32>(TuningFloat("FORCE_SUBSTEPS", 0.0f));
@@ -835,6 +839,23 @@ void plGameEngineTestGpuFluidLiquidGallery::AccumulateTimings()
     RemovePassStats(szPhase);
   }
 
+  // The solve's stages (m_bProfileKernels: GPU scopes inside the pass), read once like the passes.
+  {
+    plDynamicArray<plString> names;
+    plDynamicArray<plVariant> values;
+    plStats::GetStatsWithPrefix("Renderer/GPU/GpuFluid LiqProf/", names, values);
+    for (plUInt32 i = 0; i < names.GetCount(); ++i)
+    {
+      plStringBuilder sStage = names[i];
+      sStage.TrimWordStart("Renderer/GPU/GpuFluid ");
+      if (const char* szUnit = sStage.FindSubString("["))
+        sStage.SetSubString_FromTo(sStage.GetData(), szUnit);
+      if (values[i].CanConvertTo<double>())
+        m_PhaseMs[sStage] += values[i].ConvertTo<double>();
+      plStats::RemoveStat(names[i]);
+    }
+  }
+
   if (bAny)
   {
     ++m_uiTimedFrames;
@@ -868,6 +889,14 @@ void plGameEngineTestGpuFluidLiquidGallery::ReportTimings(plStringBuilder& ref_s
       fDraw += fMean;
     ref_sCsv.AppendFormat("{},{}\n", szPhase, fMean);
     plTestFramework::Output(plTestOutput::Message, "GPU %s: %.3f ms per frame", szPhase, fMean);
+  }
+  for (auto it : m_PhaseMs)
+  {
+    if (it.Key().StartsWith("LiqProf/"))
+    {
+      ref_sCsv.AppendFormat("{},{}\n", it.Key(), it.Value() / m_uiTimedFrames);
+      plTestFramework::Output(plTestOutput::Message, "GPU solve stage %s: %.3f ms per frame", it.Key().GetData(), it.Value() / m_uiTimedFrames);
+    }
   }
   ref_sCsv.AppendFormat("total,{}\n", fTotal);
   ref_sCsv.AppendFormat("draw_total,{}\n", fDraw);

@@ -9,24 +9,75 @@ ALL
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
 
 // The coarsest multigrid level (at most GPU_FLUID_LIQUID_COARSEST_MAX_CELLS cells), solved by one group: red-black
-// SOR sweeps on a groupshared copy of the solution, a barrier between colours. One dispatch instead of two per sweep.
+// SOR sweeps in groupshared memory, a barrier between colours. One dispatch instead of two per sweep.
+//
+// The one group runs on one SM while the rest of the GPU waits, so every sweep is latency: each cell's stencil (b and
+// 1 / diag, and which neighbours are liquid) is worked out once into groupshared memory, and a sweep then reads only
+// groupshared memory. 1024 threads, so a colour is one or two cells per thread. Cells outside the V-cycle's region
+// (LiquidLevelRegion) and cells that are not liquid keep their value.
 
 groupshared float gs_fX[GPU_FLUID_LIQUID_COARSEST_MAX_CELLS];
+groupshared float gs_fBOverDiag[GPU_FLUID_LIQUID_COARSEST_MAX_CELLS];
+groupshared float gs_fInvDiag[GPU_FLUID_LIQUID_COARSEST_MAX_CELLS]; // 0: not updated
+groupshared uint gs_uiMask[GPU_FLUID_LIQUID_COARSEST_MAX_CELLS / 4]; // 6 bits of liquid neighbours per cell, 8 bits each
 
 GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_COARSEST_GROUP, 1, 1)]
 void main(uint groupIndex : SV_GroupIndex)
 {
   GPU_FLUID_KERNEL_MODES
-  const uint3 dims = LiqLevelDims(MgLevel());
+  const uint level = MgLevel();
+  const uint3 dims = LiqLevelDims(level);
   const uint count = min(dims.x * dims.y * dims.z, (uint)GPU_FLUID_LIQUID_COARSEST_MAX_CELLS);
   const float air = LiqInvTheta();
   const float omega = MgOmega();
 
-  for (uint i = groupIndex; i < count; i += GPU_FLUID_LIQUID_COARSEST_GROUP)
-    gs_fX[i] = asfloat(GpuFluidLiqMgX.Load(i * 4));
+  for (uint m = groupIndex; m < GPU_FLUID_LIQUID_COARSEST_MAX_CELLS / 4; m += GPU_FLUID_LIQUID_COARSEST_GROUP)
+    gs_uiMask[m] = 0;
   GroupMemoryBarrierWithGroupSync();
 
+  for (uint i = groupIndex; i < count; i += GPU_FLUID_LIQUID_COARSEST_GROUP)
+  {
+    gs_fX[i] = asfloat(GpuFluidLiqMgX.Load(i * 4));
+    gs_fBOverDiag[i] = 0.0;
+    gs_fInvDiag[i] = 0.0;
+
+    const int3 c = int3(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));
+    if ((GpuFluidLiqMgType.Load(i * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID || !MgInRegion(level, c))
+      continue;
+
+    float diag = 0.0;
+    uint mask = 0;
+    [unroll] for (uint n = 0; n < 6; ++n)
+    {
+      const int3 nb = c + LiqNeighbourOffset(n);
+      if (!LiqInsideDims(nb, dims))
+      {
+        if (LiqNeighbourSideOpen(n))
+          diag += air;
+        continue;
+      }
+      const uint t = GpuFluidLiqMgType.Load(LiqCellIndexIn(nb, dims) * 4) & 3u;
+      if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
+      {
+        diag += 1.0;
+        mask |= 1u << n;
+      }
+      else if (t == GPU_FLUID_LIQUID_CELL_AIR)
+      {
+        diag += air;
+      }
+    }
+    if (diag > 0.0)
+    {
+      gs_fInvDiag[i] = 1.0 / diag;
+      gs_fBOverDiag[i] = asfloat(GpuFluidLiqMgB.Load(i * 4)) / diag;
+      InterlockedOr(gs_uiMask[i >> 2], mask << ((i & 3u) * 8));
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const int3 strides = int3(1, int(dims.x), int(dims.x * dims.y));
   const uint sweeps = MgSweeps();
   for (uint sweep = 0; sweep < sweeps; ++sweep)
   {
@@ -36,42 +87,23 @@ void main(uint groupIndex : SV_GroupIndex)
       const uint colour = (sweep & 1u) != 0 ? 1u - colourStep : colourStep;
       for (uint i = groupIndex; i < count; i += GPU_FLUID_LIQUID_COARSEST_GROUP)
       {
+        const float invDiag = gs_fInvDiag[i];
+        if (invDiag == 0.0)
+          continue;
         const int3 c = int3(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));
         if ((((uint)(c.x + c.y + c.z)) & 1u) != colour)
           continue;
-        if ((GpuFluidLiqMgType.Load(i * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
-          continue;
-
-        float diag = 0.0;
+        const uint mask = (gs_uiMask[i >> 2] >> ((i & 3u) * 8)) & 63u;
         float sum = 0.0;
         [unroll] for (uint n = 0; n < 6; ++n)
         {
-          const int3 nb = c + LiqNeighbourOffset(n);
-          if (!LiqInsideDims(nb, dims))
+          if ((mask & (1u << n)) != 0)
           {
-            if (LiqNeighbourSideOpen(n))
-              diag += air;
-            continue;
-          }
-
-          const uint nbIndex = LiqCellIndexIn(nb, dims);
-          const uint t = GpuFluidLiqMgType.Load(nbIndex * 4) & 3u;
-          if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
-          {
-            diag += 1.0;
-            sum += gs_fX[nbIndex];
-          }
-          else if (t == GPU_FLUID_LIQUID_CELL_AIR)
-          {
-            diag += air;
+            const int stride = strides[n >> 1];
+            sum += gs_fX[(n & 1u) != 0 ? i + stride : i - stride];
           }
         }
-
-        if (diag > 0.0)
-        {
-          const float gs = (asfloat(GpuFluidLiqMgB.Load(i * 4)) + sum) / diag;
-          gs_fX[i] = lerp(gs_fX[i], gs, omega);
-        }
+        gs_fX[i] = lerp(gs_fX[i], gs_fBOverDiag[i] + sum * invDiag, omega);
       }
       GroupMemoryBarrierWithGroupSync();
     }

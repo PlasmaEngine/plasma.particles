@@ -20,8 +20,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   GPU_FLUID_KERNEL_MODES
   const uint level = MgLevel();
   const uint3 dims = LiqLevelDims(level);
-  const int3 cell = int3(dispatchThreadId);
-  if (!LiqInsideDims(cell, dims))
+  int3 cell;
+  if (!MgRegionCell(level, dispatchThreadId, cell) || !LiqInsideDims(cell, dims))
     return;
 
   const uint index = LiqCellIndexIn(cell, dims);

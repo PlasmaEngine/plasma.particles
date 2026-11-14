@@ -20,7 +20,25 @@ RWByteAddressBuffer GpuFluidLiqMgX;
 RWByteAddressBuffer GpuFluidLiqMgB;
 RWByteAddressBuffer GpuFluidLiqMgType;
 
+ByteAddressBuffer GpuFluidLiqLevelRegion; // LiquidLevelRegion
+
 uint MgLevel() { return LIQ_CONST(GpuFluidLiqPass).x; }
+
+/// Whether cell c of a coarse level lies in the region the V-cycle works on (LiquidLevelRegion).
+bool MgInRegion(uint level, int3 c)
+{
+  const uint offset = level * GPU_FLUID_LIQUID_REGION_STRIDE;
+  const uint4 hi = GpuFluidLiqLevelRegion.Load4(offset + 32);
+  return hi.w == 0 && all(c >= int3(GpuFluidLiqLevelRegion.Load3(offset + 16))) && all(c <= int3(hi.xyz));
+}
+
+/// The cell of a thread of a dense-level kernel dispatched over its level's region; false outside it.
+bool MgRegionCell(uint level, uint3 dispatchThreadId, out int3 out_cell)
+{
+  const uint offset = level * GPU_FLUID_LIQUID_REGION_STRIDE;
+  out_cell = int3(GpuFluidLiqLevelRegion.Load3(offset + 16) + dispatchThreadId);
+  return MgInRegion(level, out_cell);
+}
 uint MgColour() { return LIQ_CONST(GpuFluidLiqPass).y; }
 uint MgSweeps() { return LIQ_CONST(GpuFluidLiqPass).z; }
 float MgOmega() { return LIQ_CONST(GpuFluidLiqPassF).x; }

@@ -1,0 +1,120 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// Every sweep of one smoothing call on the fine level in one launch: per active brick, the brick and a one-cell halo of
+// the solution in groupshared memory, red-black Gauss-Seidel inside the brick with the halo held at its value from the
+// start of the launch (block Gauss-Seidel: Gauss-Seidel within a brick, Jacobi between bricks, as the gas multigrid
+// smooths). LiquidSmoothBricks needs one launch and one barrier per colour and sweep; on small domains those fixed
+// costs, not the cells, were most of the solve.
+//
+// GpuFluidLiqPass: y 1 runs black before red in every sweep (the post-smoothing, so a V-cycle stays symmetric for the
+// MGPCG preconditioner), z the sweeps.
+
+#define GPU_FLUID_LIQUID_TILE (GPU_FLUID_LIQUID_BRICK + 2)
+#define GPU_FLUID_LIQUID_TILE_CELLS (GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE)
+
+groupshared float gs_fX[GPU_FLUID_LIQUID_TILE_CELLS];
+
+uint TileIndex(int3 local)
+{
+  const uint3 t = uint3(local + 1);
+  return t.x + GPU_FLUID_LIQUID_TILE * (t.y + GPU_FLUID_LIQUID_TILE * t.z);
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  GPU_FLUID_KERNEL_MODES
+
+  // The whole group takes the same branch here: past the end of the brick list it leaves before any barrier.
+  const uint4 args = GpuFluidLiqBrickArgs.Load4(0);
+  const uint listIndex = GpuFluidLinearGroup(groupId, args.x);
+  if (listIndex >= args.w)
+    return;
+
+  const uint brick = GpuFluidLiqBrickList.Load(listIndex * 4);
+  const uint3 bricks = LiqBricks();
+  const int3 origin = int3(uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y)) * GPU_FLUID_LIQUID_BRICK);
+  const uint3 dims = LiqCells();
+
+  for (uint i = groupIndex; i < GPU_FLUID_LIQUID_TILE_CELLS; i += GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK)
+  {
+    const int3 local = int3(i % GPU_FLUID_LIQUID_TILE, (i / GPU_FLUID_LIQUID_TILE) % GPU_FLUID_LIQUID_TILE, i / (GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE)) - 1;
+    const int3 c = origin + local;
+    gs_fX[i] = LiqInside(c) ? asfloat(GpuFluidLiqMgX.Load(LiqCellIndex(c) * 4)) : 0.0;
+  }
+
+  // This cell's stencil, fixed for the launch: the diagonal, which neighbours are liquid, and b.
+  const int3 local = int3(groupThreadId);
+  const int3 cell = origin + local;
+  bool bLiquid = false;
+  float diag = 0.0;
+  uint liquidMask = 0;
+  float b = 0.0;
+  if (LiqInside(cell))
+  {
+    const uint index = LiqCellIndex(cell);
+    const uint ownWord = GpuFluidLiqMgType.Load(index * 4);
+    if ((ownWord & 3u) == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      [unroll] for (uint n = 0; n < 6; ++n)
+      {
+        const uint t = LiqTypeAt(GpuFluidLiqMgType, cell + LiqNeighbourOffset(n), dims, true);
+        const float air = LiqAirInvTheta(ownWord, n);
+        if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
+        {
+          if (LiqNeighbourSideOpen(n))
+            diag += air;
+        }
+        else if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
+        {
+          diag += 1.0;
+          liquidMask |= 1u << n;
+        }
+        else if (t == GPU_FLUID_LIQUID_CELL_AIR)
+        {
+          diag += air;
+        }
+      }
+      bLiquid = diag > 0.0;
+      b = asfloat(GpuFluidLiqMgB.Load(index * 4));
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint own = TileIndex(local);
+  const uint parity = ((uint)(cell.x + cell.y + cell.z)) & 1u;
+  const bool bReverse = LIQ_CONST(GpuFluidLiqPass).y != 0;
+  const uint sweeps = LIQ_CONST(GpuFluidLiqPass).z;
+  const float omega = MgOmega();
+  for (uint sweep = 0; sweep < sweeps; ++sweep)
+  {
+    for (uint step = 0; step < 2; ++step)
+    {
+      const uint colour = bReverse ? 1u - step : step;
+      if (bLiquid && parity == colour)
+      {
+        float sum = 0.0;
+        [unroll] for (uint n = 0; n < 6; ++n)
+        {
+          if ((liquidMask & (1u << n)) != 0)
+            sum += gs_fX[TileIndex(local + LiqNeighbourOffset(n))];
+        }
+        gs_fX[own] = lerp(gs_fX[own], (b + sum) / diag, omega);
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
+  }
+
+  if (bLiquid)
+    GpuFluidLiqMgX.Store(LiqCellIndex(cell) * 4, asuint(gs_fX[own]));
+}

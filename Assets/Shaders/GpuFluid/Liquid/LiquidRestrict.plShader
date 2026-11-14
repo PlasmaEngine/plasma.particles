@@ -26,8 +26,8 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   const uint3 fineDims = LiqLevelDims(level - 1);
   const bool bFine = level == 1;
 
-  const int3 cell = int3(dispatchThreadId);
-  if (!LiqInsideDims(cell, dims))
+  int3 cell;
+  if (!MgRegionCell(level, dispatchThreadId, cell) || !LiqInsideDims(cell, dims))
     return;
 
   float sum = 0.0;

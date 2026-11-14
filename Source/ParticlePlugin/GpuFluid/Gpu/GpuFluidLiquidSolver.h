@@ -61,7 +61,17 @@ struct plGpuFluidLiquidFrameInput
   /// instead of breaking the CFL number.
   plUInt32 m_uiMaxSubsteps = 4;
   plUInt32 m_uiMinSubsteps = 1;
-  float m_fCflNumber = 1.5f;
+  float m_fCflNumber = 2.5f;
+  /// Fine-level smoothing: every sweep of a smoothing call in one launch per brick (block Gauss-Seidel in groupshared
+  /// memory, LiquidSmoothBricksBlock) instead of one launch per colour and sweep.
+  bool m_bBlockSmooth = true;
+  /// Sweeps of each fine-level smoothing call with m_bBlockSmooth (block Gauss-Seidel converges a little slower than
+  /// red-black over the whole grid; the extra sweeps run in groupshared memory and cost little). The coarse levels keep
+  /// m_uiPreSmooth and m_uiPostSmooth.
+  plUInt32 m_uiFineSweeps = 2;
+  /// Launches per fine-level smoothing call with m_bBlockSmooth, each of m_uiFineSweeps sweeps: the halos between
+  /// bricks are refreshed between launches (one launch left the N2 residual about 1.6 times higher).
+  plUInt32 m_uiFinePasses = 2;
   plUInt32 m_uiSpeedHistory = 8;
   plUInt32 m_uiSubstepHoldTicks = 15;
   float m_fSubstepDownMargin = 0.8f;
@@ -284,6 +294,8 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hCount;
   plShaderResourceHandle m_hScatter;
   plShaderResourceHandle m_hBricks;
+  plShaderResourceHandle m_hLevelRegion;
+  plShaderResourceHandle m_hSmoothBricksBlock;
   plShaderResourceHandle m_hP2G;
   plShaderResourceHandle m_hExtrapolate;
   plShaderResourceHandle m_hClassify;
@@ -436,6 +448,7 @@ private:
   plGALBufferHandle m_hPcgQ;
   plGALBufferHandle m_hPcgPartials;
   plGALBufferHandle m_hPcgScalars;
+  plGALBufferHandle m_hLevelRegion; ///< per coarse multigrid level: the region a V-cycle works on, as dispatch arguments
 
   plGALBufferHandle m_hCounters;
   plGALBufferHandle m_hStats;

@@ -1,0 +1,94 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// The region of every coarse multigrid level that a V-cycle works on: the box around the active bricks, so the dense
+// levels skip the air above a pool (the Medium room is 4 m tall, its water 0.5 m deep). One group, once per substep,
+// after LiquidBricks.
+//
+// Per level l (GPU_FLUID_LIQUID_REGION_STRIDE bytes at l * stride): the indirect dispatch arguments for 4^3 groups
+// over the region, then its smallest and largest cell (inclusive). Computed from the coarsest level down:
+// - the coarsest level: the active bricks' box at that level, one cell wider on each side (the coarsest solve still
+//   loads the whole level, but updates only its region);
+// - every finer dense level: the children of the region above it. Restriction then reads only cells that the
+//   restriction into that level wrote in the same V-cycle, so no value from an earlier substep outside the region is
+//   ever read. Prolongation and smoothing stay inside the region.
+// Without active bricks every region is empty (zero groups).
+//
+// GpuFluidLiqPass.x: the number of multigrid levels.
+
+RWByteAddressBuffer GpuFluidLiqLevelRegion;
+
+groupshared uint gs_uiMin[3];
+groupshared uint gs_uiMax[3];
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(256, 1, 1)]
+void main(uint groupIndex : SV_GroupIndex)
+{
+  GPU_FLUID_KERNEL_MODES
+  if (groupIndex < 3)
+  {
+    gs_uiMin[groupIndex] = 0xFFFFFFFFu;
+    gs_uiMax[groupIndex] = 0u;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint count = GpuFluidLiqBrickArgs.Load(12);
+  const uint3 bricks = LiqBricks();
+  for (uint i = groupIndex; i < count; i += 256)
+  {
+    const uint brick = GpuFluidLiqBrickList.Load(i * 4);
+    const uint3 b = uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y));
+    const uint3 lo = b * GPU_FLUID_LIQUID_BRICK;
+    const uint3 hi = lo + GPU_FLUID_LIQUID_BRICK - 1;
+    [unroll] for (uint a = 0; a < 3; ++a)
+    {
+      InterlockedMin(gs_uiMin[a], lo[a]);
+      InterlockedMax(gs_uiMax[a], hi[a]);
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex != 0)
+    return;
+
+  const uint levels = min(LIQ_CONST(GpuFluidLiqPass).x, (uint)GPU_FLUID_LIQUID_MAX_LEVELS);
+  const bool bEmpty = count == 0;
+  const uint3 fineMin = uint3(gs_uiMin[0], gs_uiMin[1], gs_uiMin[2]);
+  const uint3 fineMax = min(uint3(gs_uiMax[0], gs_uiMax[1], gs_uiMax[2]), LiqCells() - 1);
+
+  int3 regionMin = int3(0, 0, 0);
+  int3 regionMax = int3(-1, -1, -1);
+  for (uint step = 0; step + 1 < levels; ++step)
+  {
+    const uint level = levels - 1 - step; // the coarsest first
+    const int3 dims = int3(LiqLevelDims(level));
+    if (level == levels - 1)
+    {
+      regionMin = int3(fineMin >> level) - 1;
+      regionMax = int3(fineMax >> level) + 1;
+    }
+    else
+    {
+      regionMin = regionMin * 2;
+      regionMax = regionMax * 2 + 1;
+    }
+    regionMin = clamp(regionMin, int3(0, 0, 0), dims - 1);
+    regionMax = clamp(regionMax, int3(0, 0, 0), dims - 1);
+
+    const uint3 size = bEmpty ? uint3(0, 0, 0) : uint3(regionMax - regionMin + 1);
+    const uint3 groups = (size + GPU_FLUID_LIQUID_LEVEL_GROUP - 1) / GPU_FLUID_LIQUID_LEVEL_GROUP;
+    const uint offset = level * GPU_FLUID_LIQUID_REGION_STRIDE;
+    GpuFluidLiqLevelRegion.Store4(offset, uint4(groups, 0));
+    GpuFluidLiqLevelRegion.Store4(offset + 16, uint4(uint3(regionMin), 0));
+    GpuFluidLiqLevelRegion.Store4(offset + 32, uint4(bEmpty ? uint3(0, 0, 0) : uint3(regionMax), bEmpty ? 1u : 0u));
+  }
+}

@@ -10,11 +10,15 @@
 #define GPU_FLUID_LIQUID_PARTICLE_GROUP 256
 #define GPU_FLUID_LIQUID_BRICK 8
 #define GPU_FLUID_LIQUID_LEVEL_GROUP 4
-#define GPU_FLUID_LIQUID_COARSEST_GROUP 256
+#define GPU_FLUID_LIQUID_COARSEST_GROUP 1024
 
-// The coarsest multigrid level is solved by one group in groupshared memory: at most this many cells (16 KB).
-#define GPU_FLUID_LIQUID_COARSEST_MAX_CELLS 4096
+// The coarsest multigrid level is solved by one group in groupshared memory: at most this many cells (about 26 KB with
+// the stencil kept there, LiquidCoarsest).
+#define GPU_FLUID_LIQUID_COARSEST_MAX_CELLS 2048
 #define GPU_FLUID_LIQUID_MAX_LEVELS 6
+// Per multigrid level, the region a V-cycle works on (LiquidLevelRegion): dispatch arguments (3 words, 1 unused), the
+// smallest cell (3 words, 1 unused), the largest cell (3 words, then 1 when the region is empty).
+#define GPU_FLUID_LIQUID_REGION_STRIDE 48
 
 // Cell types (the low two bits of a cell's type word).
 #define GPU_FLUID_LIQUID_CELL_AIR 0u
