@@ -49,6 +49,7 @@
 #define GPU_FLUID_COUNTER_NEW 4     // slots assigned this frame (the new list, cleared by GasClear)
 #define GPU_FLUID_COUNTER_FREED 5   // slots freed this frame (idle for GPU_FLUID_FREE_IDLE_STEPS)
 #define GPU_FLUID_COUNTER_DENIED_BUCKET 8 // 4 words: denied requests per priority bucket
+#define GPU_FLUID_COUNTER_REQUESTS_BUCKET 12 // 4 words: requests for bricks without a slot per priority bucket
 
 // The active bricks split by brick colour (parity of the brick coordinate sum) for the multigrid's block red-black
 // launches: colour 0 from the front of the colour list, colour 1 from its back. The colour dispatch arguments are two
@@ -123,9 +124,10 @@
 #define GPU_FLUID_STAT_ALLOC_REQUESTS 51 // requests for bricks without a slot this frame
 #define GPU_FLUID_STAT_DENIED_BUCKET 52  // 4 words: denied requests per bucket
 #define GPU_FLUID_STAT_ALLOC_ACTIVE 56   // active bricks after this frame's allocation
-#define GPU_FLUID_STAT_MASS_ADVECT_IN 57  // closed-box mass correction: density sum before the last tick's advection (fixed point GPU_FLUID_MASS_SCALE)
-#define GPU_FLUID_STAT_MASS_ADVECT_OUT 58 // and after it
-#define GPU_FLUID_STAT_WORD_COUNT 64
+#define GPU_FLUID_STAT_REQUESTS_BUCKET 59 // 4 words: requests for bricks without a slot per bucket
+#define GPU_FLUID_STAT_MASS_ADVECT 64     // 4 words per tick of the frame: interior density before (low, high word) and after (low, high) the tick's advection, 64-bit fixed point GPU_FLUID_MEAN_SCALE (the closed-box mass correction)
+#define GPU_FLUID_STAT_MASS_CORRECTION 72 // asuint of the last tick's correction factor (1 without one)
+#define GPU_FLUID_STAT_WORD_COUNT 96
 #define GPU_FLUID_STATS_BYTES (GPU_FLUID_STAT_WORD_COUNT * 4)
 
 #define GPU_FLUID_MASS_SCALE 256.0

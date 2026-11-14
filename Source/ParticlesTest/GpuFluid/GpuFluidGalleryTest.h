@@ -1,6 +1,8 @@
 #pragma once
 
 #include <Core/Graphics/Camera.h>
+#include <Foundation/Containers/HashTable.h>
+#include <ParticlePlugin/GpuFluid/Gpu/GpuFluidSparseGrid.h>
 #include <GameEngineTest/TestClass/TestClass.h>
 #include <RendererCore/Meshes/MeshResource.h>
 #include <RendererCore/Volumes/VDBVolumeResource.h>
@@ -48,6 +50,20 @@ public:
   /// Corridor Smoke: a closed 8 x 3 x 3 m room (walls from the closed faces) split by a partition with a doorway, smoke
   /// from a source near the floor at one end.
   plResult SetupCorridorScene();
+
+  // P2 scenes (GpuFluidSparseTests.cpp).
+
+  /// N1 and N11: a sparse 12 x 12 x 16 m box at 12.5 cm (12 x 12 x 16 = 2304 virtual bricks), open but the floor, a
+  /// warm source near the floor; uiMaxBricks pool slots.
+  plResult SetupSparsePlumeScene(plUInt32 uiMaxBricks);
+
+  /// Moving Emitter: a 64 x 48 x 16 m courtyard at 25 cm (32 x 24 x 8 = 6144 virtual bricks, the Medium pool of 1536),
+  /// walls and pillars as colliders, a wind, and a source the test moves along a path across it.
+  plResult SetupCourtyardScene();
+
+  /// The performance gate (Tier Timing "Gas Medium Sparse"): a sparse 16 x 16 x 16 m box at 6.25 cm (32 768 virtual
+  /// bricks), the Medium pool of 1536, four sources whose plumes keep about 60% of the pool allocated.
+  plResult SetupGateScene();
 
   /// A plGpuFluidColliderComponent with a matching mesh (box or sphere), so the solid is seen.
   plGameObject* AddCollider(const char* szName, plUInt8 uiShape, const plVec3& vCenter, const plVec3& vHalfExtents, float fRadius, const plColor& color, bool bStatic, bool bVisible = true);
@@ -145,6 +161,12 @@ protected:
     GasWind,
     N4GasMassVelocitySL,
     N9MovingCollider,
+    // P2
+    N1Allocation,
+    N1AllocationCap,
+    N11Determinism,
+    MovingEmitterVideo,
+    N4GasMassVelocityMacCormack,
   };
 
   /// One stats readback of a simulated volume, with the simulation time it was recorded at.
@@ -172,6 +194,14 @@ protected:
     float m_fSolidDensity = 0.0f; ///< largest density left in a solid cell at the end of the frame
     float m_fSolidCleared = 0.0f; ///< density the solids took out of their cells over the frame's ticks
     float m_fEmitted = 0.0f;      ///< density the sources added over the frame's ticks
+    // P2: the frame's allocation and the closed-box mass correction.
+    plUInt32 m_uiAllocActive = 0;    ///< active bricks after the frame's allocation
+    plUInt32 m_uiAllocNew = 0;       ///< bricks assigned
+    plUInt32 m_uiAllocFreed = 0;     ///< bricks freed
+    plUInt32 m_uiAllocDenied = 0;    ///< requests denied
+    plUInt32 m_uiDeniedBucket[4] = {};
+    float m_fMassCorrection = 1.0f;  ///< the last tick's correction factor
+    float m_fMassAdvect[4] = {};     ///< interior density before and after each tick's advection (with the correction)
   };
 
   /// One solver configuration of the N3 convergence-per-ms sweep.
@@ -200,11 +230,22 @@ private:
   plResult InitializeP3SubTest(plInt32 iIdentifier);
   plTestAppRun RunN2Divergence();
   plTestAppRun RunN3Poisson();
-  plTestAppRun RunN4GasMass(bool bVelocityMacCormack);
+  /// uiVariant: 0 the Medium defaults (velocity semi-Lagrangian, the closed-box mass correction), 1 velocity
+  /// semi-Lagrangian without the correction, 2 velocity MacCormack (High's advection) without the correction.
+  plTestAppRun RunN4GasMass(plUInt32 uiVariant);
   plTestAppRun RunN9Colliders();
   plTestAppRun RunCorridorSmokeVideo();
   plTestAppRun RunObstaclesVideo(bool bVideo);
   plTestAppRun RunGasWind();
+
+  // P2 (GpuFluidSparseTests.cpp).
+  plResult InitializeP2SubTest(plInt32 iIdentifier);
+  plTestAppRun RunN1Allocation(bool bCap);
+  plTestAppRun RunN11Determinism();
+  plTestAppRun RunMovingEmitterVideo();
+
+  /// N1's invariants on one grid debug readback; false (and logged) when one fails. uiDenied: the frame's denials.
+  bool CheckAllocationInvariants(const plGpuFluidGridDebug& debug, plUInt32 uiDenied);
 
   /// Records the frame of a video sub-test into <out>/GpuFluidGallery/<folder>/frame_%05d.png, with a caption.
   void SaveVideoFrame(const char* szFolder, plInt32 iFrame, const char* szTitle);
@@ -246,6 +287,15 @@ private:
   /// N3: GPU time of each multigrid stage, one value per measured frame.
   plDynamicArray<plString> m_PoissonStageNames;
   plDynamicArray<plDynamicArray<double>> m_PoissonStageValues;
+  /// P2: N1's checked readbacks and failures, N11's hashes per run (relative frame -> hash), the allocation per frame.
+  plUInt32 m_uiN1Checked = 0;
+  plUInt32 m_uiN1Failures = 0;
+  plUInt64 m_uiN1LastDebugFrame = 0;
+  plUInt64 m_uiStopRenderFrame = 0;
+  plDynamicArray<plHashTable<plUInt64, plUInt64>> m_N11Hashes;
+  plDynamicArray<plUInt32> m_N11MaxActive;
+  plDynamicArray<plUInt32> m_N11Denied;
+
   plImage m_GpuAlone;
   plImage m_GpuAgain;
   plImage m_GpuEmissive;

@@ -28,7 +28,13 @@ ALL
 //         1 beta (m/s^2 per unit density), ambient temperature, cooling (1/s), density dissipation (1/s)
 //         2 density clamp, velocity dissipation (1/s), fuel dissipation (1/s), edge fade width (voxels, 0 = off)
 //         3 x edge fade rate at the face (1/s), y vorticity confinement epsilon (0: off; Scratch then holds the curl),
-//           z confinement rate (1/s)
+//           z confinement rate (1/s), w 1: the closed-box mass correction
+// Pass:   y the tick of the frame (the mass correction's words)
+//
+// Closed-box mass correction (a closed volume with the whole box allocated, GpuFluid.Gas.MassCorrection): neither the
+// semi-Lagrangian backtrace nor MacCormack conserves mass, and in a closed box nothing may leave, so the density is
+// scaled by the tick's advection's mass before over after (GasAdvect summed both, GPU_FLUID_STAT_MASS_ADVECT). The
+// factor is held to [0.98, 1.02] per tick, a gentle global fix that leaves the local distribution to the advection.
 
 Texture3D<float4> GpuFluidScalarIn;         // advected scalars, apron filled
 RWTexture3D<float4> GpuFluidScalarOut;      // the current side, all 10 cubed texels
@@ -111,7 +117,18 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   // Scalars.
   {
     const float coolingFactor = exp(-p1.z * dt);
-    const float densityFactor = exp(-p1.w * dt);
+    float massFactor = 1.0;
+    if (p3.w > 0.5)
+    {
+      const uint word = GPU_FLUID_STAT_MASS_ADVECT + 4 * GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y;
+      const uint4 sums = GpuFluidStats.Load4(word * 4);
+      const float before = float(sums.y) * 4294967296.0 + float(sums.x);
+      const float after = float(sums.w) * 4294967296.0 + float(sums.z);
+      massFactor = after > 0.0 ? clamp(before / after, 0.98, 1.02) : 1.0;
+      if (groupIndex == 0)
+        GpuFluidStats.Store(GPU_FLUID_STAT_MASS_CORRECTION * 4, asuint(massFactor));
+    }
+    const float densityFactor = exp(-p1.w * dt) * massFactor;
     const float fuelFactor = exp(-p2.z * dt);
     const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
     const float3 gridVoxels = float3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
@@ -153,7 +170,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       s.g = saturate(ambientTemperature + (s.g - ambientTemperature) * coolingFactor);
       s.b = max(s.b * fuelFactor * edgeFactor, 0.0);
       s.a = max(s.a, 0.0);
-      GpuFluidScalarOut[base + stored] = s;
+      GpuFluidScalarOut[base + stored] = GpuFluidRoundHalf(s);
     }
   }
 
@@ -204,7 +221,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
         velocity[axis] = 0.0; // the wall itself
     }
 
-    GpuFluidVelocityTarget[texel] = velocity;
+    GpuFluidVelocityTarget[texel] = GpuFluidRoundHalf(velocity);
   }
 
   GroupMemoryBarrierWithGroupSync();

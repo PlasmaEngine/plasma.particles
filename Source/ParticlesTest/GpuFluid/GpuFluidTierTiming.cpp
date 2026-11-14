@@ -34,12 +34,14 @@ namespace
     plGpuFluidQuality::Enum m_Quality;
     bool m_bSOR;
     const char* m_szFile;
+    bool m_bSparse = false; ///< the performance gate's sparse scene (SetupGateScene) instead of the Smoke Column
   };
 
   constexpr TierCase s_Tiers[] = {
     {"Gas Low", plGpuFluidQuality::Low, false, "tier-timing-low.csv"},
     {"Gas Medium", plGpuFluidQuality::Medium, false, "tier-timing-medium.csv"},
     {"Gas Medium SOR", plGpuFluidQuality::Medium, true, "tier-timing-medium-sor.csv"},
+    {"Gas Medium Sparse", plGpuFluidQuality::Medium, false, "tier-timing-medium-sparse.csv", true},
   };
 
   /// The pressure solver settings in force, for the CSV header and the log.
@@ -134,7 +136,15 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
   if (s_Tiers[iIdentifier].m_bSOR)
     SetCVarForSubTest("GpuFluid.Gas.PressureSolver", 0);
 
-  PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSmokeColumnScene());
+  m_uiActiveSum = 0;
+  m_uiActiveSamples = 0;
+  m_uiActiveMin = 0xFFFFFFFFu;
+  m_uiActiveMax = 0;
+  m_uiDenied = 0;
+  if (s_Tiers[iIdentifier].m_bSparse)
+    PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupGateScene());
+  else
+    PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSmokeColumnScene());
 
   {
     PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
@@ -144,7 +154,10 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
     pGas->m_Quality = s_Tiers[iIdentifier].m_Quality;
   }
 
-  m_pOwnApplication->SetCamera(s_vCameraPosition, s_vCameraTarget, 50.0f);
+  if (s_Tiers[iIdentifier].m_bSparse)
+    m_pOwnApplication->SetCamera(plVec3(-14.0f, -28.0f, 7.0f), plVec3(0.0f, 0.0f, 4.0f), 50.0f);
+  else
+    m_pOwnApplication->SetCamera(s_vCameraPosition, s_vCameraTarget, 50.0f);
   return PL_SUCCESS;
 }
 
@@ -226,6 +239,14 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
         m_uiActiveBricks = stats.m_uiActiveBricks;
         m_uiTicksPerFrame = stats.m_uiTicks;
         m_uiNaN = plMath::Max(m_uiNaN, stats.m_uiNaNCount);
+        if (m_iFrame >= s_iWarmupFrames)
+        {
+          m_uiActiveSum += stats.m_uiActiveBricks;
+          ++m_uiActiveSamples;
+          m_uiActiveMin = plMath::Min(m_uiActiveMin, stats.m_uiActiveBricks);
+          m_uiActiveMax = plMath::Max(m_uiActiveMax, stats.m_uiActiveBricks);
+          m_uiDenied += stats.m_uiDeniedBricks;
+        }
       }
     }
   }
@@ -281,7 +302,13 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
 
   const TierCase& tier = s_Tiers[iIdentifier];
   const plGpuFluidQuality::Enum quality = tier.m_Quality;
-  const plUInt32 uiBricks = m_uiActiveBricks;
+  // A sparse scene's brick count moves: its mean over the measured frames.
+  const plUInt32 uiBricks = tier.m_bSparse && m_uiActiveSamples > 0 ? static_cast<plUInt32>((m_uiActiveSum + m_uiActiveSamples / 2) / m_uiActiveSamples) : m_uiActiveBricks;
+  if (tier.m_bSparse)
+  {
+    plTestFramework::Output(plTestOutput::Message, "Tier %s: active bricks over the measured frames mean %u, min %u, max %u of the pool of %u (%.0f%%), %u denied", tier.m_szName, uiBricks,
+      m_uiActiveMin, m_uiActiveMax, plGpuFluidGasVolumeComponent::GetTierBrickCap(quality), 100.0 * uiBricks / plGpuFluidGasVolumeComponent::GetTierBrickCap(quality), m_uiDenied);
+  }
   const plUInt32 uiTicks = plMath::Max(m_uiTicksPerFrame, 1u);
   const char* szTier = tier.m_bSOR ? "MediumSOR" : QualityName(quality);
   const plString sSettings = PressureSettings();
@@ -387,7 +414,10 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
       csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
   }
 
-  PL_TEST_INT(uiBricks, 8 * 8 * 16);
+  if (tier.m_bSparse)
+    PL_TEST_BOOL_MSG(uiBricks > 0, "Tier %s: no active bricks", tier.m_szName);
+  else
+    PL_TEST_INT(uiBricks, 8 * 8 * 16);
   PL_TEST_INT(m_uiNaN, 0);
   PL_TEST_INT(uiTicks, quality == plGpuFluidQuality::Low ? 1u : 2u);
 }

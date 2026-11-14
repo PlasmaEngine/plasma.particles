@@ -42,6 +42,11 @@ private:
   plDynamicArray<plDynamicArray<double>> m_PhaseValues;
 
   plUInt32 m_uiActiveBricks = 0;
+  plUInt64 m_uiActiveSum = 0;
+  plUInt32 m_uiActiveSamples = 0;
+  plUInt32 m_uiActiveMin = 0;
+  plUInt32 m_uiActiveMax = 0;
+  plUInt32 m_uiDenied = 0;
   plUInt32 m_uiTicksPerFrame = 0;
   plUInt32 m_uiNaN = 0;
 };

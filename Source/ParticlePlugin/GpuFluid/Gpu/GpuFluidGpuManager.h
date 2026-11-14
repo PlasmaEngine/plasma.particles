@@ -51,6 +51,9 @@ struct plGpuFluidGasFrameInput
   bool m_bDebugGrid = false;
   bool m_bDebugGridVirtual = false;
 
+  /// N11: hash the gas state in virtual brick order after the frame (plGpuFluidGasStats::m_uiStateHash).
+  bool m_bHashState = false;
+
   plGpuFluidGasSimulation m_Simulation;
 };
 
@@ -100,7 +103,16 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasStats
   plUInt32 m_uiFreeSlots = 0;
   plUInt32 m_uiAllocRequests = 0;
   plUInt32 m_uiDeniedPerBucket[4] = {};
+  plUInt32 m_uiRequestsPerBucket[4] = {}; ///< requests for bricks without a slot, each counted in the first bucket that asked
   plUInt32 m_uiAllocActive = 0;
+
+  /// The state hash (plGpuFluidGasFrameInput::m_bHashState) of the atlases in virtual brick order, of frame
+  /// m_uiHashFrame (0 until one arrived).
+  plUInt64 m_uiStateHash = 0;
+  plUInt64 m_uiHashFrame = 0;
+
+  float m_fMassCorrection = 1.0f;    ///< the closed-box mass correction's factor of the frame's last tick (1 without one)
+  float m_fMassAdvect[4] = {};       ///< with the mass correction: interior density before and after the advection of the frame's ticks 0 and 1
 
   plUInt32 m_uiSolidCells = 0;       ///< interior cells inside a solid on the frame's last tick
   float m_fSolidContactDensity = 0.0f; ///< largest density in a fluid cell next to a solid on that tick

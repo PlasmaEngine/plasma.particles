@@ -147,7 +147,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
       scalar.b += p2.z * wCentre * dt;
       if (bNaNTexel)
         scalar.r = GpuFluidNaN();
-      GpuFluidScalarTarget[base + stored] = scalar;
+      GpuFluidScalarTarget[base + stored] = GpuFluidRoundHalf(scalar);
     }
 
     if (bDriveVelocity && max(max(wFace.x, wFace.y), wFace.z) > 0.0)
@@ -156,7 +156,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
       float4 velocity = GpuFluidVelocityTarget[base + stored];
       velocity.xyz = lerp(velocity.xyz, target, wFace);
-      GpuFluidVelocityTarget[base + stored] = velocity;
+      GpuFluidVelocityTarget[base + stored] = GpuFluidRoundHalf(velocity);
     }
   }
   GroupMemoryBarrierWithGroupSync();

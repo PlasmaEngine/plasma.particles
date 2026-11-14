@@ -566,6 +566,7 @@ plResult plGpuFluidGasSolver::Create(const plVec3U32& vBrickGrid, const plVec3U3
     m_hPoissonShader = plResourceManager::LoadResource<plShaderResource>("Shaders/GpuFluid/Gas/GasPoisson.plShader");
     m_hProjectShader = plResourceManager::LoadResource<plShaderResource>("Shaders/GpuFluid/Gas/GasProject.plShader");
     m_hFinalizeShader = plResourceManager::LoadResource<plShaderResource>("Shaders/GpuFluid/Gas/GasFinalize.plShader");
+    m_hHashShader = plResourceManager::LoadResource<plShaderResource>("Shaders/GpuFluid/Gas/GasHash.plShader");
   }
 
   return PL_SUCCESS;
@@ -582,12 +583,14 @@ void plGpuFluidGasSolver::Destroy()
     pTexture->Invalidate();
   }
 
-  for (plGALBufferHandle* pBuffer : {&m_hPressure[0], &m_hPressure[1], &m_hDivergence, &m_hSolidFlags, &m_hFaceCodes, &m_hMGLocal, &m_hMGCoeff, &m_hMGMask, &m_hMGDense, &m_hMGDenseCoeff, &m_hSolidShapes})
+  for (plGALBufferHandle* pBuffer : {&m_hPressure[0], &m_hPressure[1], &m_hDivergence, &m_hSolidFlags, &m_hFaceCodes, &m_hMGLocal, &m_hMGCoeff, &m_hMGMask, &m_hMGDense, &m_hMGDenseCoeff, &m_hSolidShapes,
+         &m_hStateHash})
   {
     if (!pBuffer->IsInvalidated())
       pDevice->DestroyBuffer(*pBuffer);
     pBuffer->Invalidate();
   }
+  m_HashReadback.Reset();
 
   if (!m_hLinearClamp.IsInvalidated())
     pDevice->DestroySamplerState(m_hLinearClamp);
@@ -923,13 +926,17 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
     // together.
     {
       const plUInt32 uiCorrected = (bMacCormack ? GPU_FLUID_ADVECT_FIELD_SCALARS : 0u) | (bMacCormackVelocity ? GPU_FLUID_ADVECT_FIELD_VELOCITY : 0u);
+      const plUInt32 uiSampling = sim.m_bExactSampling ? GPU_FLUID_PASS_EXACT_SAMPLING : 0u;
+      // The launch that writes the final scalars sums the mass for the closed-box correction.
+      const plUInt32 uiMassSL = sim.m_bMassCorrection && !bMacCormack ? GPU_FLUID_PASS_MASS_SUMS : 0u;
+      const plUInt32 uiMassMC = sim.m_bMassCorrection && bMacCormack ? GPU_FLUID_PASS_MASS_SUMS : 0u;
 
       plGpuFluidGasConstants semiLagrangian = base;
-      semiLagrangian.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_SEMI_LAGRANGIAN, 0, 0, GPU_FLUID_ADVECT_FIELD_SCALARS | GPU_FLUID_ADVECT_FIELD_VELOCITY);
+      semiLagrangian.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_SEMI_LAGRANGIAN, uiTick, 0, GPU_FLUID_ADVECT_FIELD_SCALARS | GPU_FLUID_ADVECT_FIELD_VELOCITY | uiSampling | uiMassSL);
       semiLagrangian.GpuFluidGasParams0 = vWind;
 
       plGpuFluidGasConstants macCormack = base;
-      macCormack.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_MACCORMACK, 0, 0, uiCorrected);
+      macCormack.GpuFluidGasPass = plVec4U32(GPU_FLUID_ADVECT_MACCORMACK, uiTick, 0, uiCorrected | uiSampling | uiMassMC);
       macCormack.GpuFluidGasParams0 = vWind;
 
       // Both semi-Lagrangian sides' aprons in one launch.
@@ -977,6 +984,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         bindGroup.BindTexture("GpuFluidVelocityIn", ctx.ResolveTexture(hVelocityCur));
         bindGroup.BindTexture("GpuFluidScalarIn", ctx.ResolveTexture(hScalar0));
         bindGroup.BindSampler("GpuFluidLinearClamp", hSampler);
+        bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
 
         for (plUInt32 i = uiFirst; i < uiEnd; ++i)
         {
@@ -1035,6 +1043,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         pass.WriteTexture(hVelocitySpare);
         pass.WriteTexture(hScalar1);
         pass.WriteTexture(hScratch);
+        pass.WriteBuffer(hStats);
         pass.HasSideEffects();
         const plUInt32 uiFirst = bProfile ? uiPass : 0u;
         const plUInt32 uiEnd = bProfile ? uiPass + 1 : steps.GetCount();
@@ -1049,7 +1058,8 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
       forces.GpuFluidGasParams0 = plVec4(sim.m_vUp.x, sim.m_vUp.y, sim.m_vUp.z, sim.m_fBuoyancy);
       forces.GpuFluidGasParams1 = plVec4(sim.m_fDensityWeight, sim.m_fAmbientTemperature, sim.m_fCooling, sim.m_fDissipation);
       forces.GpuFluidGasParams2 = plVec4(sim.m_fDensityMax, sim.m_fVelocityDissipation, sim.m_fFuelDissipation, sim.m_fEdgeFadeVoxels);
-      forces.GpuFluidGasParams3 = plVec4(sim.m_fEdgeFadeRate, sim.m_fVorticity, sim.m_fVorticityRate, 0.0f);
+      forces.GpuFluidGasParams3 = plVec4(sim.m_fEdgeFadeRate, sim.m_fVorticity, sim.m_fVorticityRate, sim.m_bMassCorrection ? 1.0f : 0.0f);
+      forces.GpuFluidGasPass.y = uiTick;
 
       plGpuFluidGasConstants velocityHalo = base;
       velocityHalo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_VELOCITY, 0, 0, 0);
@@ -1283,6 +1293,77 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         DispatchPerBrick(ctx, gridGraph, hShader, finalize);
       });
   }
+}
+
+void plGpuFluidGasSolver::AddHashPasses(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, plUInt64 uiFrame)
+{
+  const plVec3U32 vGrid = grid.GetBrickGrid();
+  const plUInt32 uiVirtualBricks = vGrid.x * vGrid.y * vGrid.z;
+
+  if (m_hStateHash.IsInvalidated())
+  {
+    m_hStateHash = CreateStructuredBuffer(plGALDevice::GetDefaultDevice(), sizeof(plUInt32), uiVirtualBricks * 2, "GpuFluid Gas StateHash");
+    if (m_hStateHash.IsInvalidated())
+      return;
+  }
+
+  const plUInt32 uiSlot = m_HashReadback.ReserveSlot(uiFrame);
+  if (uiSlot == plInvalidIndex)
+    return;
+
+  plGpuFluidGasSimulation sim;
+  plGpuFluidGasConstants clear = MakeConstants(grid, sim, 0.0f);
+  plGpuFluidGasConstants hash = clear;
+  clear.GpuFluidGasPass = plVec4U32(0, 0, 0, 0);
+  hash.GpuFluidGasPass = plVec4U32(1, 0, 0, 0);
+
+  const plRenderGraphBufferHandle hHash = ref_graph.ImportBuffer(m_hStateHash);
+  const plRenderGraphTextureHandle hScalar = ref_graph.ImportTexture(m_hScalar[0]);
+  const plRenderGraphTextureHandle hVelocity = ref_graph.ImportTexture(m_hVelocity[m_uiVelocitySide]);
+  const plUInt32 uiClearGroups = (uiVirtualBricks + GPU_FLUID_BRICK_CELLS - 1) / GPU_FLUID_BRICK_CELLS;
+
+  {
+    auto pass = ref_graph.AddComputePass("Gas/Hash");
+    plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
+    pass.WriteBuffer(hHash);
+    pass.WriteTexture(hScalar);
+    pass.WriteTexture(hVelocity);
+    pass.HasSideEffects();
+    pass.SetExecuteCallback([=, hShader = m_hHashShader](const plRenderGraphContext& ctx)
+      {
+        plBindGroupBuilder& bindGroup = ctx.GetRenderContext()->GetBindGroup();
+        bindGroup.BindBuffer("GpuFluidStateHash", ctx.ResolveBuffer(hHash));
+        bindGroup.BindTexture("GpuFluidScalarTarget", ctx.ResolveTexture(hScalar));
+        bindGroup.BindTexture("GpuFluidVelocityTarget", ctx.ResolveTexture(hVelocity));
+        DispatchGroups(ctx, gridGraph, hShader, clear, uiClearGroups);
+        UavBarrier(ctx.GetCommandEncoder(), ctx.ResolveBuffer(hHash));
+        DispatchPerBrick(ctx, gridGraph, hShader, hash);
+      });
+  }
+
+  {
+    plGpuFluidReadbackRing* pRing = &m_HashReadback;
+    const plGALBufferHandle hHashGAL = m_hStateHash;
+    auto pass = ref_graph.AddTransferPass("Gas/Hash Readback");
+    pass.ReadBuffer(hHash, plGALResourceState::CopySource);
+    pass.HasSideEffects();
+    pass.SetExecuteCallback([pRing, uiSlot, hHashGAL](const plRenderGraphContext& ctx) { pRing->Submit(uiSlot, *ctx.GetCommandEncoder(), hHashGAL); });
+  }
+}
+
+bool plGpuFluidGasSolver::PollStateHash(plUInt64& out_uiHash, plUInt64& out_uiFrame)
+{
+  if (!m_HashReadback.Poll(m_HashScratch, out_uiFrame))
+    return false;
+
+  plUInt64 uiHash = 0xCBF29CE484222325ull;
+  for (plUInt8 uiByte : m_HashScratch)
+  {
+    uiHash ^= uiByte;
+    uiHash *= 0x100000001B3ull;
+  }
+  out_uiHash = uiHash;
+  return true;
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_GpuFluid_Gpu_GpuFluidGasSolver);

@@ -310,6 +310,8 @@ void plGpuFluidSparseGrid::AddAllocPasses(
   const plGpuFluidScan::Layout requestLayout = m_RequestLayout;
   const plGpuFluidScan* pScan = &m_Scan;
 
+  // One pass builder at a time: the readback below is added after this one is done.
+  {
   auto pass = ref_graph.AddComputePass("Gas/Alloc");
   pass.WriteBuffer(grid.m_hPageTable);
   pass.WriteBuffer(grid.m_hActiveList);
@@ -410,6 +412,7 @@ void plGpuFluidSparseGrid::AddAllocPasses(
       if (bDebug)
         Run(s_uiAllocDebug, plMath::Max(plMath::Max(uiCapacity, uiVirtualBricks), static_cast<plUInt32>(GPU_FLUID_COUNTER_WORDS)));
     });
+  }
 
   if (bDebug)
   {

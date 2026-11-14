@@ -1,0 +1,90 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// N11: a hash of the gas state in virtual brick order, so runs can be compared bitwise whatever slots their bricks got
+// (the pool size changes them). Two words per virtual brick, 0 for a brick without a slot. After Gas/Finalize, when a
+// test asks for it. Modes (Pass.x):
+//
+// 0 CLEAR: every virtual brick's two words to 0. 64 threads per group, one per virtual brick.
+// 1 HASH:  one 8 cubed group per active brick: each interior cell mixes the bits of its current scalars and velocity
+//          (the -side faces it holds) with its cell index; the brick's words are the sum and the xor of its cells'
+//          mixes (integer and order independent, so group order does not matter).
+
+RWTexture3D<float4> GpuFluidScalarTarget;   // only read here
+RWTexture3D<float4> GpuFluidVelocityTarget; // only read here
+RWStructuredBuffer<uint> GpuFluidStateHash;
+
+groupshared uint gs_uiSum;
+groupshared uint gs_uiXor;
+
+uint Mix(uint h, uint value)
+{
+  h ^= value;
+  h *= 0x85EBCA6Bu;
+  h ^= h >> 13;
+  h *= 0xC2B2AE35u;
+  h ^= h >> 16;
+  return h;
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex, uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const uint3 grid = GpuFluidGrid();
+
+  if (mode == 0)
+  {
+    const uint index = (groupId.y * GPU_FLUID_DISPATCH_FOLD + groupId.x) * GPU_FLUID_BRICK_CELLS + groupIndex;
+    if (index < grid.x * grid.y * grid.z)
+    {
+      GpuFluidStateHash[index * 2 + 0] = 0;
+      GpuFluidStateHash[index * 2 + 1] = 0;
+    }
+    return;
+  }
+
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  if (groupIndex == 0)
+  {
+    gs_uiSum = 0;
+    gs_uiXor = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint3 brick = GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]);
+  const int3 texel = GpuFluidTexel(slot, int3(groupThreadId));
+  const float4 s = GpuFluidScalarTarget[texel];
+  const float4 v = GpuFluidVelocityTarget[texel];
+
+  uint h = Mix(0x9E3779B9u, groupIndex + 1);
+  h = Mix(h, asuint(s.x));
+  h = Mix(h, asuint(s.y));
+  h = Mix(h, asuint(s.z));
+  h = Mix(h, asuint(s.w));
+  h = Mix(h, asuint(v.x));
+  h = Mix(h, asuint(v.y));
+  h = Mix(h, asuint(v.z));
+
+  uint previous;
+  InterlockedAdd(gs_uiSum, h, previous);
+  InterlockedXor(gs_uiXor, Mix(h, 0x27D4EB2Fu), previous);
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0)
+  {
+    const uint index = GpuFluidBrickLinear(brick, grid);
+    GpuFluidStateHash[index * 2 + 0] = gs_uiSum;
+    GpuFluidStateHash[index * 2 + 1] = gs_uiXor;
+  }
+}

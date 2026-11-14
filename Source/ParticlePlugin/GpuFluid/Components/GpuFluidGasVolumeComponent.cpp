@@ -26,10 +26,12 @@ plCVarFloat cvar_GpuFluidGasMGProlongScale("GpuFluid.Gas.MGProlongScale", 1.0f, 
 plCVarInt cvar_GpuFluidGasMGDownColour("GpuFluid.Gas.MGDownColour", 0, plCVarFlags::Default, "Multigrid: the brick colour that pre-smooths the fine level first (0 or 1).");
 plCVarBool cvar_GpuFluidGasMGShortCycles("GpuFluid.Gas.MGShortCycles", false, plCVarFlags::Default, "Multigrid: every V-cycle after a tick's first stops at the 4 cubed level (cheaper; misses N2's 1e-2 under wind).");
 plCVarBool cvar_GpuFluidGasProfilePressure("GpuFluid.Gas.ProfilePressure", false, plCVarFlags::Default, "Each step of the gas pressure phase in a render-graph pass of its own, so each is timed.");
+plCVarBool cvar_GpuFluidGasExactSampling("GpuFluid.Gas.ExactSampling", false, plCVarFlags::Default, "Gas advection samples with eight loads and weights from the position in the brick, so runs with different pool sizes give the same bits (N11); otherwise hardware filtering.");
 plCVarBool cvar_GpuFluidGasProfileKernels("GpuFluid.Gas.ProfileKernels", false, plCVarFlags::Default, "Each kernel of the gas advection and forces phases in a render-graph pass of its own, so each is timed.");
 plCVarFloat cvar_GpuFluidGasMGOmega("GpuFluid.Gas.MGOmega", 1.0f, plCVarFlags::Default, "Multigrid: over-relaxation of the smoother.");
 plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 4096, plCVarFlags::Default, "Multigrid: dense levels up to this many cells run in one dispatch of one group; larger ones one thread per cell.");
-plCVarBool cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", true, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection too (Medium and up).");
+plCVarInt cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", -1, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection: -1 the quality's default (High and up), 0 off, 1 on (from Medium up).");
+plCVarBool cvar_GpuFluidGasMassCorrection("GpuFluid.Gas.MassCorrection", true, plCVarFlags::Default, "Closed gas volumes (every face closed, AllocateAll) scale their density each tick so the advection keeps the total mass.");
 plCVarFloat cvar_GpuFluidGasVorticity("GpuFluid.Gas.Vorticity", -1.0f, plCVarFlags::Default, "Overrides the gas volumes' vorticity confinement epsilon (negative: each volume's own).");
 plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws every allocated gas brick as a line box: orange a source's, green with content, cyan flux, blue proximity, grey idle.");
 plCVarBool cvar_GpuFluidDebugBrickStats("GpuFluid.Debug.BrickStats", false, plCVarFlags::Default, "Shows the gas volumes' active bricks and pool size on screen.");
@@ -412,6 +414,7 @@ void plGpuFluidGasVolumeComponent::Update()
   input.m_bAllocateAll = m_bAllocateAll;
   input.m_bDebugGrid = m_bDebugGridReadback || cvar_GpuFluidDebugBricks.GetValue();
   input.m_bDebugGridVirtual = m_bDebugGridReadback;
+  input.m_bHashState = m_bDebugHashState;
 
   m_pManager->SetGasFrameInput(m_VolumeId, input);
 
@@ -484,8 +487,14 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_fDensityMax = m_fDensityMax;
   sim.m_fEdgeFadeVoxels = m_fEdgeFade / fVoxel;
   sim.m_uiPressureIterations = m_uiPressureIterations;
+  // MacCormack scalars from Medium up; MacCormack velocity from High up (Medium advects the velocity semi-Lagrangian:
+  // it costs about 0.9 ms a tick at 1024 bricks and gains gas in a closed box, see N4), unless the CVar says otherwise.
   sim.m_bMacCormack = m_Quality != plGpuFluidQuality::Low && !cvar_GpuFluidDebugSemiLagrangian.GetValue();
-  sim.m_bMacCormackVelocity = sim.m_bMacCormack && cvar_GpuFluidGasVelocityMacCormack.GetValue();
+  const plInt32 iVelocityMacCormack = cvar_GpuFluidGasVelocityMacCormack.GetValue();
+  sim.m_bMacCormackVelocity = sim.m_bMacCormack && (iVelocityMacCormack < 0 ? m_Quality >= plGpuFluidQuality::High : iVelocityMacCormack > 0);
+
+  // The closed-box mass correction: only where nothing may leave.
+  sim.m_bMassCorrection = cvar_GpuFluidGasMassCorrection.GetValue() && m_bAllocateAll && m_OpenFaces.GetValue() == 0;
   sim.m_fAllocThreshold = m_fAllocThreshold;
   sim.m_fMeanFloor = 1e-4f;
   // Twice the frame's ticks, so the next frame's ticks never carry content past what was allocated for it.
@@ -510,6 +519,7 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_Multigrid.m_bShortLaterCycles = cvar_GpuFluidGasMGShortCycles.GetValue();
   sim.m_Multigrid.m_bProfilePressure = cvar_GpuFluidGasProfilePressure.GetValue();
   sim.m_bProfileKernels = cvar_GpuFluidGasProfileKernels.GetValue();
+  sim.m_bExactSampling = cvar_GpuFluidGasExactSampling.GetValue();
   sim.m_Multigrid.m_uiDenseGroupCells = static_cast<plUInt32>(plMath::Max(cvar_GpuFluidGasMGDenseGroupCells.GetValue(), 0));
   sim.m_PoissonTest = m_DebugPoissonTest;
 
@@ -549,6 +559,24 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
       sim.m_bInjectNaN = true;
       cvar_GpuFluidDebugInjectNaN = false;
     }
+  }
+
+  for (const ExtraSource& extra : m_DebugExtraSources)
+  {
+    if (sim.m_Emitters.GetCount() >= sim.m_Emitters.GetCapacity())
+      break;
+
+    plGpuFluidGasEmitter& emitter = sim.m_Emitters.ExpandAndGetRef();
+    emitter.m_Shape = plGpuFluidEmitterShape::Sphere;
+    emitter.m_vCenterVoxels = vGridVoxels * 0.5f + extra.m_vOffset / fVoxel;
+    emitter.m_fRadiusVoxels = extra.m_fRadius / fVoxel;
+    emitter.m_fSoftnessVoxels = plMath::Max(m_fEmitterSoftness / fVoxel, 1e-3f);
+    emitter.m_fDensityRate = extra.m_fRate;
+    emitter.m_fTemperature = extra.m_fTemperature;
+    emitter.m_vVelocity = extra.m_vVelocity;
+    emitter.m_bDriveVelocity = true;
+    emitter.m_fNoiseStrength = m_fEmitterNoise;
+    emitter.m_fNoiseFrequency = fVoxel / plMath::Max(m_fEmitterNoiseScale, 0.01f);
   }
 }
 

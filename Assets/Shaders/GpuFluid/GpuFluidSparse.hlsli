@@ -108,6 +108,28 @@ float GpuFluidNaN()
   return asfloat(0x7FC00000u);
 }
 
+/// v rounded to the nearest half (ties to even), so writing it to an RGBA16F atlas is exact whatever rounding the
+/// texture write uses. The writes on this Mac round towards zero (measured, N4): every tick's three scalar writes then
+/// lost about 0.07% of the gas in a closed box, which hid part of the advection's gain and defeated the mass correction.
+float GpuFluidRoundHalf1(float x)
+{
+  uint bits = asuint(x);
+  const uint exponent = (bits >> 23) & 0xFFu;
+  if (exponent == 0xFFu)
+    return x; // NaN and infinity stay
+  if (exponent < 113u)
+    return round(x * 16777216.0) * (1.0 / 16777216.0); // below the half's normal range: multiples of 2^-24
+  // 13 fewer mantissa bits than a float: round half to even on the dropped bits.
+  bits += 0x0FFFu + ((bits >> 13) & 1u);
+  return asfloat(bits & ~0x1FFFu);
+}
+
+float4 GpuFluidRoundHalf(float4 v)
+{
+  // By hand rather than f16tof32(f32tof16(v)): that conversion truncates on this Mac too.
+  return float4(GpuFluidRoundHalf1(v.x), GpuFluidRoundHalf1(v.y), GpuFluidRoundHalf1(v.z), GpuFluidRoundHalf1(v.w));
+}
+
 /// result, except that every component which is NaN or infinite in any of the sources stays NaN. min, max and clamp
 /// drop a NaN operand; this keeps a non-finite value alive past them, so the guard that zeroes it also counts it.
 float4 GpuFluidKeepNonFinite(float4 result, float4 a, float4 b, float4 c)
@@ -321,9 +343,47 @@ bool GpuFluidInHomeLocal(float3 local)
   return all(local >= -1.0) && all(local < float(GPU_FLUID_BRICK_SIZE));
 }
 
+bool GpuFluidLocateHome(GpuFluidHome home, float3 q, out int3 out_corner, out float3 out_weights);
+
+/// Trilinear from the eight texels with full float weights taken from the position inside the brick, never from the
+/// atlas coordinate. Hardware filtering works on the normalised atlas coordinate, whose rounding (and the filter's
+/// fixed-point weights) depends on where the brick's slot lies in the atlas, so two runs with different pools would
+/// differ in the last bits (N11). Exact sampling (GpuFluid.Gas.ExactSampling) gives the same bits for every slot.
+float4 GpuFluidSampleExact(Texture3D<float4> atlas, GpuFluidHome home, float3 q, float4 fUnallocated)
+{
+  int3 i0;
+  float3 f;
+  if (!GpuFluidLocateHome(home, q, i0, f))
+    return fUnallocated;
+
+  const float4 c000 = atlas.Load(int4(i0, 0));
+  const float4 c100 = atlas.Load(int4(i0 + int3(1, 0, 0), 0));
+  const float4 c010 = atlas.Load(int4(i0 + int3(0, 1, 0), 0));
+  const float4 c110 = atlas.Load(int4(i0 + int3(1, 1, 0), 0));
+  const float4 c001 = atlas.Load(int4(i0 + int3(0, 0, 1), 0));
+  const float4 c101 = atlas.Load(int4(i0 + int3(1, 0, 1), 0));
+  const float4 c011 = atlas.Load(int4(i0 + int3(0, 1, 1), 0));
+  const float4 c111 = atlas.Load(int4(i0 + int3(1, 1, 1), 0));
+
+  const float4 x00 = lerp(c000, c100, f.x);
+  const float4 x10 = lerp(c010, c110, f.x);
+  const float4 x01 = lerp(c001, c101, f.x);
+  const float4 x11 = lerp(c011, c111, f.x);
+  return lerp(lerp(x00, x10, f.y), lerp(x01, x11, f.y), f.z);
+}
+
+/// Whether the kernel samples exactly (GpuFluid.Gas.ExactSampling, Pass.w bit GPU_FLUID_PASS_EXACT_SAMPLING).
+bool GpuFluidExactSampling()
+{
+  return (GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & GPU_FLUID_PASS_EXACT_SAMPLING) != 0;
+}
+
 /// GpuFluidSampleAtlas, through the home brick when the sample lies in it.
 float4 GpuFluidSampleHome(Texture3D<float4> atlas, SamplerState linearClamp, GpuFluidHome home, float3 q, float4 fUnallocated)
 {
+  [branch] if (GpuFluidExactSampling())
+    return GpuFluidSampleExact(atlas, home, q, fUnallocated);
+
   const float3 local = q - home.m_vOrigin;
   [branch] if (GpuFluidInHomeLocal(local))
     return atlas.SampleLevel(linearClamp, (home.m_vTexel + local + 0.5) * home.m_vInvAtlas, 0.0);

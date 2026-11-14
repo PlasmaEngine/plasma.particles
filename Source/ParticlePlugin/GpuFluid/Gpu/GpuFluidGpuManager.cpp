@@ -584,7 +584,17 @@ void plGpuFluidGpuManager::ReadStats(GasVolume& ref_volume)
   stats.m_uiAllocRequests = pWords[GPU_FLUID_STAT_ALLOC_REQUESTS];
   stats.m_uiAllocActive = pWords[GPU_FLUID_STAT_ALLOC_ACTIVE];
   for (plUInt32 b = 0; b < 4; ++b)
+  {
     stats.m_uiDeniedPerBucket[b] = pWords[GPU_FLUID_STAT_DENIED_BUCKET + b];
+    stats.m_uiRequestsPerBucket[b] = pWords[GPU_FLUID_STAT_REQUESTS_BUCKET + b];
+  }
+
+  stats.m_fMassCorrection = pWords[GPU_FLUID_STAT_MASS_CORRECTION] != 0 ? AsFloat(pWords[GPU_FLUID_STAT_MASS_CORRECTION]) : 1.0f;
+  for (plUInt32 i = 0; i < 4; ++i)
+  {
+    const plUInt64 uiSum = static_cast<plUInt64>(pWords[GPU_FLUID_STAT_MASS_ADVECT + 2 * i]) | (static_cast<plUInt64>(pWords[GPU_FLUID_STAT_MASS_ADVECT + 2 * i + 1]) << 32);
+    stats.m_fMassAdvect[i] = static_cast<float>(static_cast<double>(uiSum) / GPU_FLUID_MEAN_SCALE);
+  }
 
   stats.m_uiSolidCells = pWords[GPU_FLUID_STAT_SOLID_CELLS];
   stats.m_fSolidContactDensity = AsFloat(pWords[GPU_FLUID_STAT_SOLID_CONTACT]);
@@ -692,6 +702,16 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
       volume.m_bGridDebugValid = true;
     }
 
+    {
+      plUInt64 uiHash = 0;
+      plUInt64 uiHashFrame = 0;
+      if (volume.m_Solver.IsCreated() && volume.m_Solver.PollStateHash(uiHash, uiHashFrame))
+      {
+        volume.m_Stats.m_uiStateHash = uiHash;
+        volume.m_Stats.m_uiHashFrame = uiHashFrame;
+      }
+    }
+
     const plUInt32 uiTicks = !bAnalytic && bFreshInput ? plMath::Min(input.m_Simulation.m_uiTicks, plGpuFluidMaxGasTicksPerFrame) : 0;
     const bool bCounters = bAnalytic || uiTicks > 0;
 
@@ -766,6 +786,8 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
       // The Poisson test hook solves once per fresh input, like a tick; its readback needs the counters.
       simulation.m_PoissonTest.m_bEnabled = simulation.m_PoissonTest.m_bEnabled && bCounters;
       volume.m_Solver.AddFramePasses(graph, volume.m_Grid, gridGraph, hStats, simulation);
+      if (input.m_bHashState && uiTicks > 0)
+        volume.m_Solver.AddHashPasses(graph, volume.m_Grid, gridGraph, uiFrame);
     }
 
     // Stats to the CPU, through a ring of three so nothing waits. A copy is not allowed inside a compute pass.

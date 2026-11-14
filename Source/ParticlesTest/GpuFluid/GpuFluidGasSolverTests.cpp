@@ -66,22 +66,25 @@ namespace
   constexpr plInt32 s_iN4Frames = 150;
   constexpr float s_fN4SourceSeconds = 0.5f;
   constexpr float s_fN4ReferenceSeconds = 0.7f;
-  /// Largest relative mass drift from the reference readback to the end. Set from the first measured run plus 50%, so a
-  /// change that loses or gains more gas shows: P3 measured 0.4045 with the Medium defaults (MacCormack scalars and
-  /// velocity, vorticity confinement 0.3, then a short second V-cycle), 0.4457 with two full V-cycles; the tighter first
-  /// value is kept.
+  /// Largest relative mass drift from the reference readback to the end, each set from its measured run plus 50%, so a
+  /// change that loses or gains more gas shows.
   ///
-  /// Where it comes from (one setting changed at a time, largest drift): velocity advected semi-Lagrangian 0.114,
-  /// confinement off 0.124, both advections semi-Lagrangian 0.178 (a loss), 8 V-cycles 0.377. So it is the MacCormack
-  /// velocity together with confinement: each alone gives about 0.12, together they keep the closed box stirred with
-  /// strong grid-scale motion, and the scalars' trilinear backtraces (semi-Lagrangian and MacCormack alike, neither is
-  /// conservative) gain gas in that flow: with it the largest divergence before the projection reaches 25 1/s, without it
-  /// about 7. The pressure solve is not the cause: the mean divergence after it stays near 1e-5 1/s while the mass grows.
-  /// The MacCormack velocity stays on at Medium and up (plan amendment A1.8, plume-top streaking); N4 Gas Mass Velocity
-  /// SL holds the scalar advection to the tighter limit below.
-  constexpr float s_fN4MassTolerance = 0.61f;
-  /// The same rule for the run with the velocity advected semi-Lagrangian: measured 0.1155, plus 50%.
-  constexpr float s_fN4MassToleranceVelocitySL = 0.173f;
+  /// P2 found two causes of the P3 drift (+40 to +45% with MacCormack velocity):
+  /// - The atlas writes rounded towards zero (RGBA16F texture writes and f32tof16 both truncate on this Mac): three
+  ///   scalar writes a tick lost about 0.04% each tick, which hid part of the advection's gain. Every solver write now
+  ///   rounds to the nearest half itself (GpuFluidRoundHalf).
+  /// - The advection gains gas in a stirred closed box: neither the trilinear backtrace nor MacCormack conserves mass,
+  ///   and the gain grows with grid-scale motion (MacCormack velocity with confinement: the largest divergence before
+  ///   the projection reaches 25 1/s, without it about 7). With honest rounding: velocity semi-Lagrangian +16.5%,
+  ///   velocity MacCormack +59.5% over the run.
+  /// So Medium now advects the velocity semi-Lagrangian (MacCormack velocity from High up), and a closed volume (every
+  /// face closed, AllocateAll) scales its density each tick by the advection's mass before over after (GasForces,
+  /// GpuFluid.Gas.MassCorrection): the defaults measured a largest drift of 0.00444 (end +0.0031).
+  constexpr float s_fN4MassTolerance = 0.0067f;
+  /// N4 Gas Mass Velocity SL: no correction, velocity semi-Lagrangian (the advection alone): measured 0.1654.
+  constexpr float s_fN4MassToleranceVelocitySL = 0.248f;
+  /// N4 Gas Mass Velocity MacCormack: no correction, velocity MacCormack (High's advection): measured 0.5953.
+  constexpr float s_fN4MassToleranceVelocityMacCormack = 0.893f;
 
   // N9
   constexpr plInt32 s_iN9Frames = 150;
@@ -565,8 +568,19 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP3SubTest(plInt32 iIdentifie
       return PL_SUCCESS;
 
     case SubTests::N4GasMassVelocitySL:
-      SetCVarForSubTest("GpuFluid.Gas.VelocityMacCormack", false);
-      [[fallthrough]];
+      SetCVarForSubTest("GpuFluid.Gas.VelocityMacCormack", 0);
+      SetCVarForSubTest("GpuFluid.Gas.MassCorrection", false);
+      PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupClosedBoxScene());
+      m_pOwnApplication->SetCamera(plVec3(-1.2f, -4.8f, 1.6f), plVec3(0.0f, 0.0f, 1.0f), 45.0f);
+      return PL_SUCCESS;
+
+    case SubTests::N4GasMassVelocityMacCormack:
+      SetCVarForSubTest("GpuFluid.Gas.VelocityMacCormack", 1);
+      SetCVarForSubTest("GpuFluid.Gas.MassCorrection", false);
+      PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupClosedBoxScene());
+      m_pOwnApplication->SetCamera(plVec3(-1.2f, -4.8f, 1.6f), plVec3(0.0f, 0.0f, 1.0f), 45.0f);
+      return PL_SUCCESS;
+
     case SubTests::N4GasMass:
       PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupClosedBoxScene());
       m_pOwnApplication->SetCamera(plVec3(-1.2f, -4.8f, 1.6f), plVec3(0.0f, 0.0f, 1.0f), 45.0f);
@@ -927,10 +941,15 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN3Poisson()
   return plTestAppRun::Quit;
 }
 
-plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass(bool bVelocityMacCormack)
+plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass(plUInt32 uiVariant)
 {
-  const char* szName = bVelocityMacCormack ? "N4_GasMass" : "N4_GasMassVelocitySL";
-  const float fTolerance = bVelocityMacCormack ? s_fN4MassTolerance : s_fN4MassToleranceVelocitySL;
+  const char* szNames[] = {"N4_GasMass", "N4_GasMassVelocitySL", "N4_GasMassVelocityMacCormack"};
+  const char* szScenes[] = {"N4 closed box", "N4 closed box, velocity semi-Lagrangian, no correction", "N4 closed box, velocity MacCormack, no correction"};
+  const char* szSettings[] = {"Medium defaults: velocity semi-Lagrangian, mass correction", "velocity semi-Lagrangian, no mass correction", "velocity MacCormack, no mass correction"};
+  const float fTolerances[] = {s_fN4MassTolerance, s_fN4MassToleranceVelocitySL, s_fN4MassToleranceVelocityMacCormack};
+  const char* szName = szNames[uiVariant];
+  const float fTolerance = fTolerances[uiVariant];
+  const bool bVelocityMacCormack = uiVariant == 2;
 
   // The source stops after half a second (on the update thread, so the frame after).
   if (m_iFrame == static_cast<plInt32>(s_fN4SourceSeconds * 30.0f))
@@ -965,7 +984,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass(bool bVelocityMacCorm
     WriteGasCsv(m_GasSamples, sPath);
   }
   // Semi-Lagrangian velocity keeps the box calm: its divergence before the projection stays below 10 1/s after 0.5 s.
-  CheckDivergenceRatio(m_GasSamples, bVelocityMacCormack ? "N4 closed box" : "N4 closed box, velocity semi-Lagrangian", bVelocityMacCormack);
+  CheckDivergenceRatio(m_GasSamples, szScenes[uiVariant], bVelocityMacCormack);
 
   const GasSample* pReference = nullptr;
   for (const GasSample& s : m_GasSamples)
@@ -993,8 +1012,8 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN4GasMass(bool bVelocityMacCorm
 
   const GasSample& last = m_GasSamples.PeekBack();
   const float fEndDrift = (last.m_fMass - pReference->m_fMass) / plMath::Max(pReference->m_fMass, 1e-6f);
-  plTestFramework::Output(plTestOutput::Message, "N4 gas mass (closed box, no dissipation, velocity %s, %.2f s): reference %.2f at %.2f s, end %.2f at %.2f s -> drift %+.5f; largest drift %.5f (tolerance %.4f); peak density %.3f, NaN %u",
-    bVelocityMacCormack ? "MacCormack" : "semi-Lagrangian", last.m_fSeconds, pReference->m_fMass, pReference->m_fSeconds, last.m_fMass, last.m_fSeconds, fEndDrift, fWorstDrift, fTolerance, fMaxDensity, uiNaN);
+  plTestFramework::Output(plTestOutput::Message, "N4 gas mass (closed box, no dissipation, %s, %.2f s): reference %.2f at %.2f s, end %.2f at %.2f s -> drift %+.5f; largest drift %.5f (tolerance %.4f); peak density %.3f, NaN %u",
+    szSettings[uiVariant], last.m_fSeconds, pReference->m_fMass, pReference->m_fSeconds, last.m_fMass, last.m_fSeconds, fEndDrift, fWorstDrift, fTolerance, fMaxDensity, uiNaN);
 
   PL_TEST_INT(uiNaN, 0);
   PL_TEST_BOOL_MSG(pReference->m_fMass > 1.0f, "N4: the source added almost nothing (%.3f)", pReference->m_fMass);

@@ -252,6 +252,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
       seen |= bits[b2];
       GpuFluidPending[b2 * words + index] = pending;
       GpuFluidRequestScan.Store((b2 * words + index) * 4, countbits(pending));
+      if (pending != 0)
+      {
+        uint previous;
+        InterlockedAdd(GpuFluidCountersOutput[GPU_FLUID_COUNTER_REQUESTS_BUCKET + b2], countbits(pending), previous);
+      }
     }
     return;
   }
@@ -385,7 +390,10 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_REQUESTS * 4, requestTotal);
     GpuFluidStats.Store(GPU_FLUID_STAT_ALLOC_ACTIVE * 4, active);
     [unroll] for (uint b = 0; b < GPU_FLUID_ALLOC_BUCKETS; ++b)
+    {
       GpuFluidStats.Store((GPU_FLUID_STAT_DENIED_BUCKET + b) * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_DENIED_BUCKET + b]);
+      GpuFluidStats.Store((GPU_FLUID_STAT_REQUESTS_BUCKET + b) * 4, GpuFluidCountersOutput[GPU_FLUID_COUNTER_REQUESTS_BUCKET + b]);
+    }
     return;
   }
 

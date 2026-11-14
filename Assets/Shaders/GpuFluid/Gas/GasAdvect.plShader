@@ -40,6 +40,39 @@ Texture3D<float4> GpuFluidScalarSL;   // MACCORMACK: phi^, apron filled
 SamplerState GpuFluidLinearClamp;
 RWTexture3D<float4> GpuFluidVelocityOut;
 RWTexture3D<float4> GpuFluidScalarOut;
+RWByteAddressBuffer GpuFluidStats; // GPU_FLUID_PASS_MASS_SUMS: the density before and after the advection
+
+groupshared uint gs_uiMass[2];
+
+/// GPU_FLUID_PASS_MASS_SUMS: the group's interior density before and after, in fixed point, into the tick's words.
+/// Every thread of the group calls it (uniform control flow).
+void SumMass(uint groupIndex, float before, float after)
+{
+  if (groupIndex == 0)
+  {
+    gs_uiMass[0] = 0;
+    gs_uiMass[1] = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  // GPU_FLUID_MEAN_SCALE per cell: a coarser scale rounds the thin gas of a mixed box differently before and after,
+  // which biases the factor. 128 cells of at most 64 stay below 2^32 in the group; the global sums are 64 bit.
+  before = GpuFluidIsNonFinite(before) ? 0.0 : clamp(before, 0.0, 64.0);
+  after = GpuFluidIsNonFinite(after) ? 0.0 : clamp(after, 0.0, 64.0);
+  uint previous;
+  InterlockedAdd(gs_uiMass[0], (uint)round(before * GPU_FLUID_MEAN_SCALE), previous);
+  InterlockedAdd(gs_uiMass[1], (uint)round(after * GPU_FLUID_MEAN_SCALE), previous);
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex < 2)
+  {
+    const uint word = GPU_FLUID_STAT_MASS_ADVECT + 4 * GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y + 2 * groupIndex;
+    const uint value = gs_uiMass[groupIndex];
+    GpuFluidStats.InterlockedAdd(word * 4, value, previous);
+    if (previous + value < previous)
+      GpuFluidStats.InterlockedAdd(word * 4 + 4, 1u, previous); // the carry into the high word
+  }
+}
 
 /// Midpoint trace through the current velocity; a negative time step traces forward.
 float3 Trace(GpuFluidHome home, float3 p, float timeStepVoxels, float3 ambient)
@@ -83,7 +116,7 @@ void LoadRange(Texture3D<float4> atlas, GpuFluidHome home, float3 q, float4 fUna
 }
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_ADVECT_SLABS)]
-void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
   const uint slot = GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
@@ -106,6 +139,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
   const bool bScalars = (fields & GPU_FLUID_ADVECT_FIELD_SCALARS) != 0;
   const bool bVelocity = (fields & GPU_FLUID_ADVECT_FIELD_VELOCITY) != 0;
+  const bool bMassSums = (fields & GPU_FLUID_PASS_MASS_SUMS) != 0;
+  float massBefore = 0.0;
+  float massAfter = 0.0;
 
   if (mode == GPU_FLUID_ADVECT_MACCORMACK)
   {
@@ -128,7 +164,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
           result[c] = forward[c];
       }
       // max would drop a NaN; it is carried on to GasForces, which counts and zeroes it.
-      GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(result, 0.0), corrected, lower, upper);
+      const float4 written = GpuFluidRoundHalf(GpuFluidKeepNonFinite(max(result, 0.0), corrected, lower, upper));
+      GpuFluidScalarOut[texel] = written;
+      massBefore = original.r;
+      massAfter = written.r;
     }
 
     if (bVelocity)
@@ -155,8 +194,11 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         velocity[axis] = (GpuFluidIsNonFinite(corrected) || GpuFluidIsNonFinite(lower[axis]) || GpuFluidIsNonFinite(upper[axis])) ? GpuFluidNaN() : limited;
       }
 
-      GpuFluidVelocityOut[texel] = velocity;
+      GpuFluidVelocityOut[texel] = GpuFluidRoundHalf(velocity);
     }
+
+    if (bMassSums)
+      SumMass(groupIndex, massBefore, massAfter);
     return;
   }
 
@@ -165,7 +207,13 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   {
     const float3 from = Trace(home, centre, timeStepVoxels, ambient);
     const float4 value = GpuFluidSampleHome(GpuFluidScalarIn, GpuFluidLinearClamp, home, from - 0.5, noGas);
-    GpuFluidScalarOut[texel] = GpuFluidKeepNonFinite(max(value, 0.0), value, value, value);
+    const float4 written = GpuFluidRoundHalf(GpuFluidKeepNonFinite(max(value, 0.0), value, value, value));
+    GpuFluidScalarOut[texel] = written;
+    if (bMassSums)
+    {
+      massBefore = GpuFluidScalarIn.Load(int4(texel, 0)).r;
+      massAfter = written.r;
+    }
   }
 
   // Each velocity component at its own face centre.
@@ -179,6 +227,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
       const float3 from = Trace(home, face, timeStepVoxels, ambient);
       velocity[axis] = GpuFluidSampleHome(GpuFluidVelocityIn, GpuFluidLinearClamp, home, from - StaggerOffset(axis), ambient4)[axis];
     }
-    GpuFluidVelocityOut[texel] = velocity;
+    GpuFluidVelocityOut[texel] = GpuFluidRoundHalf(velocity);
   }
+
+  if (bMassSums)
+    SumMass(groupIndex, massBefore, massAfter);
 }

@@ -16,6 +16,12 @@
 #define GPU_FLUID_ADVECT_MACCORMACK 1      // the limited correction of SL (the semi-Lagrangian sides) -> Out, reverse trace included
 #define GPU_FLUID_ADVECT_FIELD_SCALARS 1
 #define GPU_FLUID_ADVECT_FIELD_VELOCITY 2
+// Pass.w flag of GasAdvect: trilinear samples from eight loads with weights from the position in the brick
+// (GpuFluidSampleExact), the same bits whatever slot a brick has; otherwise hardware filtering.
+#define GPU_FLUID_PASS_EXACT_SAMPLING 0x100
+// Pass.w flag of GasAdvect: the launch that writes the tick's final advected scalars sums the interior density before
+// and after into GPU_FLUID_STAT_MASS_ADVECT + 2 * Pass.y (the tick), for the closed-box mass correction in GasForces.
+#define GPU_FLUID_PASS_MASS_SUMS 0x200
 
 // Per-brick kernels that use no groupshared memory run as GPU_FLUID_SLABS groups of 8 x 8 x (8 / slabs) threads per brick
 // (the z of the slab dispatch arguments, GPU_FLUID_ARGS_SLABS), which keeps more groups resident than one 512 thread

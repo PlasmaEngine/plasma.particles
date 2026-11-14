@@ -86,10 +86,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
           boundary[axis] += phi * invDx; // (0 - Phi) / dx subtracted
         else if (above == GPU_FLUID_CODE_WALL)
           boundary[axis] = 0.0;
-        GpuFluidVelocityTarget[apron] = boundary;
+        GpuFluidVelocityTarget[apron] = GpuFluidRoundHalf(boundary);
       }
     }
   }
 
-  GpuFluidVelocityTarget[texel] = velocity;
+  GpuFluidVelocityTarget[texel] = GpuFluidRoundHalf(velocity);
 }

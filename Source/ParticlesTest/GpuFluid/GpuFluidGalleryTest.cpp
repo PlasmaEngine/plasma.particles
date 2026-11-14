@@ -710,11 +710,16 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
   AddSubTest("N3 Poisson", SubTests::N3Poisson);
   AddSubTest("N4 Gas Mass", SubTests::N4GasMass);
   AddSubTest("N4 Gas Mass Velocity SL", SubTests::N4GasMassVelocitySL);
+  AddSubTest("N4 Gas Mass Velocity MacCormack", SubTests::N4GasMassVelocityMacCormack);
   AddSubTest("N9 Colliders", SubTests::N9Colliders);
   AddSubTest("N9 Moving Collider", SubTests::N9MovingCollider);
   AddSubTest("Corridor Smoke Video", SubTests::CorridorSmokeVideo);
   AddSubTest("Smoke Around Obstacles Video", SubTests::ObstaclesVideo);
   AddSubTest("Gas Wind", SubTests::GasWind);
+  AddSubTest("N1 Allocation", SubTests::N1Allocation);
+  AddSubTest("N1 Allocation Cap", SubTests::N1AllocationCap);
+  AddSubTest("N11 Determinism", SubTests::N11Determinism);
+  AddSubTest("Moving Emitter Video", SubTests::MovingEmitterVideo);
 }
 
 plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -781,6 +786,12 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
       }
       return PL_SUCCESS;
     }
+
+    case SubTests::N1Allocation:
+    case SubTests::N1AllocationCap:
+    case SubTests::N11Determinism:
+    case SubTests::MovingEmitterVideo:
+      return InitializeP2SubTest(iIdentifier);
 
     default:
       return InitializeP3SubTest(iIdentifier);
@@ -876,9 +887,11 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
     case SubTests::N3Poisson:
       return RunN3Poisson();
     case SubTests::N4GasMass:
-      return RunN4GasMass(true);
+      return RunN4GasMass(0);
     case SubTests::N4GasMassVelocitySL:
-      return RunN4GasMass(false);
+      return RunN4GasMass(1);
+    case SubTests::N4GasMassVelocityMacCormack:
+      return RunN4GasMass(2);
     case SubTests::N9Colliders:
       return RunN9Colliders();
     case SubTests::CorridorSmokeVideo:
@@ -889,6 +902,14 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
       return RunObstaclesVideo(false);
     case SubTests::GasWind:
       return RunGasWind();
+    case SubTests::N1Allocation:
+      return RunN1Allocation(false);
+    case SubTests::N1AllocationCap:
+      return RunN1Allocation(true);
+    case SubTests::N11Determinism:
+      return RunN11Determinism();
+    case SubTests::MovingEmitterVideo:
+      return RunMovingEmitterVideo();
   }
 
   return plTestAppRun::Quit;
@@ -1246,6 +1267,15 @@ void plGameEngineTestGpuFluidGallery::CollectGasSample()
   sample.m_fSolidDensity = stats.m_fSolidDensity;
   sample.m_fSolidCleared = stats.m_fSolidCleared;
   sample.m_fEmitted = stats.m_fEmitted;
+  sample.m_uiAllocActive = stats.m_uiAllocActive;
+  sample.m_uiAllocNew = stats.m_uiNewBricks;
+  sample.m_uiAllocFreed = stats.m_uiFreedBricks;
+  sample.m_uiAllocDenied = stats.m_uiDeniedBricks;
+  for (plUInt32 b = 0; b < 4; ++b)
+    sample.m_uiDeniedBucket[b] = stats.m_uiDeniedPerBucket[b];
+  sample.m_fMassCorrection = stats.m_fMassCorrection;
+  for (plUInt32 i = 0; i < 4; ++i)
+    sample.m_fMassAdvect[i] = stats.m_fMassAdvect[i];
 }
 
 plTestAppRun plGameEngineTestGpuFluidGallery::RunSmokeColumn(bool bVideo)
@@ -1430,12 +1460,16 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
 
 void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
 {
-  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped,emitted,solid_cleared\n");
+  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped,emitted,solid_cleared,"
+                       "alloc_active,alloc_new,alloc_freed,alloc_denied,denied_b0,denied_b1,denied_b2,denied_b3,mass_correction,advect0_before,advect0_after,advect1_before,advect1_after\n");
   for (const GasSample& s : samples)
   {
     sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
     sCsv.AppendFormat("{},{},{},{},{},{},{},", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
-    sCsv.AppendFormat("{},{},{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped, s.m_fEmitted, s.m_fSolidCleared);
+    sCsv.AppendFormat("{},{},{},{},", s.m_uiOverflow, s.m_uiSpeedClamped, s.m_fEmitted, s.m_fSolidCleared);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},{},{},", s.m_uiAllocActive, s.m_uiAllocNew, s.m_uiAllocFreed, s.m_uiAllocDenied, s.m_uiDeniedBucket[0], s.m_uiDeniedBucket[1],
+      s.m_uiDeniedBucket[2], s.m_uiDeniedBucket[3], plArgF(s.m_fMassCorrection, 7));
+    sCsv.AppendFormat("{},{},{},{}\n", plArgF(s.m_fMassAdvect[0], 4), plArgF(s.m_fMassAdvect[1], 4), plArgF(s.m_fMassAdvect[2], 4), plArgF(s.m_fMassAdvect[3], 4));
   }
 
   plFileWriter csv;

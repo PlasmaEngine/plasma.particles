@@ -167,6 +167,11 @@ struct plGpuFluidGasSimulation
   /// MacCormack correction of the velocity's advection too.
   bool m_bMacCormackVelocity = true;
 
+  /// Trilinear samples of the advection from eight loads with weights from the position in the brick, so the result
+  /// does not depend on which slots the bricks have (N11 across pool sizes); otherwise hardware filtering
+  /// (GpuFluid.Gas.ExactSampling).
+  bool m_bExactSampling = false;
+
   /// Each kernel of Gas/Advect and Gas/Forces in a render-graph pass of its own (Gas/Advect SL, Gas/Forces Curl, ...),
   /// so each is timed (GpuFluid.Gas.ProfileKernels).
   bool m_bProfileKernels = false;
@@ -251,6 +256,13 @@ public:
   void AddFramePasses(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, plRenderGraphBufferHandle hStats,
     const plGpuFluidGasSimulation& simulation);
 
+  /// N11: after the frame's passes, hashes the current scalars and velocity per virtual brick (GasHash.plShader) and
+  /// reads the words back.
+  void AddHashPasses(plRenderGraph& ref_graph, const plGpuFluidSparseGrid& grid, const plGpuFluidSparseGridGraph& gridGraph, plUInt64 uiFrame);
+
+  /// The newest state hash that has arrived: the words folded in virtual brick order (FNV-1a, 64 bit).
+  bool PollStateHash(plUInt64& out_uiHash, plUInt64& out_uiFrame);
+
   /// Number of dense multigrid levels of a brick grid, and the cells of level k and before it.
   static plUInt32 ComputeDenseLevels(const plVec3U32& vBrickGrid, plUInt32* pOutCells = nullptr, plUInt32* pOutTotalCells = nullptr);
 
@@ -269,7 +281,10 @@ private:
   plGALBufferHandle m_hMGDense;
   plGALBufferHandle m_hMGDenseCoeff;
   plGALBufferHandle m_hSolidShapes;
+  plGALBufferHandle m_hStateHash; ///< N11, made on first use: 2 words per virtual brick
   plGALSamplerStateHandle m_hLinearClamp;
+  plGpuFluidReadbackRing m_HashReadback;
+  plDynamicArray<plUInt8> m_HashScratch;
 
   plVec3U32 m_vBrickGrid = plVec3U32::MakeZero();
   plUInt32 m_uiDenseLevels = 0;
@@ -300,4 +315,5 @@ private:
   plShaderResourceHandle m_hPoissonShader;
   plShaderResourceHandle m_hProjectShader;
   plShaderResourceHandle m_hFinalizeShader;
+  plShaderResourceHandle m_hHashShader;
 };

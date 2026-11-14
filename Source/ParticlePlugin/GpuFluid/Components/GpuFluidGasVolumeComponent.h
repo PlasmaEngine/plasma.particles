@@ -138,6 +138,21 @@ public:
   /// Test hook (N1): copy the allocator's state to the CPU every frame, with the per virtual brick part.
   bool m_bDebugGridReadback = false;
 
+  /// Test hook (N11): hash the gas state in virtual brick order every frame (plGpuFluidGasStats::m_uiStateHash).
+  bool m_bDebugHashState = false;
+
+  /// Test hook (the performance gate, until P4's emitter component): more sources besides the volume's own, in the
+  /// same terms (offset in metres from the box centre, sizes in metres, velocity in m/s), at most 3.
+  struct ExtraSource
+  {
+    plVec3 m_vOffset = plVec3::MakeZero();
+    float m_fRadius = 0.5f;
+    float m_fRate = 5.0f;
+    float m_fTemperature = 1.0f;
+    plVec3 m_vVelocity = plVec3(0.0f, 0.0f, 2.0f);
+  };
+  plHybridArray<ExtraSource, 3> m_DebugExtraSources;
+
   /// The newest copy of the allocator's state (m_bDebugGridReadback or GpuFluid.Debug.Bricks), false until one arrived.
   bool GetGridDebug(plGpuFluidGridDebug& out_debug) const;
 
