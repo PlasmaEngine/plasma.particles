@@ -127,7 +127,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     if (!owned[s3])
       continue;
 
-    const bool bValid = weight[s3] > 0;
+    const bool bValid = weight[s3] >= (int)(GPU_FLUID_LIQUID_MIN_FACE_WEIGHT * GPU_FLUID_LIQUID_WEIGHT_SCALE);
     const float velocity = bValid ? (float(momentum[s3]) / GPU_FLUID_LIQUID_MOMENTUM_SCALE) / (float(weight[s3]) / GPU_FLUID_LIQUID_WEIGHT_SCALE) : 0.0;
     GpuFluidLiqVelOut.Store(LiqFaceAddress(comps[s3], faces[s3]), asuint(velocity));
 

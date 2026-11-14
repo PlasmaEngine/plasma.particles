@@ -92,7 +92,12 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     {
       GpuFluidLiqStats.InterlockedMin((GPU_FLUID_LIQUID_STAT_BOUNDS_MIN + a) * 4, gs_uiMin[a]);
       GpuFluidLiqStats.InterlockedMax((GPU_FLUID_LIQUID_STAT_BOUNDS_MAX + a) * 4, gs_uiMax[a]);
-      GpuFluidLiqStats.InterlockedAdd((GPU_FLUID_LIQUID_STAT_CENTROID + a) * 4, gs_uiCentroid[a]);
+      // 64-bit sum from 32-bit atomics: the group's part (at most 256 * 4096 cells * 16, no overflow) goes into the
+      // low word, and a wrap of the low word carries one into the high word.
+      uint before;
+      GpuFluidLiqStats.InterlockedAdd((GPU_FLUID_LIQUID_STAT_CENTROID + a) * 4, gs_uiCentroid[a], before);
+      if (before + gs_uiCentroid[a] < before)
+        GpuFluidLiqStats.InterlockedAdd((GPU_FLUID_LIQUID_STAT_CENTROID_HI + a) * 4, 1u);
     }
   }
 }

@@ -1,0 +1,29 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
+
+// MGPCG start, over the active bricks: r = b - A x at liquid cells from the warm start x (GpuFluidLiqMgX, the
+// pressure), and z = p = 0 everywhere, so the preconditioner starts from zero and the first p = z.
+
+RWByteAddressBuffer GpuFluidLiqPcgR;
+RWByteAddressBuffer GpuFluidLiqPcgZ;
+RWByteAddressBuffer GpuFluidLiqPcgP;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint index = LiqCellIndex(cell);
+  const float r = PcgIsLiquid(cell) ? MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, LiqCells(), true) : 0.0;
+  GpuFluidLiqPcgR.Store(index * 4, asuint(r));
+  GpuFluidLiqPcgZ.Store(index * 4, 0u);
+  GpuFluidLiqPcgP.Store(index * 4, 0u);
+}

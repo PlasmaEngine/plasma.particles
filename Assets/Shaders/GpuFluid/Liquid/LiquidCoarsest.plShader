@@ -27,8 +27,10 @@ void main(uint groupIndex : SV_GroupIndex)
   const uint sweeps = MgSweeps();
   for (uint sweep = 0; sweep < sweeps; ++sweep)
   {
-    for (uint colour = 0; colour < 2; ++colour)
+    for (uint colourStep = 0; colourStep < 2; ++colourStep)
     {
+      // Odd sweeps run black before red, so an even number of sweeps is symmetric (the MGPCG preconditioner).
+      const uint colour = (sweep & 1u) != 0 ? 1u - colourStep : colourStep;
       for (uint i = groupIndex; i < count; i += GPU_FLUID_LIQUID_COARSEST_GROUP)
       {
         const int3 c = int3(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));

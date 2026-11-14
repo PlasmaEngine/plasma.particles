@@ -11,10 +11,14 @@ ALL
 // Right-hand side of the pressure solve. The unknown is phi = p * dt / (rho * dx) (m/s), so a face's projection is
 // u -= phi(i) - phi(i - 1) and the equation of a liquid cell is sum over its open faces of (phi_i - phi_nb) =
 // dx * D_target - F, with F the cell's net outflux (m/s) and D_target the divergence the solve aims for:
-// - local density correction k * clamp(n / n0 - 1, 0, 1) / dt: crowded cells push their particles apart;
-// - global volume control c * (V_target - V) / V_target / dt, V_target = (seeded - drained) / n0
-//   cells, V the measure of LiquidClassify. The relative error is clamped to +-25%.
-// Also rescales the warm start (phi scales with dt) and zeroes phi outside the liquid.
+// - local density correction k * clamp(n / n0 - 1, 0, 1), k in 1/s and at most 0.5 / dt: crowded cells push their
+//   particles apart. A rate, not the plan's k / dt: with a share per substep the packing the correction settles at
+//   moves with the substep count, and a pool breathes every time that count changes;
+// - global volume control c * (V_target - V) / V_target with c in 1/s, V_target = (seeded - drained) / n0
+//   cells, V the measure of LiquidClassify. A rate, not a share per substep, so the correction per second does not
+//   follow the substep count. The relative error is clamped to +-25%.
+// Also rescales the warm start by the dt ratio (exact for the hydrostatic part of phi) and zeroes phi outside the
+// liquid.
 
 ByteAddressBuffer GpuFluidLiqCellCount;
 RWByteAddressBuffer GpuFluidLiqCellType;
@@ -69,14 +73,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   }
   const float n = countSum / max(cellsInside, 1.0);
   const float excess = clamp(n / n0 - 1.0, 0.0, 1.0);
-  float target = solve.y * excess / dt;
+  float target = min(solve.y, 0.5 / dt) * excess;
 
   const float seeded = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));
   const float drained = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_DRAINED * 4));
   const float targetVolume = (seeded - drained) / n0;
   const float volume = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_VOLUME * 4)) / GPU_FLUID_LIQUID_VOLUME_SCALE;
   if (targetVolume > 0.0)
-    target += solve.z * clamp((targetVolume - volume) / targetVolume, -0.25, 0.25) / dt;
+    target += solve.z * clamp((targetVolume - volume) / targetVolume, -0.25, 0.25);
 
   const float rhs = LiqDx() * target - outflux;
   GpuFluidLiqRhs.Store(index * 4, asuint(rhs));

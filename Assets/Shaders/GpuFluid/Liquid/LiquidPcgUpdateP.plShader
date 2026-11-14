@@ -1,0 +1,25 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
+
+// The new search direction p = z + beta p at the liquid cells.
+
+RWByteAddressBuffer GpuFluidLiqPcgZ;
+RWByteAddressBuffer GpuFluidLiqPcgP;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell) || !PcgIsLiquid(cell))
+    return;
+
+  const uint index = LiqCellIndex(cell);
+  const float beta = PcgScalar(GPU_FLUID_LIQUID_PCG_BETA);
+  GpuFluidLiqPcgP.Store(index * 4, asuint(asfloat(GpuFluidLiqPcgZ.Load(index * 4)) + beta * asfloat(GpuFluidLiqPcgP.Load(index * 4))));
+}

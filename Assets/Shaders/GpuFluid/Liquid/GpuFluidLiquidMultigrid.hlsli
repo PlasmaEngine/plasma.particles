@@ -6,8 +6,9 @@
 // - an air neighbour (or an open domain side) is the free surface: ghost fluid with phi = 0 at a fraction theta of
 //   the way, which adds 1 / theta to the diagonal;
 // - a solid neighbour or a wall adds nothing (Neumann).
-// Coarse levels use the same stencil on their own cell types: a coarse cell is liquid when any of its 8 children is,
-// solid when all are, air otherwise. Their right-hand side is the restricted residual.
+// Coarse levels use the same stencil on their own cell types: a coarse cell is liquid when it has a liquid child and
+// no air child, solid when it has neither, air otherwise (LiquidRestrict). Their right-hand side is the restricted
+// residual.
 //
 // GpuFluidLiqPass: x level, y colour (red-black), z sweeps (coarsest). GpuFluidLiqPassF: x SOR factor, y scale of the
 // restricted residual.

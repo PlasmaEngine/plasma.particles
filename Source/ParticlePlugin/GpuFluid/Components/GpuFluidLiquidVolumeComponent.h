@@ -48,6 +48,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidFillBox
   plVec3 m_vHalfExtents = plVec3(0.5f);
   plVec3 m_vVelocity = plVec3::MakeZero();
   float m_fJitter = 1.0f;
+  bool m_bStratified = true; ///< exactly ParticlesPerCell in each cell, one per sub-cell; false: anywhere in the box
 };
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidFillBox);
@@ -118,7 +119,7 @@ public:
 
   float m_fFlipBlend = 0.1f;                                            // [ property ]
   plUInt32 m_uiMaxSubsteps = 4;                                         // [ property ]
-  plUInt32 m_uiPressureCycles = 3;                                      // [ property ] multigrid V-cycles
+  plUInt32 m_uiPressureCycles = 8;                                      // [ property ] V-cycles per substep (MGPCG: one per iteration)
   float m_fWallFriction = 0.0f;                                         // [ property ]
   bool m_bAlwaysSimulate = true;                                        // [ property ]
 

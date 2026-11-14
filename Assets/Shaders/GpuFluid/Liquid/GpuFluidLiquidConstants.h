@@ -36,10 +36,14 @@
 
 // P2G gathers in int32 registers (no atomics, so the sums do not depend on particle order):
 // - momentum at 2^16 per m/s: a particle at the 32 m/s clamp adds at most 2^21, so 1024 full-weight particles fit;
-// - weight at 2^20 per unit weight: 2048 full-weight particles fit.
-// A sum that would still overflow is clamped and counted in the overflow stat.
+// - weight at 2^20 per unit weight: 2048 full-weight particles fit. The plan's 2^24 fits only 128, too few for the
+//   3x3x3-cell gather of a compressed region at 8 particles per cell.
+// A sum that would still overflow is clamped and counted in the overflow stat. A face whose total weight is below
+// GPU_FLUID_LIQUID_MIN_FACE_WEIGHT is left invalid (the extrapolation fills it): at 2^20 its velocity would be
+// quantised in steps of 16 / weight_int m/s, about 0.015 m/s at the threshold.
 #define GPU_FLUID_LIQUID_MOMENTUM_SCALE 65536.0
 #define GPU_FLUID_LIQUID_WEIGHT_SCALE 1048576.0
+#define GPU_FLUID_LIQUID_MIN_FACE_WEIGHT 1e-3
 #define GPU_FLUID_LIQUID_MAX_SPEED 32.0
 #define GPU_FLUID_LIQUID_MAX_AFFINE 16.0
 
@@ -72,6 +76,7 @@
 #define GPU_FLUID_LIQUID_CTR_LOST 2           // particles removed for any other reason (NaN, escaped a wall)
 #define GPU_FLUID_LIQUID_CTR_SUBSTEPS 3       // substeps run so far
 #define GPU_FLUID_LIQUID_CTR_TICKS 4          // ticks (frames that stepped) so far
+#define GPU_FLUID_LIQUID_CTR_SIM_TIME 5       // simulated time so far in microseconds (less than wall time in slow motion)
 #define GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS 8  // per substep: active brick list length
 #define GPU_FLUID_LIQUID_CTR_VOLUME 9         // per substep: fill volume, GPU_FLUID_LIQUID_VOLUME_SCALE per cell
 #define GPU_FLUID_LIQUID_CTR_LIQUID_CELLS 10  // per substep: cells classified liquid
@@ -83,6 +88,18 @@
 #define GPU_FLUID_LIQUID_CTR_WORDS 16
 #define GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP 8
 #define GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP 13
+
+// MGPCG scalars, kept on the GPU (no readback): float words of the scalar buffer.
+#define GPU_FLUID_LIQUID_PCG_RZ 0     // r . z of the current iterate
+#define GPU_FLUID_LIQUID_PCG_ALPHA 1  // step length along p
+#define GPU_FLUID_LIQUID_PCG_BETA 2   // weight of the old direction in the new p
+#define GPU_FLUID_LIQUID_PCG_PQ 3     // p . A p
+#define GPU_FLUID_LIQUID_PCG_WORDS 4
+
+// What a reduction of the per-brick dot products sets (GpuFluidLiqPass.y of LiquidPcgReduce).
+#define GPU_FLUID_LIQUID_PCG_REDUCE_START 0 // rz = sum, beta = 0
+#define GPU_FLUID_LIQUID_PCG_REDUCE_ALPHA 1 // pq = sum, alpha = rz / pq
+#define GPU_FLUID_LIQUID_PCG_REDUCE_BETA 2  // beta = sum / rz, rz = sum
 
 // Stats: one buffer per volume, rewritten every frame that steps and read back through a ring of 3.
 #define GPU_FLUID_LIQUID_STAT_ALIVE 0
@@ -106,7 +123,9 @@
 #define GPU_FLUID_LIQUID_STAT_SPEED_SUM 22         // sum of speeds, GPU_FLUID_LIQUID_SPEED_SUM_SCALE per m/s
 #define GPU_FLUID_LIQUID_STAT_ABOVE_1CM 23         // particles faster than 1 cm/s
 #define GPU_FLUID_LIQUID_STAT_ABOVE_1MM 24         // particles faster than 1 mm/s
-#define GPU_FLUID_LIQUID_STAT_CENTROID 25          // 3 words: sum of particle positions in cells, 1/16 cell units
+#define GPU_FLUID_LIQUID_STAT_CENTROID 25          // 3 words: sum of particle positions in cells, 1/16 cell units, low 32 bits
+#define GPU_FLUID_LIQUID_STAT_CENTROID_HI 28       // 3 words: the carries out of those sums (high 32 bits)
+#define GPU_FLUID_LIQUID_STAT_SIM_TIME 31          // simulated time since the reset, microseconds
 #define GPU_FLUID_LIQUID_STAT_HIST_COUNT 32        // bins used by the front histogram
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024
@@ -142,7 +161,7 @@ BEGIN_PUSH_CONSTANTS(plGpuFluidLiquidSeedConstants)
   UINT4(GpuFluidSeedCellMin);   // xyz: first cell, w: particles per cell
   UINT4(GpuFluidSeedCellCount); // xyz: cells per axis, w: index of the first particle written
   FLOAT4(GpuFluidSeedVelocity); // xyz: initial velocity, w: jitter (0..1 of a sub-cell)
-  FLOAT4(GpuFluidSeedGrid);     // x: dx (m), yzw: unused
+  FLOAT4(GpuFluidSeedGrid);     // x: dx (m), y: filled fraction of the cell height, z: mode (LiquidSeed), w: unused
   UINT4(GpuFluidSeedInfo);      // x: seed of the jitter hash, y: particles to write, zw: unused
 }
 END_PUSH_CONSTANTS(plGpuFluidLiquidSeedConstants)

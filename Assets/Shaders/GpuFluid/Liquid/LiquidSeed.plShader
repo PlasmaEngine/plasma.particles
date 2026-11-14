@@ -8,9 +8,11 @@ ALL
 #define GPU_FLUID_LIQUID_SEED_KERNEL
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
-// Seeds one fill box: n0 particles per cell, stratified (8 per cell: one per octant; 4 per cell: one in each octant
-// of even parity, a tetrahedral pattern), jittered inside their sub-cell by a hash of the cell and the slot, so a
-// seed is the same every run. Particle index = first + cell-in-box * n0 + slot.
+// Seeds one fill box: n particles per cell on average (GpuFluidSeedCellMin.w), placed by hashes, so a seed is the
+// same every run. GpuFluidSeedGrid.z picks the mode: 1 stratified, exactly n per cell (8: one per octant; 4: one in
+// each octant of even parity, a tetrahedral pattern), each jittered inside its sub-cell; 2 exactly n per cell,
+// anywhere in it; 0 every particle anywhere in the box. GpuFluidSeedGrid.y: the filled fraction of the cell height
+// (a partly filled top layer).
 
 RWByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqVelocities;
@@ -33,9 +35,17 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   if (i >= info.y)
     return;
 
+  const float4 grid = SEED_CONST(GpuFluidSeedGrid);
+  const uint mode = (uint)grid.z;
+  const bool bStratified = mode == 1u;
+  const bool bPerCell = mode != 0u;
+
+  // Per cell (modes 1, 2): particle i is slot i % n of cell i / n, so every cell gets exactly n. Mode 0: its cell is
+  // drawn from a hash, the same total uniformly random over the box, so the counts per cell vary as in a poured liquid.
   const uint ppc = max(cellMin.w, 1u);
-  const uint cellInBox = i / ppc;
-  const uint slot = i % ppc;
+  const uint cellsInBox = max(cellCount.x * cellCount.y * cellCount.z, 1u);
+  const uint cellInBox = bPerCell ? i / ppc : LiqHash(info.x ^ (i * 0x9E3779B9u + 0x7f4a7c15u)) % cellsInBox;
+  const uint slot = bPerCell ? i % ppc : i;
   const uint3 local = uint3(cellInBox % cellCount.x, (cellInBox / cellCount.x) % cellCount.y, cellInBox / (cellCount.x * cellCount.y));
   const uint3 cell = cellMin.xyz + local;
 
@@ -44,7 +54,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   const float jitter = saturate(velocityJitter.w);
 
   float3 inCell;
-  if (ppc == 8u || ppc == 4u)
+  if (bStratified && (ppc == 8u || ppc == 4u))
   {
     const uint octant = ppc == 8u ? slot : s_EvenOctants[slot];
     const float3 o = float3(octant & 1u, (octant >> 1) & 1u, (octant >> 2) & 1u);
@@ -54,6 +64,9 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   {
     inCell = 0.5 + r * jitter;
   }
+
+  // A partly filled top layer keeps its particles in the lower grid.y of the cell.
+  inCell.z = clamp(inCell.z, 0.0, 1.0) * grid.y;
 
   const float3 position = (float3(cell) + clamp(inCell, 0.001, 0.999)) * dx;
   const uint index = cellCount.w + i;

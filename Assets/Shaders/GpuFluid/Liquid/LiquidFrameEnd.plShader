@@ -9,7 +9,8 @@ ALL
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // End of a tick, one thread: the counters into the stats that are read back, the tick and substep totals, and the
-// draw arguments of the debug points (6 vertices per particle). GpuFluidLiqPass.x: substeps of this tick.
+// draw arguments of the debug points (6 vertices per particle). GpuFluidLiqPass.x: substeps of this tick, y: the time
+// it simulated in microseconds.
 
 RWByteAddressBuffer GpuFluidLiqCounters;
 RWByteAddressBuffer GpuFluidLiqStats;
@@ -25,7 +26,9 @@ void main()
   {
     GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_TICKS * 4, 1u);
     GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SUBSTEPS * 4, substeps);
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SIM_TIME * 4, LIQ_CONST(GpuFluidLiqPass).y);
   }
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SIM_TIME * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SIM_TIME * 4));
 
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_ALIVE * 4, alive);
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SEEDED * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));

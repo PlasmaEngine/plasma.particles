@@ -18,6 +18,11 @@ struct plGpuFluidLiquidFill
   plVec3U32 m_vCellCount = plVec3U32::MakeZero();
   plVec3 m_vVelocity = plVec3::MakeZero();
   float m_fJitter = 1.0f; ///< 0: particles on a regular lattice, 1: anywhere in their sub-cell
+  bool m_bStratified = true; ///< exactly n0 per cell, one per sub-cell; false: every particle anywhere in the box
+
+  /// Fraction (0, 1] of the top cell layer's height that is filled: that layer gets this share of the particles,
+  /// placed in its lower part, so the surface can lie inside a cell.
+  float m_fTopLayerFill = 1.0f;
 };
 
 /// Everything a liquid volume's GPU work needs for one tick, gathered on the update thread.
@@ -38,10 +43,24 @@ struct plGpuFluidLiquidFrameInput
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
 
   float m_fFlipBlend = 0.1f;
+  /// Substeps per tick: ceil(vmax * dt / (cfl * dx)) between these. vmax is the largest max speed of the last
+  /// m_uiSpeedHistory readbacks plus g * dt per frame of their age, so a stale readback right after a calm moment
+  /// does not pick too few. The count rises at once and drops by one only after m_uiSubstepHoldTicks ticks in a row
+  /// in which one fewer would have been enough with room to spare (the CFL number times m_fSubstepDownMargin). When
+  /// the cap is not enough, the tick simulates less time than it was given (slow motion, down to a quarter tick)
+  /// instead of breaking the CFL number.
   plUInt32 m_uiMaxSubsteps = 4;
-  float m_fCflNumber = 1.5f; ///< substeps = ceil(vmax * dt / (cfl * dx))
+  plUInt32 m_uiMinSubsteps = 1;
+  float m_fCflNumber = 1.5f;
+  plUInt32 m_uiSpeedHistory = 8;
+  plUInt32 m_uiSubstepHoldTicks = 15;
+  float m_fSubstepDownMargin = 0.8f;
 
-  plUInt32 m_uiPressureCycles = 3;   ///< multigrid V-cycles per substep
+  /// Pressure solve: MGPCG (conjugate gradients, one multigrid V-cycle as the preconditioner per iteration) or, when
+  /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep.
+  bool m_bPcg = true;
+  plUInt32 m_uiPressureCycles = 8;
+
   plUInt32 m_uiPreSmooth = 2;        ///< red-black Gauss-Seidel sweeps before restriction
   plUInt32 m_uiPostSmooth = 2;       ///< and after prolongation
   plUInt32 m_uiCoarsestSweeps = 48;  ///< sweeps on the coarsest level, in one dispatch
@@ -50,8 +69,12 @@ struct plGpuFluidLiquidFrameInput
   float m_fCoarseScale = 0.5f;
 
   float m_fTheta = 0.5f;          ///< ghost-fluid fraction of the free surface between a liquid and an air cell centre
-  float m_fDensityGain = 0.3f;    ///< k of the local density correction k * max(n/n0 - 1, 0) / dt
-  float m_fVolumeGain = 0.4f;     ///< c of the global volume control (fraction of the volume error corrected per substep)
+  /// k of the local density correction: target divergence k * max(n/n0 - 1, 0) in 1/s, at most 0.5 / dt. A rate,
+  /// so the packing it holds does not depend on the substep count.
+  float m_fDensityGain = 25.0f;
+  /// c of the global volume control: target divergence c * (V_target - V) / V_target, in 1/s (the share of the
+  /// volume error corrected per second, independent of the substep count).
+  float m_fVolumeGain = 8.0f;
 
   /// After a reset the first ticks run the most substeps: a column released from rest accelerates at up to g * H / dx
   /// near its foot before the read-back speed can see it.
@@ -81,6 +104,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
   plUInt32 m_uiTicks = 0;          ///< ticks simulated since the last reset
   plUInt32 m_uiSubstepsTotal = 0;  ///< substeps simulated since the last reset
   plUInt32 m_uiSubsteps = 0;       ///< substeps of the tick that was recorded
+  double m_fSimulatedTime = 0.0;   ///< seconds simulated since the last reset (less than ticks * dt in slow motion)
 
   plUInt32 m_uiActiveBricks = 0;   ///< bricks the grid kernels ran on (occupied plus one brick around)
   plUInt32 m_uiOccupiedBricks = 0; ///< bricks holding particles
@@ -146,6 +170,12 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hG2P;
   plShaderResourceHandle m_hRenderPrep;
   plShaderResourceHandle m_hFrameEnd;
+  plShaderResourceHandle m_hPcgInit;
+  plShaderResourceHandle m_hPcgDot;
+  plShaderResourceHandle m_hPcgApply;
+  plShaderResourceHandle m_hPcgReduce;
+  plShaderResourceHandle m_hPcgUpdateX;
+  plShaderResourceHandle m_hPcgUpdateP;
   plGpuFluidScan m_Scan;
 
   void Load();
@@ -159,8 +189,9 @@ struct plGpuFluidLiquidShaders
 /// - Liquid/Sort: clear, count particles per cell (removing those that left), scan, scatter into the other set,
 ///   active bricks (occupied plus one around) and their dispatch arguments;
 /// - Liquid/P2G: gather of momentum and weight per face in int32 registers, normalise, extrapolate 3 layers;
-/// - Liquid/Solve: classify, gravity, right-hand side with density and volume correction, multigrid V-cycles
-///   (red-black Gauss-Seidel smoothing, warm started, ghost fluid at the free surface), project, extrapolate;
+/// - Liquid/Solve: classify, gravity, right-hand side with density and volume correction, MGPCG (multigrid V-cycle
+///   preconditioner with red-black Gauss-Seidel smoothing; warm started, ghost fluid at the free surface), project,
+///   extrapolate;
 /// - Liquid/G2P: APIC/FLIP update, RK2 advection, push out of walls and solids.
 ///
 /// Render thread only.
@@ -190,6 +221,7 @@ public:
   plVec3U32 GetCells() const { return m_vCells; }
   float GetCellSize() const { return m_fDx; }
   plUInt32 GetLevelCount() const { return m_uiLevelCount; }
+  /// Substeps of the last recorded tick that stepped.
   plUInt32 GetSubstepsOfLastRecord() const { return m_uiLastSubsteps; }
 
 private:
@@ -243,6 +275,15 @@ private:
   plGALBufferHandle m_hLevelB[GPU_FLUID_LIQUID_MAX_LEVELS];
   plGALBufferHandle m_hLevelType[GPU_FLUID_LIQUID_MAX_LEVELS];
 
+  // MGPCG: residual, preconditioned residual, direction, A * direction (per cell), the per-brick dot products and
+  // the scalars.
+  plGALBufferHandle m_hPcgR;
+  plGALBufferHandle m_hPcgZ;
+  plGALBufferHandle m_hPcgP;
+  plGALBufferHandle m_hPcgQ;
+  plGALBufferHandle m_hPcgPartials;
+  plGALBufferHandle m_hPcgScalars;
+
   plGALBufferHandle m_hCounters;
   plGALBufferHandle m_hStats;
   plGALBufferHandle m_hShapes;
@@ -255,6 +296,15 @@ private:
   bool m_bHasTick = false;
   float m_fLastSubstepDt = 0.0f;
   plUInt32 m_uiLastSubsteps = 0;
+
+  // Max speeds of the last readbacks (a ring, newest at m_uiSpeedNext - 1) and the render frame of the newest.
+  static constexpr plUInt32 s_uiMaxSpeedHistory = 16;
+  float m_SpeedHistory[s_uiMaxSpeedHistory] = {};
+  plUInt32 m_uiSpeedCount = 0;
+  plUInt32 m_uiSpeedNext = 0;
+  plUInt64 m_uiSpeedFrame = 0;
+  plUInt32 m_uiTicksBelow = 0; ///< ticks in a row that wanted fewer substeps than the last
+
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_UploadedShapes;
   bool m_bShapesUploaded = false;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();

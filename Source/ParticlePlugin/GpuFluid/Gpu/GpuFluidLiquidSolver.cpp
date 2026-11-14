@@ -49,6 +49,12 @@ void plGpuFluidLiquidShaders::Load()
   m_hG2P = Load("LiquidG2P");
   m_hRenderPrep = Load("LiquidRenderPrep");
   m_hFrameEnd = Load("LiquidFrameEnd");
+  m_hPcgInit = Load("LiquidPcgInit");
+  m_hPcgDot = Load("LiquidPcgDot");
+  m_hPcgApply = Load("LiquidPcgApply");
+  m_hPcgReduce = Load("LiquidPcgReduce");
+  m_hPcgUpdateX = Load("LiquidPcgUpdateX");
+  m_hPcgUpdateP = Load("LiquidPcgUpdateP");
   m_Scan.Initialize();
 }
 
@@ -237,6 +243,13 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
     m_hLevelType[l] = Make(uiCells * 4, "GpuFluid Liquid MG Type");
   }
 
+  m_hPcgR = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG R");
+  m_hPcgZ = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG Z");
+  m_hPcgP = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG P");
+  m_hPcgQ = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG Q");
+  m_hPcgPartials = Make(plUInt64(m_uiBrickCount) * 4, "GpuFluid Liquid PCG Partials");
+  m_hPcgScalars = Make(GPU_FLUID_LIQUID_PCG_WORDS * 4, "GpuFluid Liquid PCG Scalars");
+
   m_hCounters = Make(GPU_FLUID_LIQUID_CTR_WORDS * 4, "GpuFluid Liquid Counters");
   m_hStats = Make(GPU_FLUID_LIQUID_STATS_BYTES, "GpuFluid Liquid Stats");
 
@@ -267,6 +280,10 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
   m_uiCurrentSet = 0;
   m_uiLastResetCounter = 0xFFFFFFFFu;
   m_fLastSubstepDt = 0.0f;
+  m_uiLastSubsteps = 0;
+  m_uiSpeedCount = 0;
+  m_uiSpeedNext = 0;
+  m_uiSpeedFrame = 0;
   return true;
 }
 
@@ -310,6 +327,12 @@ void plGpuFluidLiquidSolver::Destroy()
     Free(m_hLevelB[l]);
     Free(m_hLevelType[l]);
   }
+  Free(m_hPcgR);
+  Free(m_hPcgZ);
+  Free(m_hPcgP);
+  Free(m_hPcgQ);
+  Free(m_hPcgPartials);
+  Free(m_hPcgScalars);
   Free(m_hCounters);
   Free(m_hStats);
   Free(m_hShapes);
@@ -365,9 +388,14 @@ void plGpuFluidLiquidSolver::DecodeStats(plArrayPtr<const plUInt8> data, plGpuFl
   const double fAlive = plMath::Max(1u, out_stats.m_uiAlive);
   out_stats.m_fMeanSpeed = static_cast<float>(pWords[GPU_FLUID_LIQUID_STAT_SPEED_SUM] / GPU_FLUID_LIQUID_SPEED_SUM_SCALE / fAlive);
 
-  // The centroid is summed in 1/16 cell units per particle into three uints: exact while alive * cells * 16 < 2^32.
-  out_stats.m_vCentroid.Set(static_cast<float>(pWords[GPU_FLUID_LIQUID_STAT_CENTROID + 0] / 16.0 / fAlive * m_fDx),
-    static_cast<float>(pWords[GPU_FLUID_LIQUID_STAT_CENTROID + 1] / 16.0 / fAlive * m_fDx), static_cast<float>(pWords[GPU_FLUID_LIQUID_STAT_CENTROID + 2] / 16.0 / fAlive * m_fDx));
+  // The centroid is summed in 1/16 cell units per particle into a low word and a carry word per axis (64 bits).
+  auto CentroidSum = [&](plUInt32 uiAxis)
+  {
+    const plUInt64 uiSum = (plUInt64(pWords[GPU_FLUID_LIQUID_STAT_CENTROID_HI + uiAxis]) << 32) | pWords[GPU_FLUID_LIQUID_STAT_CENTROID + uiAxis];
+    return static_cast<float>(static_cast<double>(uiSum) / 16.0 / fAlive * m_fDx);
+  };
+  out_stats.m_vCentroid.Set(CentroidSum(0), CentroidSum(1), CentroidSum(2));
+  out_stats.m_fSimulatedTime = pWords[GPU_FLUID_LIQUID_STAT_SIM_TIME] * 1e-6;
 
   const plUInt32 uiBins = plMath::Min<plUInt32>(pWords[GPU_FLUID_LIQUID_STAT_HIST_COUNT], GPU_FLUID_LIQUID_HIST_BINS);
   out_stats.m_FrontHistogram.SetCountUninitialized(uiBins);
@@ -422,20 +450,83 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     }
   }
 
-  // Substeps from the newest max speed, which is two to three frames old: gravity can have added g * dt per frame since.
+  // Substeps. The newest max speed is two to three frames old and one readback can catch a calm moment between two
+  // fast ones, so the speed used is the largest of the last few readbacks, plus what gravity can have added since
+  // the newest (g * dt per frame of its age); and the count drops by at most one per tick.
+  if (bReset)
+  {
+    m_uiSpeedCount = 0;
+    m_uiSpeedNext = 0;
+    m_uiSpeedFrame = 0;
+    m_uiLastSubsteps = 0;
+    m_uiTicksBelow = 0;
+  }
+  if (!bReset && pStats != nullptr && pStats->m_uiFrame != m_uiSpeedFrame)
+  {
+    m_uiSpeedFrame = pStats->m_uiFrame;
+    m_SpeedHistory[m_uiSpeedNext] = pStats->m_fMaxSpeed;
+    m_uiSpeedNext = (m_uiSpeedNext + 1) % s_uiMaxSpeedHistory;
+    m_uiSpeedCount = plMath::Min(m_uiSpeedCount + 1, s_uiMaxSpeedHistory);
+  }
+
   const float fGravity = input.m_vGravity.GetLength();
   float fSpeed = fGravity * input.m_fDt;
-  if (!bReset && pStats != nullptr)
-    fSpeed += pStats->m_fMaxSpeed + fGravity * input.m_fDt * static_cast<float>(plMath::Min<plUInt64>(uiStatsAge, 8));
-  const float fCfl = plMath::Max(input.m_fCflNumber, 0.1f);
+  const plUInt32 uiHistory = plMath::Min(m_uiSpeedCount, plMath::Clamp<plUInt32>(input.m_uiSpeedHistory, 1, s_uiMaxSpeedHistory));
+  if (!bReset && uiHistory > 0)
+  {
+    float fRecent = 0.0f;
+    for (plUInt32 k = 0; k < uiHistory; ++k)
+      fRecent = plMath::Max(fRecent, m_SpeedHistory[(m_uiSpeedNext + s_uiMaxSpeedHistory - 1 - k) % s_uiMaxSpeedHistory]);
+    fSpeed += fRecent + fGravity * input.m_fDt * static_cast<float>(plMath::Min<plUInt64>(uiStatsAge, 8));
+  }
+
+  const float fCflDistance = plMath::Max(input.m_fCflNumber, 0.1f) * m_fDx;
   const plUInt32 uiMaxSubsteps = plMath::Clamp<plUInt32>(input.m_uiMaxSubsteps, 1, 16);
-  plUInt32 uiSubsteps = bStep ? plMath::Clamp<plUInt32>(static_cast<plUInt32>(plMath::Ceil(fSpeed * input.m_fDt / (fCfl * m_fDx))), 1, uiMaxSubsteps) : 0;
+  const plUInt32 uiMinSubsteps = plMath::Clamp<plUInt32>(input.m_uiMinSubsteps, 1, uiMaxSubsteps);
   if (bReset)
     m_uiTicksSinceReset = 0;
-  if (bStep && m_uiTicksSinceReset++ < input.m_uiStartupTicks)
-    uiSubsteps = uiMaxSubsteps;
-  const float fSubDt = bStep ? input.m_fDt / static_cast<float>(uiSubsteps) : 0.0f;
-  m_uiLastSubsteps = uiSubsteps;
+
+  plUInt32 uiSubsteps = 0;
+  float fSimDt = 0.0f;
+  if (bStep)
+  {
+    const float fNeeded = fSpeed * input.m_fDt / fCflDistance;
+    uiSubsteps = plMath::Clamp<plUInt32>(static_cast<plUInt32>(plMath::Ceil(fNeeded)), uiMinSubsteps, uiMaxSubsteps);
+
+    // Up at once; down by one only after one fewer would have done with a margin (m_fSubstepDownMargin of its
+    // capacity) for m_uiSubstepHoldTicks ticks in a row. The pool's packing settles a little differently at each
+    // substep count, so a count that flips back and forth makes the whole pool breathe.
+    if (m_uiLastSubsteps > 0 && uiSubsteps < m_uiLastSubsteps)
+    {
+      const float fLower = static_cast<float>(m_uiLastSubsteps - 1) * plMath::Clamp(input.m_fSubstepDownMargin, 0.1f, 1.0f);
+      const bool bLower = m_uiLastSubsteps > uiMinSubsteps && fNeeded <= fLower;
+      m_uiTicksBelow = bLower ? m_uiTicksBelow + 1 : 0;
+      if (bLower && m_uiTicksBelow >= input.m_uiSubstepHoldTicks)
+      {
+        uiSubsteps = plMath::Max(uiSubsteps, m_uiLastSubsteps - 1);
+        m_uiTicksBelow = 0;
+      }
+      else
+      {
+        uiSubsteps = plMath::Min(m_uiLastSubsteps, uiMaxSubsteps);
+      }
+    }
+    else
+    {
+      m_uiTicksBelow = 0;
+    }
+    if (m_uiTicksSinceReset++ < input.m_uiStartupTicks)
+      uiSubsteps = uiMaxSubsteps;
+
+    // Over the cap the tick simulates less time (slow motion), down to a quarter tick; beyond that the CFL number
+    // gives way.
+    fSimDt = input.m_fDt;
+    if (fNeeded > static_cast<float>(uiSubsteps))
+      fSimDt = input.m_fDt * plMath::Max(static_cast<float>(uiSubsteps) / fNeeded, 0.25f);
+
+    m_uiLastSubsteps = uiSubsteps;
+  }
+  const float fSubDt = bStep ? fSimDt / static_cast<float>(uiSubsteps) : 0.0f;
 
   // Base constants of this tick.
   plGpuFluidLiquidConstants base = {};
@@ -496,21 +587,36 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       const plGpuFluidLiquidFill& fill = input.m_Fills[i];
       const plVec3U32 vMin = fill.m_vCellMin.CompMin(m_vCells);
       const plVec3U32 vCount = fill.m_vCellCount.CompMin(m_vCells - vMin);
-      const plUInt64 uiWanted = plUInt64(vCount.x) * vCount.y * vCount.z * uiPpc;
-      const plUInt32 uiCount = static_cast<plUInt32>(plMath::Min<plUInt64>(uiWanted, m_uiCapacity - uiTotal));
-      if (uiCount < uiWanted)
-        plLog::Warning("GpuFluid: a fill box of a liquid volume wants {} particles, {} fit", uiWanted, uiCount);
-      if (uiCount == 0)
-        continue;
 
-      SeedJob& job = jobs.ExpandAndGetRef();
-      job.m_uiCount = uiCount;
-      job.m_Constants.GpuFluidSeedCellMin = plVec4U32(vMin.x, vMin.y, vMin.z, uiPpc);
-      job.m_Constants.GpuFluidSeedCellCount = plVec4U32(vCount.x, vCount.y, vCount.z, uiTotal);
-      job.m_Constants.GpuFluidSeedVelocity = plVec4(fill.m_vVelocity.x, fill.m_vVelocity.y, fill.m_vVelocity.z, plMath::Clamp(fill.m_fJitter, 0.0f, 1.0f));
-      job.m_Constants.GpuFluidSeedGrid = plVec4(m_fDx, 0, 0, 0);
-      job.m_Constants.GpuFluidSeedInfo = plVec4U32(0x9E3779B9u * (input.m_uiResetCounter + 1) + i * 0x85EBCA6Bu, uiCount, 0, 0);
-      uiTotal += uiCount;
+      // A partly filled top layer is a job of its own: fewer particles per cell, anywhere in its lower part.
+      const float fTop = plMath::Clamp(fill.m_fTopLayerFill, 0.0f, 1.0f);
+      const bool bPartialTop = fTop < 1.0f && vCount.z > 0;
+      for (plUInt32 uiPart = 0; uiPart < (bPartialTop ? 2u : 1u); ++uiPart)
+      {
+        const bool bTop = uiPart == 1;
+        const plVec3U32 vJobMin(vMin.x, vMin.y, bTop ? vMin.z + vCount.z - 1 : vMin.z);
+        const plVec3U32 vJobCount(vCount.x, vCount.y, bTop ? 1u : (bPartialTop ? vCount.z - 1 : vCount.z));
+        const plUInt32 uiJobPpc = bTop ? static_cast<plUInt32>(plMath::Round(fTop * static_cast<float>(uiPpc))) : uiPpc;
+
+        const plUInt64 uiWanted = plUInt64(vJobCount.x) * vJobCount.y * vJobCount.z * uiJobPpc;
+        const plUInt32 uiCount = static_cast<plUInt32>(plMath::Min<plUInt64>(uiWanted, m_uiCapacity - uiTotal));
+        if (uiCount < uiWanted)
+          plLog::Warning("GpuFluid: a fill box of a liquid volume wants {} particles, {} fit", uiWanted, uiCount);
+        if (uiCount == 0)
+          continue;
+
+        SeedJob& job = jobs.ExpandAndGetRef();
+        job.m_uiCount = uiCount;
+        job.m_Constants.GpuFluidSeedCellMin = plVec4U32(vJobMin.x, vJobMin.y, vJobMin.z, uiJobPpc);
+        job.m_Constants.GpuFluidSeedCellCount = plVec4U32(vJobCount.x, vJobCount.y, vJobCount.z, uiTotal);
+        job.m_Constants.GpuFluidSeedVelocity = plVec4(fill.m_vVelocity.x, fill.m_vVelocity.y, fill.m_vVelocity.z, plMath::Clamp(fill.m_fJitter, 0.0f, 1.0f));
+        // Seed mode (LiquidSeed): 1 stratified, 2 exactly n per cell anywhere in it (a stratified fill's partial top
+        // layer), 0 anywhere in the box.
+        const float fMode = fill.m_bStratified ? (bTop ? 2.0f : 1.0f) : 0.0f;
+        job.m_Constants.GpuFluidSeedGrid = plVec4(m_fDx, bTop ? fTop : 1.0f, fMode, 0.0f);
+        job.m_Constants.GpuFluidSeedInfo = plVec4U32(0x9E3779B9u * (input.m_uiResetCounter + 1) + (2 * i + uiPart) * 0x85EBCA6Bu, uiCount, 0, 0);
+        uiTotal += uiCount;
+      }
     }
 
     const plGALBufferHandle hPos = m_hPositions[0], hVel = m_hVelocities[0], hAff = m_hAffine[0], hArgs = m_hParticleArgs[0];
@@ -541,7 +647,9 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     const plUInt32 dst = 1 - src;
 
     plGpuFluidLiquidConstants c = base;
-    // Warm start: last substep's pressure, rescaled, since the stored value scales with dt.
+    // Warm start: last substep's phi = p * dt / (rho * dx), rescaled by the dt ratio. That keeps the pressure of the
+    // hydrostatic part, which dominates a pool; the density and volume corrections do not scale with dt and start off
+    // by the ratio, which the solve then takes out (N2 checks the residual it leaves).
     c.GpuFluidLiqSolve.w = m_fLastSubstepDt > 0.0f ? fSubDt / m_fLastSubstepDt : 0.0f;
     m_fLastSubstepDt = fSubDt;
 
@@ -637,12 +745,14 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       const plUInt32 uiPost = plMath::Clamp<plUInt32>(input.m_uiPostSmooth, 0, 16);
       const plUInt32 uiCoarsestSweeps = plMath::Clamp<plUInt32>(input.m_uiCoarsestSweeps, 1, 512);
       const float fCoarseScale = input.m_fCoarseScale;
+      const bool bPcg = input.m_bPcg && uiLevels > 1;
+      const plGALBufferHandle hPcgR = m_hPcgR, hPcgZ = m_hPcgZ, hPcgP = m_hPcgP, hPcgQ = m_hPcgQ, hPcgPartials = m_hPcgPartials, hPcgScalars = m_hPcgScalars;
 
       auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Solve");
       pass.ReadBuffer(G(hBrickArgs), indirect);
       for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hShapes})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
-      for (plGALBufferHandle h : {hCellType, hVelG, hVelS, hVelT, hValid0, hValid1, hPressure, hRhs, hCounters})
+      for (plGALBufferHandle h : {hCellType, hVelG, hVelS, hVelT, hValid0, hValid1, hPressure, hRhs, hCounters, hPcgR, hPcgZ, hPcgP, hPcgQ, hPcgPartials, hPcgScalars})
         pass.WriteBuffer(G(h));
       for (plUInt32 l = 1; l < uiLevels; ++l)
       {
@@ -676,17 +786,20 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             return lc;
           };
 
-          auto Smooth = [&](plUInt32 uiLevel, plUInt32 uiSweeps)
+          // Red-black sweeps; bReverse runs black before red (the post-smoothing, so a V-cycle is symmetric). On the
+          // fine level x and b are the given buffers: the pressure and rhs, or z and r of the MGPCG preconditioner.
+          auto Smooth = [&](plUInt32 uiLevel, plUInt32 uiSweeps, bool bReverse, plGALBufferHandle hFineX, plGALBufferHandle hFineB)
           {
             for (plUInt32 s = 0; s < uiSweeps; ++s)
             {
-              for (plUInt32 uiColour = 0; uiColour < 2; ++uiColour)
+              for (plUInt32 uiStep = 0; uiStep < 2; ++uiStep)
               {
+                const plUInt32 uiColour = bReverse ? 1 - uiStep : uiStep;
                 const plGpuFluidLiquidConstants lc = LevelConstants(uiLevel, uiColour, 1.0f);
                 if (uiLevel == 0)
                 {
                   rec.RunIndirect(pShaders->m_hSmoothBricks, lc, hBrickArgs,
-                    {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgB", levelB[0]), W("GpuFluidLiqMgType", levelType[0])});
+                    {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hFineX), W("GpuFluidLiqMgB", hFineB), W("GpuFluidLiqMgType", levelType[0])});
                 }
                 else
                 {
@@ -697,22 +810,22 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             }
           };
 
-          // V-cycles, the recursion unrolled: down with pre-smoothing and restriction, the coarsest solved in one
-          // group, up with prolongation and post-smoothing.
-          for (plUInt32 uiCycle = 0; uiCycle < uiCycles; ++uiCycle)
+          // One V-cycle on A x = b of the fine level, the recursion unrolled: down with pre-smoothing and
+          // restriction, the coarsest solved in one group, up with prolongation and post-smoothing.
+          auto VCycle = [&](plGALBufferHandle hFineX, plGALBufferHandle hFineB)
           {
             if (uiLevels == 1)
             {
-              Smooth(0, uiCoarsestSweeps);
-              continue;
+              Smooth(0, uiCoarsestSweeps, false, hFineX, hFineB);
+              return;
             }
 
             for (plUInt32 l = 0; l + 1 < uiLevels; ++l)
             {
-              Smooth(l, uiPre);
+              Smooth(l, uiPre, false, hFineX, hFineB);
               rec.Run(pShaders->m_hRestrict, LevelConstants(l + 1, 0, 1.0f), DenseGroups(levelDims[l + 1]),
-                {brickActive, W("GpuFluidLiqMgFineX", levelX[l]), W("GpuFluidLiqMgFineB", levelB[l]), W("GpuFluidLiqMgFineType", levelType[l]), W("GpuFluidLiqMgX", levelX[l + 1]),
-                  W("GpuFluidLiqMgB", levelB[l + 1]), W("GpuFluidLiqMgType", levelType[l + 1])});
+                {brickActive, W("GpuFluidLiqMgFineX", l == 0 ? hFineX : levelX[l]), W("GpuFluidLiqMgFineB", l == 0 ? hFineB : levelB[l]), W("GpuFluidLiqMgFineType", levelType[l]),
+                  W("GpuFluidLiqMgX", levelX[l + 1]), W("GpuFluidLiqMgB", levelB[l + 1]), W("GpuFluidLiqMgType", levelType[l + 1])});
             }
 
             const plUInt32 uiCoarsest = uiLevels - 1;
@@ -725,15 +838,63 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
               if (l == 0)
               {
                 rec.RunIndirect(pShaders->m_hProlongBricks, lc, hBrickArgs,
-                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqMgCoarseX", levelX[1])});
+                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hFineX), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqMgCoarseX", levelX[1])});
               }
               else
               {
                 rec.Run(pShaders->m_hProlongDense, lc, DenseGroups(levelDims[l]),
                   {brickActive, W("GpuFluidLiqMgX", levelX[l]), W("GpuFluidLiqMgType", levelType[l]), W("GpuFluidLiqMgCoarseX", levelX[l + 1])});
               }
-              Smooth(l, uiPost);
+              Smooth(l, uiPost, true, hFineX, hFineB);
             }
+          };
+
+          if (bPcg)
+          {
+            // MGPCG with the warm start as x0, one V-cycle (from zero) as the preconditioner; uiCycles V-cycles in
+            // all. The scalars never leave the GPU.
+            const Bind type = W("GpuFluidLiqMgType", hCellType);
+            const Bind scalars = W("GpuFluidLiqPcgScalars", hPcgScalars);
+            const Bind partials = W("GpuFluidLiqPcgPartials", hPcgPartials);
+            auto Reduce = [&](plUInt32 uiMode)
+            {
+              plGpuFluidLiquidConstants lc = c;
+              lc.GpuFluidLiqPass = plVec4U32(0, uiMode, 0, 0);
+              rec.Run(pShaders->m_hPcgReduce, lc, plVec3U32(1, 1, 1), {brickActive, partials, scalars});
+            };
+            auto DotRZ = [&](plUInt32 uiMode)
+            {
+              rec.RunIndirect(pShaders->m_hPcgDot, c, hBrickArgs, {brickArgs, brickList, brickActive, type, W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ), partials});
+              Reduce(uiMode);
+              rec.RunIndirect(pShaders->m_hPcgUpdateP, c, hBrickArgs, {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgP", hPcgP)});
+            };
+
+            rec.RunIndirect(pShaders->m_hPcgInit, c, hBrickArgs,
+              {brickArgs, brickList, brickActive, type, W("GpuFluidLiqMgX", hPressure), W("GpuFluidLiqMgB", hRhs), W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ),
+                W("GpuFluidLiqPcgP", hPcgP)});
+            VCycle(hPcgZ, hPcgR);
+            DotRZ(GPU_FLUID_LIQUID_PCG_REDUCE_START);
+
+            const plUInt32 uiIterations = plMath::Max(uiCycles, 1u);
+            for (plUInt32 uiIteration = 0; uiIteration < uiIterations; ++uiIteration)
+            {
+              rec.RunIndirect(pShaders->m_hPcgApply, c, hBrickArgs, {brickArgs, brickList, brickActive, type, W("GpuFluidLiqMgX", hPcgP), W("GpuFluidLiqPcgQ", hPcgQ), partials});
+              Reduce(GPU_FLUID_LIQUID_PCG_REDUCE_ALPHA);
+              rec.RunIndirect(pShaders->m_hPcgUpdateX, c, hBrickArgs,
+                {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqMgX", hPressure), W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgP", hPcgP),
+                  W("GpuFluidLiqPcgQ", hPcgQ)});
+
+              if (uiIteration + 1 < uiIterations)
+              {
+                VCycle(hPcgZ, hPcgR);
+                DotRZ(GPU_FLUID_LIQUID_PCG_REDUCE_BETA);
+              }
+            }
+          }
+          else
+          {
+            for (plUInt32 uiCycle = 0; uiCycle < uiCycles; ++uiCycle)
+              VCycle(levelX[0], levelB[0]);
           }
 
           rec.RunIndirect(pShaders->m_hResidual, LevelConstants(0, 0, 1.0f), hBrickArgs,
@@ -782,7 +943,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     const plGALBufferHandle hPos = m_hPositions[cur], hVel = m_hVelocities[cur], hArgs = m_hParticleArgs[cur];
 
     plGpuFluidLiquidConstants c = base;
-    c.GpuFluidLiqPass = plVec4U32(uiSubsteps, 0, 0, 0);
+    c.GpuFluidLiqPass = plVec4U32(uiSubsteps, static_cast<plUInt32>(plMath::Round(fSimDt * 1.0e6f)), 0, 0);
     c.GpuFluidLiqPassF = plVec4(input.m_vDomainOrigin.x, input.m_vDomainOrigin.y, input.m_vDomainOrigin.z, 0.0f);
 
     auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Render");

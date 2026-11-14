@@ -28,6 +28,7 @@ PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidFillBox, plNoBase, 1, plRTTIDefau
     PL_MEMBER_PROPERTY("HalfExtents", m_vHalfExtents)->AddAttributes(new plDefaultValueAttribute(plVec3(0.5f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" m")),
     PL_MEMBER_PROPERTY("Velocity", m_vVelocity)->AddAttributes(new plSuffixAttribute(" m/s")),
     PL_MEMBER_PROPERTY("Jitter", m_fJitter)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 1.0f)),
+    PL_MEMBER_PROPERTY("Stratified", m_bStratified)->AddAttributes(new plDefaultValueAttribute(true)),
   }
   PL_END_PROPERTIES;
 }
@@ -46,7 +47,7 @@ PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidObstacle, plNoBase, 1, plRTTIDefa
 }
 PL_END_STATIC_REFLECTED_TYPE
 
-PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 1, plComponentMode::Static)
+PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 2, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -60,7 +61,7 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 1, plComponentMode::Sta
     PL_ARRAY_MEMBER_PROPERTY("Obstacles", m_Obstacles),
     PL_MEMBER_PROPERTY("FlipBlend", m_fFlipBlend)->AddAttributes(new plGroupAttribute("Solver"), new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("MaxSubsteps", m_uiMaxSubsteps)->AddAttributes(new plDefaultValueAttribute(4), new plClampValueAttribute(1, 16)),
-    PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(3), new plClampValueAttribute(0, 32)),
+    PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(8), new plClampValueAttribute(0, 32)),
     PL_MEMBER_PROPERTY("WallFriction", m_fWallFriction)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("AlwaysSimulate", m_bAlwaysSimulate)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_MEMBER_PROPERTY("DebugPointRadius", m_fDebugPointRadius)->AddAttributes(new plGroupAttribute("Debug"), new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
@@ -105,6 +106,7 @@ void plGpuFluidLiquidVolumeComponent::SerializeComponent(plWorldWriter& inout_st
     s << box.m_vHalfExtents;
     s << box.m_vVelocity;
     s << box.m_fJitter;
+    s << box.m_bStratified;
   }
 
   s << m_Obstacles.GetCount();
@@ -128,6 +130,7 @@ void plGpuFluidLiquidVolumeComponent::SerializeComponent(plWorldWriter& inout_st
 void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_stream)
 {
   SUPER::DeserializeComponent(inout_stream);
+  const plUInt32 uiVersion = inout_stream.GetComponentTypeVersion(GetStaticRTTI());
   plStreamReader& s = inout_stream.GetStream();
 
   s >> m_vExtents;
@@ -146,6 +149,8 @@ void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_
     s >> box.m_vHalfExtents;
     s >> box.m_vVelocity;
     s >> box.m_fJitter;
+    if (uiVersion >= 2)
+      s >> box.m_bStratified;
   }
 
   s >> uiCount;
@@ -298,7 +303,9 @@ void plGpuFluidLiquidVolumeComponent::Update()
   input.m_fWallFriction = m_fWallFriction;
   input.m_uiOpenFaces = m_OpenFaces.GetValue();
 
-  // Fill boxes: the cells whose centre is inside.
+  // Fill boxes: across x and y the cells whose centre is inside. Up the z axis the cells from the first whose centre
+  // is inside to the box top, the last of them partly filled when the top lies inside a cell (so the surface does
+  // not snap to a cell face).
   for (const plGpuFluidLiquidFillBox& box : m_FillBoxes)
   {
     const plVec3 vMin = (box.m_vCenter - box.m_vHalfExtents + vHalf) / fDx;
@@ -307,7 +314,19 @@ void plGpuFluidLiquidVolumeComponent::Update()
     auto End = [](float f, plUInt32 n) { return static_cast<plUInt32>(plMath::Clamp(plMath::Floor(f - 0.5f) + 1.0f, 0.0f, static_cast<float>(n))); };
 
     const plVec3U32 vFirst(First(vMin.x, vCells.x), First(vMin.y, vCells.y), First(vMin.z, vCells.z));
-    const plVec3U32 vEnd(End(vMax.x, vCells.x), End(vMax.y, vCells.y), End(vMax.z, vCells.z));
+    plVec3U32 vEnd(End(vMax.x, vCells.x), End(vMax.y, vCells.y), 0);
+
+    // Height in cells above the first layer, rounded to 1/1000 of a cell against float noise.
+    const float fTop = plMath::Min(vMax.z, static_cast<float>(vCells.z));
+    const float fLayers = plMath::Round(plMath::Max(fTop - static_cast<float>(vFirst.z), 0.0f) * 1000.0f) / 1000.0f;
+    const float fFull = plMath::Floor(fLayers);
+    float fTopFill = fLayers - fFull;
+    vEnd.z = vFirst.z + static_cast<plUInt32>(fFull);
+    if (fTopFill >= 0.125f)
+      ++vEnd.z;
+    else
+      fTopFill = 1.0f;
+
     if (vEnd.x <= vFirst.x || vEnd.y <= vFirst.y || vEnd.z <= vFirst.z)
       continue;
 
@@ -316,6 +335,8 @@ void plGpuFluidLiquidVolumeComponent::Update()
     fill.m_vCellCount = vEnd - vFirst;
     fill.m_vVelocity = box.m_vVelocity;
     fill.m_fJitter = box.m_fJitter;
+    fill.m_bStratified = box.m_bStratified;
+    fill.m_fTopLayerFill = fTopFill;
   }
 
   for (const plGpuFluidLiquidObstacle& obstacle : m_Obstacles)
