@@ -1,0 +1,29 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// After the solve: max |b - A phi| over the liquid cells of the fine level, which is the divergence the projection
+// leaves (in m/s of net outflux, the units of the right-hand side).
+
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint3 dims = LiqCells();
+  if ((GpuFluidLiqMgType.Load(LiqCellIndexIn(cell, dims) * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
+    return;
+
+  const float r = MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, dims, true);
+  GpuFluidLiqCounters.InterlockedMax(GPU_FLUID_LIQUID_CTR_RESIDUAL_MAX * 4, asuint(abs(r)));
+}

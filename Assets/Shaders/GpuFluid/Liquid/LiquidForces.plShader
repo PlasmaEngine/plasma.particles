@@ -1,0 +1,46 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// Keeps u* (the transferred velocity, for the FLIP delta), then adds gravity. Faces on a wall or next to a solid cell
+// take the solid's velocity (static solids: zero).
+
+RWByteAddressBuffer GpuFluidLiqCellType;
+RWByteAddressBuffer GpuFluidLiqVel;
+RWByteAddressBuffer GpuFluidLiqVelStar;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const float3 dv = LiqGravity() * LiqDt();
+  const uint3 cells = LiqCells();
+
+  [unroll] for (uint s = 0; s < 6; ++s)
+  {
+    uint comp;
+    int3 face;
+    if (!LiqOwnedFace(cell, s, comp, face))
+      continue;
+
+    const uint address = LiqFaceAddress(comp, face);
+    const float u = asfloat(GpuFluidLiqVel.Load(address));
+    GpuFluidLiqVelStar.Store(address, asuint(u));
+
+    const int3 axis = LiqAxis(comp);
+    const bool bSolid = LiqIsWallFace(comp, face) || LiqTypeAt(GpuFluidLiqCellType, face - axis, cells, true) == GPU_FLUID_LIQUID_CELL_SOLID ||
+                        LiqTypeAt(GpuFluidLiqCellType, face, cells, true) == GPU_FLUID_LIQUID_CELL_SOLID;
+
+    const float g = comp == 0 ? dv.x : (comp == 1 ? dv.y : dv.z);
+    GpuFluidLiqVel.Store(address, asuint(bSolid ? 0.0 : u + g));
+  }
+}

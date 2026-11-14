@@ -1,0 +1,87 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#define GPU_FLUID_LIQUID_USE_SHAPES
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Cell types: solid when the centre is inside an analytic solid (the domain walls are faces, not cells), liquid when
+// the cell holds particles, air otherwise. Also the volume measure the global volume control compares with the
+// seeded volume: a liquid cell surrounded by liquid, solid or wall counts as full, a surface cell as min(n / n0, 1).
+
+RWByteAddressBuffer GpuFluidLiqCellType;
+ByteAddressBuffer GpuFluidLiqCellCount;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+groupshared uint gs_uiVolume;
+groupshared uint gs_uiLiquid;
+
+bool IsSolidCell(int3 c)
+{
+  return LiqShapeCount() > 0 && LiqShapeDistance((float3(c) + 0.5) * LiqDx()) < 0.0;
+}
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  if (groupIndex == 0)
+  {
+    gs_uiVolume = 0;
+    gs_uiLiquid = 0;
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  int3 cell;
+  const bool bCell = LiqBrickCell(groupId, groupThreadId, cell);
+
+  if (bCell)
+  {
+    const uint index = LiqCellIndex(cell);
+    const uint count = GpuFluidLiqCellCount.Load(index * 4);
+    const bool bSolid = IsSolidCell(cell);
+
+    uint type = GPU_FLUID_LIQUID_CELL_AIR;
+    if (bSolid)
+      type = GPU_FLUID_LIQUID_CELL_SOLID;
+    else if (count > 0)
+      type = GPU_FLUID_LIQUID_CELL_LIQUID;
+
+    GpuFluidLiqCellType.Store(index * 4, type);
+
+    if (type == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      bool bInterior = true;
+      [unroll] for (uint n = 0; n < 6; ++n)
+      {
+        const int3 offset = LiqAxis(n >> 1) * ((n & 1u) != 0 ? 1 : -1);
+        const int3 nb = cell + offset;
+        if (!LiqInside(nb))
+        {
+          // Outside the domain: a wall counts as solid, an open side as air.
+          const uint side = (1u << (n & 1u)) << ((n >> 1) * 2);
+          bInterior = bInterior && (LiqOpenMask() & side) == 0;
+        }
+        else
+        {
+          bInterior = bInterior && (GpuFluidLiqCellCount.Load(LiqCellIndex(nb) * 4) > 0 || IsSolidCell(nb));
+        }
+      }
+
+      const float fill = bInterior ? 1.0 : saturate(float(count) / LiqParticlesPerCell());
+      InterlockedAdd(gs_uiVolume, (uint)round(fill * GPU_FLUID_LIQUID_VOLUME_SCALE));
+      InterlockedAdd(gs_uiLiquid, 1u);
+    }
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0 && gs_uiLiquid > 0)
+  {
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_VOLUME * 4, gs_uiVolume);
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_LIQUID_CELLS * 4, gs_uiLiquid);
+  }
+}

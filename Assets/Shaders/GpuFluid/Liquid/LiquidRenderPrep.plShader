@@ -1,0 +1,98 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// End of a tick, per particle: the point the debug renderer draws (world position, speed), and the particle stats
+// (max and summed speed, how many still move, bounds, centroid, and the front histogram along +x of the particles
+// below the front height). The stats are reduced per group in groupshared memory first, so the device atomics are
+// one per group, not one per particle. GpuFluidLiqPassF.xyz: world position of the domain's minimum corner.
+
+ByteAddressBuffer GpuFluidLiqPositions;
+ByteAddressBuffer GpuFluidLiqVelocities;
+RWByteAddressBuffer GpuFluidLiqPoints;
+RWByteAddressBuffer GpuFluidLiqStats;
+
+groupshared uint gs_uiMaxSpeed;
+groupshared uint gs_uiSpeedSum;
+groupshared uint gs_uiAbove1cm;
+groupshared uint gs_uiAbove1mm;
+groupshared uint gs_uiMin[3];
+groupshared uint gs_uiMax[3];
+groupshared uint gs_uiCentroid[3];
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  if (groupIndex == 0)
+  {
+    gs_uiMaxSpeed = 0;
+    gs_uiSpeedSum = 0;
+    gs_uiAbove1cm = 0;
+    gs_uiAbove1mm = 0;
+    [unroll] for (uint i = 0; i < 3; ++i)
+    {
+      gs_uiMin[i] = 0xFFFFFFFFu;
+      gs_uiMax[i] = 0;
+      gs_uiCentroid[i] = 0;
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  uint index;
+  const bool bParticle = LiqParticleIndex(groupId, groupIndex, index);
+
+  if (bParticle)
+  {
+    const float3 x = asfloat(GpuFluidLiqPositions.Load3(index * GPU_FLUID_LIQUID_POSITION_BYTES));
+    const float3 v = asfloat(GpuFluidLiqVelocities.Load3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES));
+    const float speed = length(v);
+    const float3 origin = LIQ_CONST(GpuFluidLiqPassF).xyz;
+
+    GpuFluidLiqPoints.Store4(index * 16, asuint(float4(origin + x, speed)));
+
+    InterlockedMax(gs_uiMaxSpeed, asuint(speed));
+    InterlockedAdd(gs_uiSpeedSum, (uint)round(min(speed, GPU_FLUID_LIQUID_MAX_SPEED) * GPU_FLUID_LIQUID_SPEED_SUM_SCALE));
+    if (speed > 0.01)
+      InterlockedAdd(gs_uiAbove1cm, 1u);
+    if (speed > 0.001)
+      InterlockedAdd(gs_uiAbove1mm, 1u);
+
+    const int3 cell = LiqParticleCell(x);
+    [unroll] for (uint a = 0; a < 3; ++a)
+    {
+      InterlockedMin(gs_uiMin[a], (uint)cell[a]);
+      InterlockedMax(gs_uiMax[a], (uint)cell[a]);
+      InterlockedAdd(gs_uiCentroid[a], (uint)round(max(x[a], 0.0) * LiqInvDx() * 16.0));
+    }
+
+    const float4 wall = LIQ_CONST(GpuFluidLiqWall);
+    if (wall.w > 0.0 && x.z < wall.z)
+    {
+      const uint bin = (uint)floor(max(x.x, 0.0) / wall.w);
+      if (bin < GPU_FLUID_LIQUID_HIST_BINS)
+        GpuFluidLiqStats.InterlockedAdd((GPU_FLUID_LIQUID_STAT_HIST + bin) * 4, 1u);
+    }
+  }
+
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0 && gs_uiMin[0] != 0xFFFFFFFFu)
+  {
+    GpuFluidLiqStats.InterlockedMax(GPU_FLUID_LIQUID_STAT_MAX_SPEED * 4, gs_uiMaxSpeed);
+    GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_SPEED_SUM * 4, gs_uiSpeedSum);
+    GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_ABOVE_1CM * 4, gs_uiAbove1cm);
+    GpuFluidLiqStats.InterlockedAdd(GPU_FLUID_LIQUID_STAT_ABOVE_1MM * 4, gs_uiAbove1mm);
+    [unroll] for (uint a = 0; a < 3; ++a)
+    {
+      GpuFluidLiqStats.InterlockedMin((GPU_FLUID_LIQUID_STAT_BOUNDS_MIN + a) * 4, gs_uiMin[a]);
+      GpuFluidLiqStats.InterlockedMax((GPU_FLUID_LIQUID_STAT_BOUNDS_MAX + a) * 4, gs_uiMax[a]);
+      GpuFluidLiqStats.InterlockedAdd((GPU_FLUID_LIQUID_STAT_CENTROID + a) * 4, gs_uiCentroid[a]);
+    }
+  }
+}

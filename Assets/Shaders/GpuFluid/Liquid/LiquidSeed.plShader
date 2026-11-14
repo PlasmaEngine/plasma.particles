@@ -1,0 +1,69 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_SEED_KERNEL
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Seeds one fill box: n0 particles per cell, stratified (8 per cell: one per octant; 4 per cell: one in each octant
+// of even parity, a tetrahedral pattern), jittered inside their sub-cell by a hash of the cell and the slot, so a
+// seed is the same every run. Particle index = first + cell-in-box * n0 + slot.
+
+RWByteAddressBuffer GpuFluidLiqPositions;
+RWByteAddressBuffer GpuFluidLiqVelocities;
+RWByteAddressBuffer GpuFluidLiqAffine;
+
+#define SEED_CONST(Name) GET_PUSH_CONSTANT(plGpuFluidLiquidSeedConstants, Name)
+
+static const uint s_EvenOctants[4] = {0u, 3u, 5u, 6u};
+
+[numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint4 cellMin = SEED_CONST(GpuFluidSeedCellMin);
+  const uint4 cellCount = SEED_CONST(GpuFluidSeedCellCount);
+  const float4 velocityJitter = SEED_CONST(GpuFluidSeedVelocity);
+  const float dx = SEED_CONST(GpuFluidSeedGrid).x;
+  const uint4 info = SEED_CONST(GpuFluidSeedInfo);
+
+  const uint i = dispatchThreadId.x;
+  if (i >= info.y)
+    return;
+
+  const uint ppc = max(cellMin.w, 1u);
+  const uint cellInBox = i / ppc;
+  const uint slot = i % ppc;
+  const uint3 local = uint3(cellInBox % cellCount.x, (cellInBox / cellCount.x) % cellCount.y, cellInBox / (cellCount.x * cellCount.y));
+  const uint3 cell = cellMin.xyz + local;
+
+  const uint h = LiqHash(info.x ^ LiqHash(cell.x + 4096u * (cell.y + 4096u * cell.z)) ^ (slot * 0x27d4eb2du));
+  const float3 r = float3(LiqHashFloat(h), LiqHashFloat(h ^ 0x68e31da4u), LiqHashFloat(h ^ 0xb5297a4du)) - 0.5;
+  const float jitter = saturate(velocityJitter.w);
+
+  float3 inCell;
+  if (ppc == 8u || ppc == 4u)
+  {
+    const uint octant = ppc == 8u ? slot : s_EvenOctants[slot];
+    const float3 o = float3(octant & 1u, (octant >> 1) & 1u, (octant >> 2) & 1u);
+    inCell = o * 0.5 + 0.25 + r * 0.5 * jitter;
+  }
+  else
+  {
+    inCell = 0.5 + r * jitter;
+  }
+
+  const float3 position = (float3(cell) + clamp(inCell, 0.001, 0.999)) * dx;
+  const uint index = cellCount.w + i;
+
+  GpuFluidLiqPositions.Store3(index * GPU_FLUID_LIQUID_POSITION_BYTES, asuint(position));
+  GpuFluidLiqVelocities.Store3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES, asuint(velocityJitter.xyz));
+
+  uint4 words;
+  uint word4;
+  LiqPackAffine(float3(0, 0, 0), float3(0, 0, 0), float3(0, 0, 0), GPU_FLUID_LIQUID_FLAG_ALIVE, words, word4);
+  GpuFluidLiqAffine.Store4(index * GPU_FLUID_LIQUID_AFFINE_BYTES, words);
+  GpuFluidLiqAffine.Store(index * GPU_FLUID_LIQUID_AFFINE_BYTES + 16, word4);
+}

@@ -1,0 +1,88 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Right-hand side of the pressure solve. The unknown is phi = p * dt / (rho * dx) (m/s), so a face's projection is
+// u -= phi(i) - phi(i - 1) and the equation of a liquid cell is sum over its open faces of (phi_i - phi_nb) =
+// dx * D_target - F, with F the cell's net outflux (m/s) and D_target the divergence the solve aims for:
+// - local density correction k * clamp(n / n0 - 1, 0, 1) / dt: crowded cells push their particles apart;
+// - global volume control c * (V_target - V) / V_target / dt, V_target = (seeded - drained) / n0
+//   cells, V the measure of LiquidClassify. The relative error is clamped to +-25%.
+// Also rescales the warm start (phi scales with dt) and zeroes phi outside the liquid.
+
+ByteAddressBuffer GpuFluidLiqCellCount;
+RWByteAddressBuffer GpuFluidLiqCellType;
+RWByteAddressBuffer GpuFluidLiqVel;
+RWByteAddressBuffer GpuFluidLiqPressure;
+RWByteAddressBuffer GpuFluidLiqRhs;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint index = LiqCellIndex(cell);
+  if ((GpuFluidLiqCellType.Load(index * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
+  {
+    GpuFluidLiqPressure.Store(index * 4, 0u);
+    GpuFluidLiqRhs.Store(index * 4, 0u);
+    return;
+  }
+
+  float outflux = 0.0;
+  [unroll] for (uint comp = 0; comp < 3; ++comp)
+  {
+    const int3 axis = LiqAxis(comp);
+    outflux += asfloat(GpuFluidLiqVel.Load(LiqFaceAddress(comp, cell + axis))) - asfloat(GpuFluidLiqVel.Load(LiqFaceAddress(comp, cell)));
+  }
+
+  const float4 solve = LIQ_CONST(GpuFluidLiqSolve);
+  const float dt = max(LiqDt(), 1e-6);
+  const float n0 = LiqParticlesPerCell();
+
+  // Crowding is measured on the mean count of the 3x3x3 cells around (inside the domain): a single cell's count jumps
+  // by a whole particle whenever one crosses a face, and a one-sided correction of that noise would inflate the liquid.
+  float countSum = 0.0;
+  float cellsInside = 0.0;
+  for (int z = -1; z <= 1; ++z)
+  {
+    for (int y = -1; y <= 1; ++y)
+    {
+      for (int x = -1; x <= 1; ++x)
+      {
+        const int3 nb = cell + int3(x, y, z);
+        if (!LiqInside(nb))
+          continue;
+        countSum += float(GpuFluidLiqCellCount.Load(LiqCellIndex(nb) * 4));
+        cellsInside += 1.0;
+      }
+    }
+  }
+  const float n = countSum / max(cellsInside, 1.0);
+  const float excess = clamp(n / n0 - 1.0, 0.0, 1.0);
+  float target = solve.y * excess / dt;
+
+  const float seeded = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));
+  const float drained = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_DRAINED * 4));
+  const float targetVolume = (seeded - drained) / n0;
+  const float volume = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_VOLUME * 4)) / GPU_FLUID_LIQUID_VOLUME_SCALE;
+  if (targetVolume > 0.0)
+    target += solve.z * clamp((targetVolume - volume) / targetVolume, -0.25, 0.25) / dt;
+
+  const float rhs = LiqDx() * target - outflux;
+  GpuFluidLiqRhs.Store(index * 4, asuint(rhs));
+
+  const float warm = asfloat(GpuFluidLiqPressure.Load(index * 4)) * solve.w;
+  GpuFluidLiqPressure.Store(index * 4, asuint(LiqIsFinite3(float3(warm, 0, 0)) ? warm : 0.0));
+
+  GpuFluidLiqCounters.InterlockedMax(GPU_FLUID_LIQUID_CTR_RHS_MAX * 4, asuint(abs(rhs)));
+}

@@ -1,0 +1,30 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// Prolongation of the correction of level l + 1 onto coarse level l = GpuFluidLiqPass.x: piecewise constant, liquid
+// cells only.
+
+RWByteAddressBuffer GpuFluidLiqMgCoarseX;
+
+[numthreads(GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint level = MgLevel();
+  const uint3 dims = LiqLevelDims(level);
+  const int3 cell = int3(dispatchThreadId);
+  if (!LiqInsideDims(cell, dims))
+    return;
+
+  const uint index = LiqCellIndexIn(cell, dims);
+  if ((GpuFluidLiqMgType.Load(index * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
+    return;
+
+  const float correction = asfloat(GpuFluidLiqMgCoarseX.Load(LiqCellIndexIn(cell / 2, LiqLevelDims(level + 1)) * 4));
+  GpuFluidLiqMgX.Store(index * 4, asuint(asfloat(GpuFluidLiqMgX.Load(index * 4)) + correction));
+}

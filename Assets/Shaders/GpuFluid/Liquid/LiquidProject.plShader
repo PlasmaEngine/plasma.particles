@@ -1,0 +1,80 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
+
+// Projection: u -= phi(b) - phi(a) on every face next to a liquid cell, with the ghost value phi_liquid * (1 - 1/theta)
+// on the air side (the same ghost the multigrid stencil uses, so the projected divergence is its residual). Faces on
+// walls or next to solids take the solid velocity (zero). Faces with liquid on neither side become invalid, for the
+// extrapolation that follows.
+
+RWByteAddressBuffer GpuFluidLiqCellType;
+RWByteAddressBuffer GpuFluidLiqPressure;
+RWByteAddressBuffer GpuFluidLiqVel;
+RWByteAddressBuffer GpuFluidLiqValidOut;
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint3 cells = LiqCells();
+  uint lowValid = 0;
+
+  [unroll] for (uint s = 0; s < 6; ++s)
+  {
+    uint comp;
+    int3 face;
+    if (!LiqOwnedFace(cell, s, comp, face))
+      continue;
+
+    const uint address = LiqFaceAddress(comp, face);
+    const int3 a = face - LiqAxis(comp);
+    const int3 b = face;
+
+    // Outside the domain on an open side is air; walls are handled first.
+    uint ta = LiqTypeAt(GpuFluidLiqCellType, a, cells, true);
+    uint tb = LiqTypeAt(GpuFluidLiqCellType, b, cells, true);
+    ta = ta == GPU_FLUID_LIQUID_CELL_OUTSIDE ? GPU_FLUID_LIQUID_CELL_AIR : ta;
+    tb = tb == GPU_FLUID_LIQUID_CELL_OUTSIDE ? GPU_FLUID_LIQUID_CELL_AIR : tb;
+
+    bool bValid = true;
+    float u = 0.0;
+
+    if (LiqIsWallFace(comp, face) || ta == GPU_FLUID_LIQUID_CELL_SOLID || tb == GPU_FLUID_LIQUID_CELL_SOLID)
+    {
+      u = 0.0;
+    }
+    else if (ta == GPU_FLUID_LIQUID_CELL_LIQUID || tb == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      const float phiA = ta == GPU_FLUID_LIQUID_CELL_LIQUID ? asfloat(GpuFluidLiqPressure.Load(LiqCellIndex(a) * 4)) : 0.0;
+      const float phiB = tb == GPU_FLUID_LIQUID_CELL_LIQUID ? asfloat(GpuFluidLiqPressure.Load(LiqCellIndex(b) * 4)) : 0.0;
+      const float ghost = 1.0 - LiqInvTheta();
+      const float pa = ta == GPU_FLUID_LIQUID_CELL_LIQUID ? phiA : phiB * ghost;
+      const float pb = tb == GPU_FLUID_LIQUID_CELL_LIQUID ? phiB : phiA * ghost;
+      u = asfloat(GpuFluidLiqVel.Load(address)) - (pb - pa);
+    }
+    else
+    {
+      u = asfloat(GpuFluidLiqVel.Load(address));
+      bValid = false;
+    }
+
+    GpuFluidLiqVel.Store(address, asuint(u));
+
+    const uint bit = bValid ? (1u << comp) : 0u;
+    if (s < 3)
+      lowValid |= bit;
+    else
+      GpuFluidLiqValidOut.Store(LiqFaceIndex(face) * 4, bit);
+  }
+
+  GpuFluidLiqValidOut.Store(LiqFaceIndex(cell) * 4, lowValid);
+}

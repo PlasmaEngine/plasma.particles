@@ -1,0 +1,92 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+
+[RENDERSTATE]
+
+BlendingEnabled0 = false
+DepthTest = true
+DepthWrite = true
+CullMode = CullMode_None
+
+[VERTEXSHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Common/CameraConstantsAccess.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDebugConstants.h>
+
+// The liquid's particles as camera-facing sphere impostors, six vertices each, pulled from the points the solver
+// writes (float4: world position, speed). Drawn indirectly with the alive count.
+
+ByteAddressBuffer GpuFluidLiqPoints BIND_GROUP(BG_DRAW_CALL);
+
+struct VS_OUT
+{
+  float4 Position : SV_Position;
+  float3 CornerSpeed : TEXCOORD0;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint RenderTargetArrayIndex : SV_RenderTargetArrayIndex;
+#endif
+};
+
+static const float2 s_Corners[6] = {float2(-1, -1), float2(1, -1), float2(1, 1), float2(-1, -1), float2(1, 1), float2(-1, 1)};
+
+VS_OUT main(uint VertexID : SV_VertexID, uint InstanceID : SV_InstanceID)
+{
+  VS_OUT ret;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = InstanceID % 2;
+  ret.RenderTargetArrayIndex = InstanceID % 2;
+#endif
+
+  const uint particle = VertexID / 6;
+  const float2 corner = s_Corners[VertexID % 6];
+  const float4 data = asfloat(GpuFluidLiqPoints.Load4(particle * 16));
+  const float radius = GET_PUSH_CONSTANT(plGpuFluidLiquidDebugConstants, GpuFluidDebugParams).x;
+
+  const float3 world = data.xyz + (corner.x * GetCameraDirRight() + corner.y * GetCameraDirUp()) * radius;
+  ret.Position = mul(GetWorldToScreenMatrix(), float4(world, 1.0));
+  ret.CornerSpeed = float3(corner, data.w);
+  return ret;
+}
+
+[PIXELSHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDebugConstants.h>
+
+struct PS_IN
+{
+  float4 Position : SV_Position;
+  float3 CornerSpeed : TEXCOORD0;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint RenderTargetArrayIndex : SV_RenderTargetArrayIndex;
+#endif
+};
+
+float4 main(PS_IN Input) : SV_Target
+{
+  const float2 corner = Input.CornerSpeed.xy;
+  const float r2 = dot(corner, corner);
+  if (r2 > 1.0)
+    discard;
+
+  // Lit like a small sphere from the upper left, so the column reads as a volume and not as a flat cloud.
+  const float3 n = float3(corner.x, corner.y, sqrt(1.0 - r2));
+  const float diffuse = saturate(dot(n, normalize(float3(-0.45, 0.55, 0.7))));
+  const float shade = 0.3 + 0.7 * diffuse;
+
+  // Speed ramp: deep blue at rest, cyan, then white at the top speed.
+  const float t = saturate(Input.CornerSpeed.z / max(GET_PUSH_CONSTANT(plGpuFluidLiquidDebugConstants, GpuFluidDebugParams).y, 1e-3));
+  const float3 slow = float3(0.03, 0.16, 0.55);
+  const float3 mid = float3(0.05, 0.62, 0.95);
+  const float3 fast = float3(0.95, 0.98, 1.0);
+  const float3 colour = t < 0.5 ? lerp(slow, mid, t * 2.0) : lerp(mid, fast, t * 2.0 - 1.0);
+
+  return float4(colour * shade, 1.0);
+}

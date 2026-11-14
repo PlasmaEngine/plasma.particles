@@ -1,0 +1,51 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// End of a tick, one thread: the counters into the stats that are read back, the tick and substep totals, and the
+// draw arguments of the debug points (6 vertices per particle). GpuFluidLiqPass.x: substeps of this tick.
+
+RWByteAddressBuffer GpuFluidLiqCounters;
+RWByteAddressBuffer GpuFluidLiqStats;
+RWByteAddressBuffer GpuFluidLiqDrawArgs;
+
+[numthreads(1, 1, 1)]
+void main()
+{
+  const uint alive = GpuFluidLiqParticleArgs.Load(12);
+  const uint substeps = LIQ_CONST(GpuFluidLiqPass).x;
+
+  if (substeps > 0)
+  {
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_TICKS * 4, 1u);
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SUBSTEPS * 4, substeps);
+  }
+
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_ALIVE * 4, alive);
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SEEDED * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_DRAINED * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_DRAINED * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_LOST * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_LOST * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SUBSTEPS_TOTAL * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SUBSTEPS * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_TICKS * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_TICKS * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_ACTIVE_BRICKS * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_VOLUME * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_VOLUME * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_LIQUID_CELLS * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_LIQUID_CELLS * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_NAN * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_NAN * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_OVERFLOW * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_OVERFLOW * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_RHS_MAX * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_RHS_MAX * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_RESIDUAL_MAX * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_RESIDUAL_MAX * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_OCCUPIED * 4, GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_OCCUPIED * 4));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SUBSTEPS * 4, substeps);
+
+  const float4 wall = LIQ_CONST(GpuFluidLiqWall);
+  const uint bins = wall.w > 0.0 ? min((uint)ceil(float(LiqCells().x) * LiqDx() / wall.w), (uint)GPU_FLUID_LIQUID_HIST_BINS) : 0u;
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_HIST_COUNT * 4, bins);
+
+  GpuFluidLiqDrawArgs.Store4(0, uint4(alive * 6, 1, 0, 0));
+}

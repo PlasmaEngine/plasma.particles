@@ -1,0 +1,26 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// After the fill boxes of a reset: set A holds GpuFluidLiqPass.x particles. Writes its dispatch arguments and adds
+// the count to the seeded counter.
+
+RWByteAddressBuffer GpuFluidLiqArgsOutput;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(1, 1, 1)]
+void main()
+{
+  const uint count = LIQ_CONST(GpuFluidLiqPass).x;
+  const uint groups = (count + GPU_FLUID_LIQUID_PARTICLE_GROUP - 1) / GPU_FLUID_LIQUID_PARTICLE_GROUP;
+  const uint groupsX = min(groups, (uint)GPU_FLUID_SCAN_MAX_GROUPS_X);
+  const uint groupsY = groupsX > 0 ? (groups + groupsX - 1) / groupsX : 1u;
+
+  GpuFluidLiqArgsOutput.Store4(0, uint4(groupsX, max(groupsY, 1u), 1u, count));
+  GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SEEDED * 4, count);
+}
