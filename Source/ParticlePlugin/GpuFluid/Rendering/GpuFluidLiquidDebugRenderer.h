@@ -16,7 +16,7 @@ class PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidDebugRenderData final : public plRen
 
 public:
   plGALBufferHandle m_hPoints;   ///< float4 per particle: world position, speed
-  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}
+  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}, then {6 * alive, 2, 0, 0} for stereo
   plUInt32 m_uiMaxParticles = 0;
   float m_fRadius = 0.01f;
   float m_fTopSpeed = 3.0f; ///< speed shown at the top of the colour ramp

@@ -12,7 +12,7 @@ ALL
 // mean of the particle positions around x weighted by k(d / R) = max(1 - d^2 / R^2, 0)^3. A gather over the 3x3x3
 // cells around the cell, which holds every particle within R <= 1.5 cells of its centre. The weights and weighted
 // offsets are summed in int32 (2^16 per unit), so phi does not depend on particle order. Cells with no particle within
-// R get the far value.
+// R get the far value. Closed domain walls reflect the particles next to them (a mirror image in the layer beyond).
 //
 // Used every substep for the liquid cells and the free surface's theta (LiquidClassify), and once per frame for the
 // surface (Liquid/Surface).
@@ -42,14 +42,39 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   int weight = 0;
   int3 offset = int3(0, 0, 0);
 
+  // Closed domain walls mirror the particles: a cell in the layer beyond a wall holds the reflections of the particles
+  // of the cell inside. Without them the mean position next to a wall is pulled away from it, phi there is too high,
+  // and an empty cell in the bottom corner of a pool reads as air, which the pressure then drives a jet into.
+  const int3 cells = int3(LiqCells());
+  const uint open = LiqOpenMask();
+
   for (int z = -1; z <= 1; ++z)
   {
     for (int y = -1; y <= 1; ++y)
     {
       for (int x = -1; x <= 1; ++x)
       {
-        const int3 nb = cell + int3(x, y, z);
-        if (!LiqInside(nb))
+        int3 nb = cell + int3(x, y, z);
+        float3 mirrorScale = float3(1, 1, 1);
+        float3 mirrorOffset = float3(0, 0, 0);
+        bool bSkip = false;
+        [unroll] for (uint a = 0; a < 3; ++a)
+        {
+          if (nb[a] < 0)
+          {
+            bSkip = bSkip || (open & (1u << (a * 2))) != 0;
+            nb[a] = -1 - nb[a];
+            mirrorScale[a] = -1.0;
+          }
+          else if (nb[a] >= cells[a])
+          {
+            bSkip = bSkip || (open & (2u << (a * 2))) != 0;
+            nb[a] = 2 * cells[a] - 1 - nb[a];
+            mirrorScale[a] = -1.0;
+            mirrorOffset[a] = 2.0 * float(cells[a]);
+          }
+        }
+        if (bSkip || !LiqInside(nb))
           continue;
 
         const uint nbIndex = LiqCellIndex(nb);
@@ -57,7 +82,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
         const uint start = GpuFluidLiqCellStart.Load(nbIndex * 4);
         for (uint k = 0; k < count; ++k)
         {
-          const float3 d = asfloat(GpuFluidLiqPositions.Load3((start + k) * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx - centre;
+          const float3 g = asfloat(GpuFluidLiqPositions.Load3((start + k) * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx;
+          const float3 d = g * mirrorScale + mirrorOffset - centre;
           const float s = dot(d, d) * invRadiusSq;
           if (s >= 1.0)
             continue;

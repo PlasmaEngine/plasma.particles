@@ -225,7 +225,7 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
 
   m_hRank = Make(uiParticles * 4, "GpuFluid Liquid Rank");
   m_hPoints = Make(uiParticles * 16, "GpuFluid Liquid Points");
-  m_hDrawArgs = Make(16, "GpuFluid Liquid Draw Args", true);
+  m_hDrawArgs = Make(GPU_FLUID_LIQUID_DRAW_ARGS_BYTES, "GpuFluid Liquid Draw Args", true);
 
   m_hCellCount = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid Cell Count");
   m_hCellStart = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid Cell Start");
@@ -276,7 +276,7 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
   m_hSurfaceQuads = Make(plUInt64(m_uiMaxSurfaceQuads) * GPU_FLUID_LIQUID_SURFACE_QUAD_BYTES, "GpuFluid Liquid Surface Quads");
   m_hSurfaceCubeMap = Make(plUInt64(m_uiFaceCount) * 4, "GpuFluid Liquid Surface Cube Map"); // (n + 1)^3 cubes, as many as padded faces
   m_hSurfaceCounters = Make(GPU_FLUID_LIQUID_SURFACE_CTR_WORDS * 4, "GpuFluid Liquid Surface Counters");
-  m_hSurfaceDrawArgs = Make(16, "GpuFluid Liquid Surface Draw Args", true);
+  m_hSurfaceDrawArgs = Make(GPU_FLUID_LIQUID_DRAW_ARGS_BYTES, "GpuFluid Liquid Surface Draw Args", true);
   m_uiSurfaceTag = 2; // the stamps start at 0: tag - 1 of the first extraction never matches
   m_uiSurfaceCurrent = 0;
   m_bHasSurface = false;
@@ -586,6 +586,11 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   base.GpuFluidLiqGravity = plVec4(input.m_vGravity.x, input.m_vGravity.y, input.m_vGravity.z, static_cast<float>(plMath::Max(1u, m_Settings.m_uiParticlesPerCell)));
   base.GpuFluidLiqSolve = plVec4(1.0f / plMath::Clamp(input.m_fTheta, 0.05f, 1.0f), input.m_fDensityGain, input.m_fVolumeGain, 1.0f);
   base.GpuFluidLiqWall = plVec4(plMath::Clamp(input.m_fWallMargin, 0.0f, 0.45f), plMath::Clamp(input.m_fWallFriction, 0.0f, 1.0f), input.m_fFrontHeight, input.m_fFrontBinSize);
+  // "= {}" does not zero the pl vector members (their default constructors leave Release builds uninitialised), and
+  // kernels read the pass words they are not given: LiquidClear skips the per-substep counters when x is 1, so a
+  // stale 1 on the stack let the volume measure add up over several substeps and the volume control crush the pool.
+  base.GpuFluidLiqPass = plVec4U32(0, 0, 0, 0);
+  base.GpuFluidLiqPassF = plVec4(0.0f, 0.0f, 0.0f, 0.0f);
 
   const plGpuFluidLiquidShaders* pShaders = &shaders;
 
@@ -798,6 +803,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   const bool bLevelSetTheta = input.m_bLevelSetTheta;
   const bool bLevelSetOnly = input.m_bLevelSetOnly;
   const float fThetaMin = plMath::Clamp(input.m_fThetaMin, 1.0f / 30.0f, 1.0f);
+  const float fSprayPhi = plMath::Max(input.m_fSprayPhi, 0.0f);
   const float fDensityDeadZone = plMath::Max(input.m_fDensityDeadZone, 0.0f);
   const plGALBufferHandle hPhiRaw = m_hPhiRaw;
   const plGALBufferHandle hPhiTmp = m_hPhiTmp;
@@ -916,7 +922,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
           const Bind brickActive = R("GpuFluidLiqBrickActive", hBrickActive);
 
           plGpuFluidLiquidConstants classifyConstants = c;
-          classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, bLevelSetTheta ? 1.0f : 0.0f, bLevelSetOnly ? 1.0f : 0.0f, 0.0f);
+          classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, bLevelSetTheta ? 1.0f : 0.0f, bLevelSetOnly ? 1.0f : 0.0f, fSprayPhi);
           rec.RunIndirect(pShaders->m_hClassify, classifyConstants, hBrickArgs,
             {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqPhi", hPhiRaw), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqCellType", hCellType),
               W("GpuFluidLiqCounters", hCounters)});
@@ -1072,7 +1078,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     {
       auto pass = ref_graph.AddComputePass("GpuFluid Liquid/G2P");
       pass.ReadBuffer(G(hArgs), indirect);
-      for (plGALBufferHandle h : {hVelT, hVelS, hShapes})
+      for (plGALBufferHandle h : {hVelT, hVelS, hShapes, hCellType})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
       for (plGALBufferHandle h : {hPos, hVel, hAff, hCounters})
         pass.WriteBuffer(G(h));
@@ -1081,7 +1087,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
         {
           Recorder rec(ctx);
           rec.RunIndirect(pShaders->m_hG2P, c, hArgs,
-            {R("GpuFluidLiqParticleArgs", hArgs), R("GpuFluidLiqVelNew", hVelT), R("GpuFluidLiqVelOld", hVelS), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqPositions", hPos),
+            {R("GpuFluidLiqParticleArgs", hArgs), R("GpuFluidLiqVelNew", hVelT), R("GpuFluidLiqVelOld", hVelS), R("GpuFluidLiqShapes", hShapes), R("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqPositions", hPos),
               W("GpuFluidLiqVelocities", hVel), W("GpuFluidLiqAffine", hAff), W("GpuFluidLiqCounters", hCounters)});
         });
     }

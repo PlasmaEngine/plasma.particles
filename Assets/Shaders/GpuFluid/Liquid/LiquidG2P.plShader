@@ -17,6 +17,7 @@ ALL
 
 ByteAddressBuffer GpuFluidLiqVelNew;
 ByteAddressBuffer GpuFluidLiqVelOld;
+ByteAddressBuffer GpuFluidLiqCellType;
 RWByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqVelocities;
 RWByteAddressBuffer GpuFluidLiqAffine;
@@ -79,6 +80,15 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   float3 cy = gradV * invDx;
   float3 cz = gradW * invDx;
 
+  // A particle in an air cell (outside the level set's surface: spray, a stray above a resting surface) has no pressure
+  // holding it up, and the grid velocity there is extrapolated from the liquid, without gravity: it flies ballistic.
+  const bool bBallistic = (GpuFluidLiqCellType.Load(LiqCellIndex(LiqParticleCell(x)) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_AIR;
+  if (bBallistic)
+  {
+    v = vOld + LiqGravity() * dt;
+    cx = cy = cz = float3(0, 0, 0);
+  }
+
   uint clamped = 0;
   const float speed = length(v);
   if (speed > GPU_FLUID_LIQUID_MAX_SPEED)
@@ -89,7 +99,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   // RK2 (midpoint) through the projected grid velocity.
   const float3 gMid = g + 0.5 * dt * uNew * invDx;
-  float3 xNew = x + dt * SampleVelocity(GpuFluidLiqVelNew, gMid);
+  float3 xNew = x + dt * (bBallistic ? v : SampleVelocity(GpuFluidLiqVelNew, gMid));
 
   const float4 wall = LIQ_CONST(GpuFluidLiqWall);
   const float margin = wall.x * dx;

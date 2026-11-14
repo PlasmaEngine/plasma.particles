@@ -8,7 +8,8 @@ ALL
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // One thread. GpuFluidLiqPass.x = 0: zero the surface counters before the vertices and quads are written.
-// GpuFluidLiqPass.x = 1: the draw arguments of the surface, {6 * quads, 1, 0, 0} with the quads capped at the
+// GpuFluidLiqPass.x = 1: the draw arguments of the surface, {6 * quads, 1, 0, 0} (and {6 * quads, 2, 0, 0} for stereo
+// at byte 16) with the quads capped at the
 // capacity (GpuFluidLiqPass.y), and the counts into the stats that are read back.
 
 RWByteAddressBuffer GpuFluidLiqSurfCounters;
@@ -31,7 +32,10 @@ void main()
   const uint quads = min(GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_QUADS * 4), quadCapacity);
   const uint overflow = GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_VERTEX_OVERFLOW * 4) + GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_QUAD_OVERFLOW * 4);
 
+  // Two records: mono at byte 0, stereo at byte 16. The engine doubles the instance count of direct draws only, and the
+  // vertex shader picks the eye with SV_InstanceID % 2, so a stereo view draws the second record.
   GpuFluidLiqSurfDrawArgs.Store4(0, uint4(quads * 6, 1, 0, 0));
+  GpuFluidLiqSurfDrawArgs.Store4(16, uint4(quads * 6, 2, 0, 0));
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES * 4, vertices);
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_QUADS * 4, quads);
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW * 4, overflow);

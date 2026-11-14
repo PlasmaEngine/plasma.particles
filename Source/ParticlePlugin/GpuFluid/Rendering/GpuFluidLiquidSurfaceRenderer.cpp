@@ -5,6 +5,8 @@
 #include <RendererCore/Pipeline/RenderDataBatch.h>
 #include <RendererCore/Pipeline/SortingFunctions.h>
 #include <RendererCore/RenderContext/RenderContext.h>
+#include <Core/Graphics/Camera.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidConstants.h>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDrawConstants.h>
 
 // clang-format off
@@ -59,8 +61,10 @@ void plGpuFluidLiquidSurfaceRenderer::RenderBatch(const plRenderViewContext& ren
     bindGroup.BindBuffer("GpuFluidLiqSurfQuads", pRenderData->m_hQuads);
 
     // Six vertices per quad; the indirect arguments carry the quad count, the primitive count only sizes the null mesh.
+    // A stereo view takes the record with two instances (the vertex shader picks the eye with SV_InstanceID % 2).
+    const bool bStereo = renderViewContext.m_pCamera != nullptr && renderViewContext.m_pCamera->IsStereoscopic();
     pContext->BindNullMeshBuffer(plGALPrimitiveTopology::Triangles, pRenderData->m_uiMaxQuads * 2);
-    pContext->DrawMeshBufferIndirect(pRenderData->m_hDrawArgs, 0).IgnoreResult();
+    pContext->DrawMeshBufferIndirect(pRenderData->m_hDrawArgs, bStereo ? GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET : 0).IgnoreResult();
   }
 }
 

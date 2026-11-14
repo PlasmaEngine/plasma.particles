@@ -106,6 +106,10 @@ struct plGpuFluidLiquidFrameInput
   float m_fParticleRadius = 0.28f;
   bool m_bLevelSetTheta = true;      ///< theta from the level set; false: m_fTheta with the level-set liquid cells
   bool m_bLevelSetOnly = false;      ///< liquid cells are phi < 0 alone, not also every cell holding particles
+  /// A cell holding particles is liquid only while phi at its centre is below this (cells). Loose particles further out
+  /// than that (a resting surface's strays, spray) sit in air cells and move with the extrapolated velocity, instead of
+  /// being one-cell bumps whose pressure pushes sideways into the air next to them.
+  float m_fSprayPhi = 1.0e3f;
   float m_fThetaMin = 0.25f;         ///< smallest theta from the level set
   /// Clamped Laplacian steps on the substep's level set before it classifies (pairs; 0: none). They take the particles'
   /// noise out of theta, which otherwise keeps a resting surface jittering.
@@ -178,7 +182,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
 struct plGpuFluidLiquidPublish
 {
   plGALBufferHandle m_hPoints;   ///< float4 per particle: world position, speed
-  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}
+  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}, then {6 * alive, 2, 0, 0} for stereo
   plUInt32 m_uiMaxParticles = 0;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
   plVec3 m_vDomainSize = plVec3::MakeZero();

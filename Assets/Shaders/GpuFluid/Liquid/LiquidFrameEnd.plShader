@@ -50,5 +50,7 @@ void main()
   const uint bins = wall.w > 0.0 ? min((uint)ceil(float(LiqCells().x) * LiqDx() / wall.w), (uint)GPU_FLUID_LIQUID_HIST_BINS) : 0u;
   GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_HIST_COUNT * 4, bins);
 
+  // Mono at byte 0, stereo (two instances, the eye is SV_InstanceID % 2) at byte 16: indirect draws are not doubled.
   GpuFluidLiqDrawArgs.Store4(0, uint4(alive * 6, 1, 0, 0));
+  GpuFluidLiqDrawArgs.Store4(16, uint4(alive * 6, 2, 0, 0));
 }

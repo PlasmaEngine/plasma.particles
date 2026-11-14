@@ -39,6 +39,7 @@ BlendingEnabled0 = false
 #include <Shaders/Common/Common.h>
 #include <Shaders/Common/GlobalConstants.h>
 #include <Shaders/Common/CameraConstantsAccess.h>
+#define GPU_FLUID_LIQUID_DRAW_SHADER // the buffer layouts only: this shader's push constants are the draw constants
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidConstants.h>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDrawConstants.h>
 

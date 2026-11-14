@@ -51,7 +51,9 @@ bool IsLiquidCell(int3 c, uint count, float phi)
     return count > 0;
   if (LIQ_CONST(GpuFluidLiqPassF).z > 0.0)
     return phi < 0.0;
-  return count > 0 || phi < 0.0;
+  // GpuFluidLiqPassF.w: a cell with particles counts only while its centre lies less than this (cells) outside the
+  // surface; strays further out are in air and take the extrapolated velocity.
+  return (count > 0 && phi < LIQ_CONST(GpuFluidLiqPassF).w) || phi < 0.0;
 }
 
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
@@ -88,7 +90,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
     uint word = type;
 
-    if (type == GPU_FLUID_LIQUID_CELL_LIQUID)
+    // The volume measure keeps its own liquid cells, every cell holding particles plus the empty ones inside the level
+    // set, whatever the pressure's cells are. With phi < 0 alone for the pressure (GpuFluidLiqPassF.z > 0) the
+    // measure's surface cells would be the noisy band the level set's radius adds above the particles, and the control
+    // would hold a pool that a splash had loosened at that looser packing.
+    const bool bMeasureLiquid = !bSolid && (count > 0 || (bLevelSet && phi < 0.0));
+    const bool bLiquid = type == GPU_FLUID_LIQUID_CELL_LIQUID;
+
+    if (bLiquid || bMeasureLiquid)
     {
       bool bInterior = true;
       [unroll] for (uint n = 0; n < 6; ++n)
@@ -106,7 +115,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
           const float nbPhi = bLevelSet ? PhiAt(nb) : 0.0;
           const bool bNbSolid = IsSolidCell(nb);
           const bool bNbLiquid = !bNbSolid && IsLiquidCell(nb, nbCount, nbPhi);
-          bInterior = bInterior && (bNbLiquid || bNbSolid);
+          const bool bNbMeasureLiquid = !bNbSolid && (nbCount > 0 || (bLevelSet && nbPhi < 0.0));
+          bInterior = bInterior && (bNbMeasureLiquid || bNbSolid);
 
           if (bLevelSetTheta && !bNbSolid && !bNbLiquid)
           {
@@ -116,17 +126,17 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
             code = clamp((uint)round(t * GPU_FLUID_LIQUID_THETA_STEPS), 1u, (uint)GPU_FLUID_LIQUID_THETA_STEPS);
           }
         }
-        word |= code << (GPU_FLUID_LIQUID_THETA_SHIFT + GPU_FLUID_LIQUID_THETA_BITS * n);
+        if (bLiquid)
+          word |= code << (GPU_FLUID_LIQUID_THETA_SHIFT + GPU_FLUID_LIQUID_THETA_BITS * n);
       }
 
-      const float fill = bInterior ? 1.0 : saturate(float(count) / LiqParticlesPerCell());
-      InterlockedAdd(gs_uiVolume, (uint)round(fill * GPU_FLUID_LIQUID_VOLUME_SCALE));
-      InterlockedAdd(gs_uiLiquid, 1u);
-    }
-    else if (type == GPU_FLUID_LIQUID_CELL_AIR && count > 0)
-    {
-      // Particles outside the level set's surface still hold their share of the volume.
-      InterlockedAdd(gs_uiVolume, (uint)round(saturate(float(count) / LiqParticlesPerCell()) * GPU_FLUID_LIQUID_VOLUME_SCALE));
+      if (bMeasureLiquid)
+      {
+        const float fill = bInterior ? 1.0 : saturate(float(count) / LiqParticlesPerCell());
+        InterlockedAdd(gs_uiVolume, (uint)round(fill * GPU_FLUID_LIQUID_VOLUME_SCALE));
+      }
+      if (bLiquid)
+        InterlockedAdd(gs_uiLiquid, 1u);
     }
 
     GpuFluidLiqCellType.Store(index * 4, word);

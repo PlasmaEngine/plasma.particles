@@ -94,6 +94,12 @@
 // Indirect dispatch arguments: {groupsX, groupsY, 1, count} (plGpuFluidScan's args writer).
 #define GPU_FLUID_LIQUID_ARGS_BYTES 16
 
+// Indirect draw arguments (debug points, surface): two records, {vertices, 1, 0, 0} for a mono view at byte 0 and
+// {vertices, 2, 0, 0} for a stereo view at byte GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET (the eye is SV_InstanceID % 2;
+// the engine doubles the instance count of direct draws only).
+#define GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET 16
+#define GPU_FLUID_LIQUID_DRAW_ARGS_BYTES 32
+
 // Counters: persistent and per-substep words the kernels share on the GPU (never read back directly).
 #define GPU_FLUID_LIQUID_CTR_SEEDED 0         // particles seeded so far
 #define GPU_FLUID_LIQUID_CTR_DRAINED 1        // particles that left through an open face (or a drain, later)
@@ -161,7 +167,9 @@
 
 // A shader has one push-constant block (one root-constant register on D3D12, one push-constant block on Vulkan): the
 // seeding kernel defines GPU_FLUID_LIQUID_SEED_KERNEL and gets the seed block, every other liquid kernel the main one.
-#if !PL_ENABLED(PLATFORM_SHADER) || !defined(GPU_FLUID_LIQUID_SEED_KERNEL)
+// A draw shader that has its own block and only needs the layouts here defines GPU_FLUID_LIQUID_DRAW_SHADER and gets
+// neither (Vulkan rejects a second push-constant block even when it is unused).
+#if !PL_ENABLED(PLATFORM_SHADER) || (!defined(GPU_FLUID_LIQUID_SEED_KERNEL) && !defined(GPU_FLUID_LIQUID_DRAW_SHADER))
 
 /// Per dispatch data of every liquid kernel. Push constants, because render-graph passes are recorded before they
 /// execute and a shared constant buffer would be last-write-wins.
