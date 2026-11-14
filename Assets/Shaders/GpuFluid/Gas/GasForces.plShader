@@ -16,9 +16,9 @@ ALL
 // clamp that keeps the march's majorant true, and a NaN guard.
 //
 // Velocity, interior faces, in place: buoyancy (alpha (T - T_amb) - beta rho) along the direction against gravity, with T
-// and rho averaged onto the face from the two cells it separates (the -side cell comes from the apron), velocity
-// dissipation, the speed clamp, and no flow through closed domain faces on the -side (the +side faces are apron
-// texels, which GasHalo sets).
+// and rho averaged onto the face from the two cells it separates (the -side cell comes from the apron), vorticity
+// confinement from the curl GasCurl left in Scratch, velocity dissipation, the speed clamp, and no flow through closed
+// domain faces on the -side (the +side faces are apron texels, which GasHalo sets). GasSolids runs next.
 //
 // Both guards count before they sanitise: every interior texel whose scalars, and every cell whose new face velocities,
 // came out NaN or infinite adds one to GPU_FLUID_STAT_NAN (GasAdvect passes a NaN on instead of dropping it), and every
@@ -27,12 +27,59 @@ ALL
 // Params: 0 up direction xyz (unit), alpha (m/s^2 per unit temperature)
 //         1 beta (m/s^2 per unit density), ambient temperature, cooling (1/s), density dissipation (1/s)
 //         2 density clamp, velocity dissipation (1/s), fuel dissipation (1/s), edge fade width (voxels, 0 = off)
-//         3 x edge fade rate at the face (1/s)
+//         3 x edge fade rate at the face (1/s), y vorticity confinement epsilon (0: off; Scratch then holds the curl),
+//           z confinement rate (1/s)
 
 Texture3D<float4> GpuFluidScalarIn;         // advected scalars, apron filled
 RWTexture3D<float4> GpuFluidScalarOut;      // the current side, all 10 cubed texels
 RWTexture3D<float4> GpuFluidVelocityTarget; // the next velocity side, interior faces in place
+Texture3D<float4> GpuFluidCurl;             // the curl (GasCurl, apron filled) when vorticity is on
 RWByteAddressBuffer GpuFluidStats;
+
+/// The vorticity confinement acceleration on this texel's three -side faces (m/s^2): eps dx k (N x w), with N the unit
+/// gradient of |w| and w the curl, both at the face, and k (1/s, Params3.z) the rate that turns Fedkiw's eps dx (N x w)
+/// into an acceleration independent of the tick. Every value lies in the stored brick: the face's two cells and their
+/// neighbours across the other axes.
+float3 Confinement(int3 texel, float epsilon, float dx, float rate)
+{
+  if (epsilon <= 0.0)
+    return float3(0.0, 0.0, 0.0);
+
+  float3 result = float3(0.0, 0.0, 0.0);
+  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  {
+    int3 belowTexel = texel;
+    belowTexel[axis] -= 1;
+    const float4 here = GpuFluidCurl.Load(int4(texel, 0));
+    const float4 below = GpuFluidCurl.Load(int4(belowTexel, 0));
+
+    float3 gradient;
+    [unroll] for (uint g = 0; g < 3; ++g)
+    {
+      if (g == axis)
+      {
+        gradient[g] = here.w - below.w;
+      }
+      else
+      {
+        int3 e = int3(0, 0, 0);
+        e[g] = 1;
+        gradient[g] = 0.25 * (GpuFluidCurl.Load(int4(texel + e, 0)).w - GpuFluidCurl.Load(int4(texel - e, 0)).w + GpuFluidCurl.Load(int4(belowTexel + e, 0)).w -
+                               GpuFluidCurl.Load(int4(belowTexel - e, 0)).w);
+      }
+    }
+
+    const float length2 = dot(gradient, gradient);
+    if (length2 < 1e-12)
+      continue;
+
+    const float3 n = gradient * rsqrt(length2);
+    const float3 w = 0.5 * (here.xyz + below.xyz);
+    result[axis] = cross(n, w)[axis];
+  }
+
+  return epsilon * dx * rate * result;
+}
 
 groupshared uint gs_uiNaN;
 groupshared uint gs_uiSpeedClamped;
@@ -133,7 +180,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       p0.w * (faceZ.y - ambientTemperature) - p1.x * faceZ.x);
 
     float4 velocity = GpuFluidVelocityTarget[texel];
-    velocity.xyz = (velocity.xyz + dt * lift * p0.xyz) * exp(-p2.y * dt);
+    // Confinement only where there is gas (full from density 0.25 on the face): it restores the curls numerical
+    // diffusion takes from the smoke, and must not stir up noise in clear air, where nothing would show it.
+    const float3 gas = saturate(4.0 * float3(faceX.x, faceY.x, faceZ.x));
+    velocity.xyz = (velocity.xyz + dt * (lift * p0.xyz + gas * Confinement(texel, p3.y, step.y, p3.z))) * exp(-p2.y * dt);
     velocity.w = 0.0;
 
     // Before the clamp, which would turn a NaN into a bound.

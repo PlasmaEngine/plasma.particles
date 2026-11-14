@@ -8,7 +8,8 @@
 #   P        this package (default: two folders up from this script)
 #   CONFIG   build configuration whose binaries run (default Development)
 #   TIMEOUT  seconds before the run is killed (default 1500)
-#   PL_GPUFLUID_VIDEO=1  also records the video frames (Handoff Sphere Video, Smoke Column Video)
+#   PL_GPUFLUID_VIDEO=1  also records the video frames (Handoff Sphere Video, Smoke Column Video, Corridor Smoke Video,
+#                        Smoke Around Obstacles Video)
 #   PL_GPUFLUID_TUNE_<NAME>=<value>  overrides a look value of the smoke scenes (see Tune() in GpuFluidGalleryTest.cpp)
 #
 # Changed shaders are not picked up from cached permutations, so the gas part of the GpuFluid shader cache is deleted
@@ -60,6 +61,6 @@ DYLD_LIBRARY_PATH="$BIN:$P/Bin/Mac_x64_$CONFIG" PL_SILENT_ASSERTS=1 \
 STATUS=$?
 END=$(date +%s)
 
-grep -E "N0 |Video end|Smoke |Gas safety|Tier |Sub-Test .* (succeeded|failed)|Tests? (passed|failed)|All tests passed|Error:" "$OUT/console.log" | tail -40
+grep -E "N0 |N2 |N3 |N4 |N9 |lost to the solids|Video end|Smoke |Gas safety|Corridor video|Obstacles video|Tier |Sub-Test .* (succeeded|failed)|Tests? (passed|failed)|All tests passed|Error:" "$OUT/console.log" | tail -60
 echo "exit $STATUS after $((END - START)) s; log: $OUT/console.log"
 exit $STATUS

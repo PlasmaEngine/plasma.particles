@@ -10,6 +10,7 @@
 #include <Foundation/Types/TagRegistry.h>
 #include <Foundation/Utilities/ConversionUtils.h>
 #include <Foundation/Utilities/Stats.h>
+#include <GameEngine/Effects/Wind/SimpleWindWorldModule.h>
 #include <GameEngine/GameState/GameState.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
 #include <ParticlesTest/GpuFluid/GpuFluidGalleryTest.h>
@@ -230,6 +231,7 @@ void plGpuFluidGalleryApplication::Init_FileSystem_ConfigureDataDirs()
 void plGpuFluidGalleryApplication::BeforeHighLevelSystemsShutdown()
 {
   m_hBoxMesh.Invalidate();
+  m_hSphereMesh.Invalidate();
   m_hBakedSphere.Invalidate();
   plGameEngineTestApplication::BeforeHighLevelSystemsShutdown();
 }
@@ -295,6 +297,10 @@ void plGpuFluidGalleryApplication::SetupStage(plUInt32 uiSeed, const plVec3& vTo
   m_pWorld->GetRandomNumberGenerator().Initialize(uiSeed);
   m_pWorld->GetClock().Reset(false);
 
+  // World modules outlive Clear(): a scene with wind (Gas Wind) must not blow on the next one.
+  if (plSimpleWindWorldModule* pWind = m_pWorld->GetModule<plSimpleWindWorldModule>())
+    pWind->SetFallbackWind(plVec3::MakeZero());
+
   // The camera's default lens is wide open, which blurs everything but the focus point.
   SetCVarBool(s_szDepthOfFieldCVar, false);
 
@@ -345,6 +351,8 @@ plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene()
   pGas->m_vExtents = s_vSmokeExtents;
   pGas->m_fVoxelSize = s_fSmokeVoxel;
   pGas->m_uiMaxBricks = 1536;
+  pGas->m_bAllocateAll = true; // the P1 scenes and their numbers are for the whole box
+
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default; // open but the floor
 
@@ -698,6 +706,15 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
   AddSubTest("Smoke Column", SubTests::SmokeColumn);
   AddSubTest("Smoke Column Video", SubTests::SmokeColumnVideo);
   AddSubTest("Gas Safety", SubTests::GasSafety);
+  AddSubTest("N2 Divergence", SubTests::N2Divergence);
+  AddSubTest("N3 Poisson", SubTests::N3Poisson);
+  AddSubTest("N4 Gas Mass", SubTests::N4GasMass);
+  AddSubTest("N4 Gas Mass Velocity SL", SubTests::N4GasMassVelocitySL);
+  AddSubTest("N9 Colliders", SubTests::N9Colliders);
+  AddSubTest("N9 Moving Collider", SubTests::N9MovingCollider);
+  AddSubTest("Corridor Smoke Video", SubTests::CorridorSmokeVideo);
+  AddSubTest("Smoke Around Obstacles Video", SubTests::ObstaclesVideo);
+  AddSubTest("Gas Wind", SubTests::GasWind);
 }
 
 plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -764,9 +781,10 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
       }
       return PL_SUCCESS;
     }
-  }
 
-  return PL_FAILURE;
+    default:
+      return InitializeP3SubTest(iIdentifier);
+  }
 }
 
 plResult plGameEngineTestGpuFluidGallery::DeInitializeSubTest(plInt32 iIdentifier)
@@ -853,6 +871,24 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
       return RunSmokeColumn(true);
     case SubTests::GasSafety:
       return RunGasSafety();
+    case SubTests::N2Divergence:
+      return RunN2Divergence();
+    case SubTests::N3Poisson:
+      return RunN3Poisson();
+    case SubTests::N4GasMass:
+      return RunN4GasMass(true);
+    case SubTests::N4GasMassVelocitySL:
+      return RunN4GasMass(false);
+    case SubTests::N9Colliders:
+      return RunN9Colliders();
+    case SubTests::CorridorSmokeVideo:
+      return RunCorridorSmokeVideo();
+    case SubTests::ObstaclesVideo:
+      return RunObstaclesVideo(true);
+    case SubTests::N9MovingCollider:
+      return RunObstaclesVideo(false);
+    case SubTests::GasWind:
+      return RunGasWind();
   }
 
   return plTestAppRun::Quit;
@@ -1203,6 +1239,13 @@ void plGameEngineTestGpuFluidGallery::CollectGasSample()
   sample.m_uiSpeedClamped = stats.m_uiSpeedClamped;
   sample.m_uiContentBricks = stats.m_uiAllocatedBricks;
   sample.m_uiActiveBricks = stats.m_uiActiveBricks;
+  sample.m_fCentroidX = stats.m_vCentroid.x * pGas->GetGridExtents().x;
+  sample.m_fCentroidY = stats.m_vCentroid.y * pGas->GetGridExtents().y;
+  sample.m_uiSolidCells = stats.m_uiSolidCells;
+  sample.m_fSolidContact = stats.m_fSolidContactDensity;
+  sample.m_fSolidDensity = stats.m_fSolidDensity;
+  sample.m_fSolidCleared = stats.m_fSolidCleared;
+  sample.m_fEmitted = stats.m_fEmitted;
 }
 
 plTestAppRun plGameEngineTestGpuFluidGallery::RunSmokeColumn(bool bVideo)
@@ -1387,12 +1430,12 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
 
 void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
 {
-  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped\n");
+  plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped,emitted,solid_cleared\n");
   for (const GasSample& s : samples)
   {
     sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
     sCsv.AppendFormat("{},{},{},{},{},{},{},", s.m_fDivBefore, s.m_fDivAfter, s.m_fMeanDivBefore, s.m_fMeanDivAfter, s.m_uiNaN, s.m_uiContentBricks, s.m_uiActiveBricks);
-    sCsv.AppendFormat("{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped);
+    sCsv.AppendFormat("{},{},{},{}\n", s.m_uiOverflow, s.m_uiSpeedClamped, s.m_fEmitted, s.m_fSolidCleared);
   }
 
   plFileWriter csv;

@@ -8,97 +8,169 @@ ALL
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
-// Fills the apron of every active brick of one atlas from its neighbours' interiors, through the neighbour table.
-// One 8 cubed group per active brick, indirect; the 488 apron texels are spread over its 512 threads.
+// Fills the apron of every active brick of one atlas, or of two in one launch, from its neighbours' interiors, through
+// the neighbour table. One 8 cubed group per active brick, indirect; the 488 apron texels are spread over its 512
+// threads.
 //
 // An apron texel at global cell g reads the cell g clamped into the domain, from whichever brick holds it. Where g lies
 // beyond a domain face, the face's rule is applied on top of that zero-gradient copy:
 // - scalars (GPU_FLUID_HALO_SCALAR): 0 beyond an open face (gas leaves), the copy at a closed one (no flux);
-// - velocity (GPU_FLUID_HALO_VELOCITY): the copy beyond an open face; at a closed face the normal component is 0 (the
-//   wall face and the one behind it), the tangential ones keep the copy (free slip);
+// - velocity (GPU_FLUID_HALO_VELOCITY): the copy beyond an open face, or the ambient wind (Params0.xyz) where the wind
+//   blows in through it; at a closed face the normal component is 0 (the wall face and the one behind it), the
+//   tangential ones keep the copy (free slip);
+// - any field (GPU_FLUID_HALO_COPY, the curl): the copy beyond every face;
 // - velocity after the projection (GPU_FLUID_HALO_VELOCITY_KEEP): the velocity rules again, now from the projected
 //   faces, except for the normal component of a texel beyond a +side face. That component is the domain face itself
 //   (g = N on that axis), which GasProject projected and wrote into the apron of the brick holding cell N-1: it is
 //   kept in that brick's own apron texel and read from there into every other apron that holds it (the edge and corner
 //   texels of the neighbours along the face, zero gradient across the other beyond axes). Texels against a brick
 //   without a slot keep what GasProject wrote.
-// A brick without a slot (open air inside the domain, P2) reads 0 scalars and the ambient velocity.
+// A brick without a slot (open air inside the domain) reads 0 scalars and the ambient wind.
+//
+// Pass: x the mode of GpuFluidHaloTarget, y the mode of GpuFluidHaloTarget2 + 1 (0: one target only), w bit 0: over the
+// bricks assigned this frame (the new list) instead of every active brick, after GasClear, so a new brick's apron holds
+// its neighbours' faces before the first tick reads it.
 //
 // Interiors are only read, aprons only written, and every brick writes its own apron. The one exception is the keep
 // mode's read of a +side face's normal component from a neighbour's apron texel: the neighbour rewrites that texel in
 // the same dispatch, but always with that component unchanged, so the read sees the same value either way.
 
 RWTexture3D<float4> GpuFluidHaloTarget;
+RWTexture3D<float4> GpuFluidHaloTarget2;
+
+groupshared uint gs_uiNeighbors[GPU_FLUID_NEIGHBOR_COUNT];
+
+/// Stored coordinate (0..9) of apron texel i (0..487): the z faces (2 x 100), then the y faces between them (2 x 80),
+/// then the x faces between those (2 x 64).
+int3 ApronTexel(uint i)
+{
+  if (i < 200)
+  {
+    const uint j = i % 100;
+    return int3(j % 10, j / 10, i < 100 ? 0 : 9);
+  }
+  if (i < 360)
+  {
+    const uint k = i - 200;
+    const uint j = k % 80;
+    return int3(j % 10, k < 80 ? 0 : 9, 1 + j / 10);
+  }
+  const uint k = i - 360;
+  const uint j = k % 64;
+  return int3(k < 64 ? 0 : 9, 1 + j % 8, 1 + j / 8);
+}
+
+/// Where an apron texel reads from.
+struct HaloSource
+{
+  uint m_uiSlot;    ///< slot of the source cell, or GPU_FLUID_NEIGHBOR_UNALLOCATED / _OUTSIDE
+  int3 m_iLocal;    ///< local cell of the source in its brick
+  int3 m_iCell;     ///< global cell of the apron texel (may lie beyond the domain)
+  bool3 m_bBeyond;  ///< per axis, whether it does
+};
+
+/// The apron texel's value in one target under one mode's rules; false when the texel keeps what it holds.
+bool HaloValue(RWTexture3D<float4> target, uint mode, HaloSource source, float4 ambient, out float4 out_value)
+{
+  const bool bVelocity = mode == GPU_FLUID_HALO_VELOCITY || mode == GPU_FLUID_HALO_VELOCITY_KEEP;
+
+  // Open air: no gas, the ambient wind.
+  float4 value = bVelocity ? ambient : float4(0.0, 0.0, 0.0, 0.0);
+  out_value = value;
+  if (source.m_uiSlot < GPU_FLUID_NEIGHBOR_OUTSIDE)
+  {
+    value = target[GpuFluidTexel(source.m_uiSlot, source.m_iLocal)];
+  }
+  else if (mode == GPU_FLUID_HALO_VELOCITY_KEEP)
+  {
+    return false; // the projection wrote this face against open air
+  }
+
+  if (any(source.m_bBeyond))
+  {
+    [unroll] for (uint axis = 0; axis < 3; ++axis)
+    {
+      if (!source.m_bBeyond[axis])
+        continue;
+
+      const int side = source.m_iCell[axis] < 0 ? -1 : 1;
+      const bool bOpen = GpuFluidFaceOpen(axis, side);
+
+      if (mode == GPU_FLUID_HALO_SCALAR)
+      {
+        if (bOpen)
+          value = float4(0.0, 0.0, 0.0, 0.0);
+        continue;
+      }
+
+      if (mode == GPU_FLUID_HALO_COPY)
+        continue;
+
+      if (!bOpen)
+      {
+        value[axis] = 0.0;
+        continue;
+      }
+
+      // An open face the wind blows in through: the ambient velocity beyond it.
+      const bool bInflow = side < 0 ? ambient[axis] > 0.0 : ambient[axis] < 0.0;
+      if (bInflow)
+        value.xyz = ambient.xyz;
+
+      if (mode == GPU_FLUID_HALO_VELOCITY_KEEP && side > 0)
+      {
+        // The projected domain face: the +1 texel of the source cell on this axis, an apron texel of the source brick.
+        int3 faceLocal = source.m_iLocal;
+        faceLocal[axis] += 1;
+        value[axis] = target[GpuFluidTexel(source.m_uiSlot, faceLocal)][axis];
+      }
+    }
+  }
+
+  out_value = value;
+  return true;
+}
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
-  const uint slot = GpuFluidGroupSlot(groupId);
+  const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
+
+  const uint slot = (pass.w & 1u) != 0 ? GpuFluidNewGroupSlot(groupId) : GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
 
-  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const float4 ambient = float4(GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).xyz, 0.0);
   const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
   const int3 gridVoxels = int3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
   const int3 base = GpuFluidSlotBase(slot);
 
-  for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
-  {
-    const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
-    const int3 local = stored - GPU_FLUID_BRICK_APRON;
+  // The brick's neighbours once for the group.
+  if (groupIndex < GPU_FLUID_NEIGHBOR_COUNT)
+    gs_uiNeighbors[groupIndex] = GpuFluidNeighbors[slot * GPU_FLUID_NEIGHBOR_COUNT + groupIndex];
+  GroupMemoryBarrierWithGroupSync();
 
-    if (all(local >= 0) && all(local < GPU_FLUID_BRICK_SIZE))
-      continue; // interior
+  // One thread per apron texel (488 of the 512).
+  if (groupIndex >= GPU_FLUID_BRICK_TEXELS - GPU_FLUID_BRICK_CELLS)
+    return;
 
-    const int3 cell = brick * GPU_FLUID_BRICK_SIZE + local;
-    const int3 clampedCell = clamp(cell, 0, gridVoxels - 1);
-    const bool3 beyond = cell != clampedCell;
-    const bool bBeyond = any(beyond);
+  const int3 stored = ApronTexel(groupIndex);
+  const int3 local = stored - GPU_FLUID_BRICK_APRON;
 
-    const int3 sourceBrick = clampedCell / GPU_FLUID_BRICK_SIZE;
-    const int3 d = sourceBrick - brick;
-    const uint sourceSlot = all(d == 0) ? slot : GpuFluidNeighbor(slot, d);
-    const int3 sourceLocal = clampedCell - sourceBrick * GPU_FLUID_BRICK_SIZE;
+  HaloSource source;
+  source.m_iCell = brick * GPU_FLUID_BRICK_SIZE + local;
+  const int3 clampedCell = clamp(source.m_iCell, 0, gridVoxels - 1);
+  source.m_bBeyond = source.m_iCell != clampedCell;
 
-    float4 value = float4(0.0, 0.0, 0.0, 0.0); // open air: no gas, ambient velocity (zero until P3 adds wind)
-    if (sourceSlot < GPU_FLUID_NEIGHBOR_OUTSIDE)
-    {
-      value = GpuFluidHaloTarget[GpuFluidTexel(sourceSlot, sourceLocal)];
-    }
-    else if (mode == GPU_FLUID_HALO_VELOCITY_KEEP)
-    {
-      continue; // the projection wrote this face against open air
-    }
+  const int3 sourceBrick = clampedCell / GPU_FLUID_BRICK_SIZE;
+  const int3 d = sourceBrick - brick;
+  source.m_uiSlot = all(d == 0) ? slot : gs_uiNeighbors[GpuFluidNeighborIndex(d)];
+  source.m_iLocal = clampedCell - sourceBrick * GPU_FLUID_BRICK_SIZE;
 
-    if (bBeyond)
-    {
-      [unroll] for (uint axis = 0; axis < 3; ++axis)
-      {
-        if (!beyond[axis])
-          continue;
-
-        const int side = cell[axis] < 0 ? -1 : 1;
-        const bool bOpen = GpuFluidFaceOpen(axis, side);
-
-        if (mode == GPU_FLUID_HALO_SCALAR)
-        {
-          if (bOpen)
-            value = float4(0.0, 0.0, 0.0, 0.0);
-        }
-        else if (!bOpen)
-        {
-          value[axis] = 0.0;
-        }
-        else if (mode == GPU_FLUID_HALO_VELOCITY_KEEP && side > 0)
-        {
-          // The projected domain face: the +1 texel of the source cell on this axis, an apron texel of the source brick.
-          int3 faceLocal = sourceLocal;
-          faceLocal[axis] += 1;
-          value[axis] = GpuFluidHaloTarget[GpuFluidTexel(sourceSlot, faceLocal)][axis];
-        }
-      }
-    }
-
+  float4 value;
+  if (HaloValue(GpuFluidHaloTarget, pass.x, source, ambient, value))
     GpuFluidHaloTarget[base + stored] = value;
-  }
+
+  if (pass.y != 0 && HaloValue(GpuFluidHaloTarget2, pass.y - 1, source, ambient, value))
+    GpuFluidHaloTarget2[base + stored] = value;
 }

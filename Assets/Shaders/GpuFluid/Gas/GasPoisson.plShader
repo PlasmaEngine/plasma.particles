@@ -1,0 +1,132 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidPressure.hlsli>
+
+// Test hook (N3 Poisson): a manufactured problem for the pressure solvers on a fully allocated box with every face open,
+// so the discrete solution is known exactly. One 8 cubed group per active brick (indirect).
+//
+// Phi* = sum of three modes prod_axis sin(pi k (i + 1) / (N + 1)), which vanish at the Dirichlet ghost cells i = -1 and
+// i = N, and are eigenvectors of the discrete operator: A Phi* = sum of lambda_mode Phi*_mode with
+// lambda = sum_axis (2 cos(pi k / (N + 1)) - 2). So b = A Phi* exactly, and the solvers' iterates can be measured against
+// both the residual and the error.
+//
+// Modes (GpuFluidGasPass.x, GPU_FLUID_POISSON_*):
+// - SETUP: div = b / dx^2 (the solvers take b = dx^2 div), Phi = 0 on both sides (a cold start).
+// - RESIDUAL: max |b - A Phi| over the fluid cells into stats word Params0.x (asuint).
+// - ERROR: max |Phi - Phi*| into stats word Params0.x.
+
+RWStructuredBuffer<float> GpuFluidPressure;
+RWStructuredBuffer<float> GpuFluidPressure1;
+RWStructuredBuffer<float> GpuFluidDivergence;
+RWStructuredBuffer<uint> GpuFluidFaceCodes; // only read here
+RWByteAddressBuffer GpuFluidStats;
+
+groupshared uint gs_uiMax;
+
+static const float3 s_Modes[3] = {float3(1.0, 1.0, 1.0), float3(3.0, 2.0, 5.0), float3(11.0, 7.0, 13.0)};
+static const float s_Amplitudes[3] = {1.0, 0.5, 0.2};
+
+/// Phi* and b = A Phi* (unscaled, the fine level's b) at global cell g of a grid of n cells per axis.
+void Manufactured(int3 g, float3 n, out float out_phi, out float out_b)
+{
+  out_phi = 0.0;
+  out_b = 0.0;
+  [unroll] for (uint m = 0; m < 3; ++m)
+  {
+    const float3 k = s_Modes[m];
+    const float3 arg = 3.14159265358979 * k * (float3(g) + 1.0) / (n + 1.0);
+    const float value = s_Amplitudes[m] * sin(arg.x) * sin(arg.y) * sin(arg.z);
+    const float3 lambda3 = 2.0 * cos(3.14159265358979 * k / (n + 1.0)) - 2.0;
+    out_phi += value;
+    out_b += (lambda3.x + lambda3.y + lambda3.z) * value;
+  }
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const float dx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).y;
+  const uint word = uint(GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).x);
+
+  const int3 local = int3(groupThreadId);
+  const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
+  const int3 g = brick * GPU_FLUID_BRICK_SIZE + local;
+  const float3 n = float3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
+  const uint index = slot * GPU_FLUID_BRICK_CELLS + groupIndex;
+
+  float phiStar, b;
+  Manufactured(g, n, phiStar, b);
+
+  if (mode == GPU_FLUID_POISSON_SETUP)
+  {
+    GpuFluidDivergence[index] = b / (dx * dx);
+    GpuFluidPressure[index] = 0.0;
+    GpuFluidPressure1[index] = 0.0;
+    return;
+  }
+
+  if (groupIndex == 0)
+    gs_uiMax = 0;
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint codes = GpuFluidFaceCodes[index];
+  const float phi = GpuFluidPressure[index];
+  float value = 0.0;
+  if (!GpuFluidCodeIsSolid(codes))
+  {
+    if (mode == GPU_FLUID_POISSON_ERROR)
+    {
+      value = abs(phi - phiStar);
+    }
+    else
+    {
+      float sum = 0.0;
+      float diag = 0.0;
+      [unroll] for (uint face = 0; face < 6; ++face)
+      {
+        const uint code = GpuFluidFaceCode(codes, face);
+        if (code == GPU_FLUID_CODE_FLUID)
+        {
+          sum += GpuFluidNeighborPhi(GpuFluidPressure, slot, local, face / 2, (face & 1u) != 0 ? 1 : -1);
+          diag += 1.0;
+        }
+        else if (code == GPU_FLUID_CODE_DIRICHLET)
+        {
+          diag += 1.0;
+        }
+      }
+      // The solvers' b, from the divergence buffer, so the residual is exactly what they reduce.
+      value = abs(dx * dx * GpuFluidDivergence[index] - (sum - diag * phi));
+    }
+  }
+
+  if (GpuFluidIsNonFinite(value))
+    value = 3.0e38; // a diverged solve must not read as converged
+  InterlockedMax(gs_uiMax, asuint(value));
+
+  // Diagnostics (Params0.y > 0): the same maximum by where the cell is, into words Params0.y + 0: inside its brick,
+  // + 1: on a brick face inside the domain, + 2: on the domain's boundary.
+  const uint categoryWord = uint(GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).y);
+  if (categoryWord > 0)
+  {
+    const bool bDomain = any(g == 0) || any(g == int3(n) - 1);
+    const bool bBrickFace = any(local == 0) || any(local == GPU_FLUID_BRICK_SIZE - 1);
+    const uint category = bDomain ? 2u : (bBrickFace ? 1u : 0u);
+    GpuFluidStats.InterlockedMax((categoryWord + category) * 4, asuint(value));
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  if (groupIndex == 0)
+    GpuFluidStats.InterlockedMax(word * 4, gs_uiMax);
+}

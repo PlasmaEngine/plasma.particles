@@ -29,7 +29,7 @@ protected:
 
 private:
   void SetCVarForSubTest(const char* szName, const plVariant& value);
-  void WriteResults(plGpuFluidQuality::Enum quality);
+  void WriteResults(plInt32 iIdentifier);
 
   plGpuFluidGalleryApplication* m_pOwnApplication = nullptr;
   plInt32 m_iFrame = -1;

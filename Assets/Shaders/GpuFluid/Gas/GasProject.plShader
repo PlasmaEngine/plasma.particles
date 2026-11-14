@@ -11,13 +11,32 @@ ALL
 // Phase Gas/Pressure, last kernel: u -= grad Phi on every face, in place. One 8 cubed group per active brick (indirect),
 // one thread per cell, which owns the cell's three -side faces (its own texel).
 //
-// A face against a closed wall carries no flow. A face against open air (an open domain face or an unallocated brick)
-// sees Phi = 0 on the far side. Where the +side neighbour of a brick's last cell is missing, that boundary face lives in
-// the brick's apron; the cell's thread projects it there too, and GasHalo's keep mode leaves it alone afterwards. No two
-// threads write the same texel: the -side faces are interior texels, the +side faces distinct apron texels.
+// By the face's code (GpuFluidPressure.hlsli): FLUID faces get the difference of the two cells' Phi, DIRICHLET faces
+// see Phi = 0 on the far side, WALL faces carry no flow, SOLID faces keep the solid's velocity GasSolids gave them.
+// Where the +side neighbour of a brick's last cell is missing, that boundary face lives in the brick's apron; the
+// cell's thread projects it there too, and GasHalo's keep mode leaves it alone afterwards. No two threads write the
+// same texel: the -side faces are interior texels, the +side faces distinct apron texels.
 
 RWTexture3D<float4> GpuFluidVelocityTarget;
-RWStructuredBuffer<float> GpuFluidPressure; // only read here, but shares the helper with the solver
+RWStructuredBuffer<float> GpuFluidPressure;   // only read here
+RWStructuredBuffer<uint> GpuFluidFaceCodes;   // only read here
+
+groupshared uint gs_uiFaceNeighbors[6]; // face f = axis * 2 + (side > 0)
+
+/// Phi across a FLUID face of cell `local`, the face neighbours looked up once for the group.
+float NeighborPhi(uint slot, int3 local, uint axis, int side)
+{
+  int3 other = local;
+  other[axis] += side;
+  if (other[axis] >= 0 && other[axis] < GPU_FLUID_BRICK_SIZE)
+    return GpuFluidPressure[slot * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
+
+  const uint neighbor = gs_uiFaceNeighbors[axis * 2 + (side > 0 ? 1 : 0)];
+  if (neighbor >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+    return 0.0; // not a FLUID face
+  other[axis] -= side * GPU_FLUID_BRICK_SIZE;
+  return GpuFluidPressure[neighbor * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
+}
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -26,36 +45,47 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
 
+  if (groupIndex < 6)
+  {
+    int3 d = int3(0, 0, 0);
+    d[groupIndex / 2] = (groupIndex & 1u) != 0 ? 1 : -1;
+    gs_uiFaceNeighbors[groupIndex] = GpuFluidNeighbor(slot, d);
+  }
+  GroupMemoryBarrierWithGroupSync();
+
   const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
   const int3 local = int3(groupThreadId);
   const int3 texel = GpuFluidTexel(slot, local);
-  const float phi = GpuFluidPressure[slot * GPU_FLUID_BRICK_CELLS + groupIndex];
+  const uint index = slot * GPU_FLUID_BRICK_CELLS + groupIndex;
+  const uint codes = GpuFluidFaceCodes[index];
+  const float phi = GpuFluidPressure[index];
 
   float4 velocity = GpuFluidVelocityTarget[texel];
 
   [unroll] for (uint axis = 0; axis < 3; ++axis)
   {
     // -side face: between this cell and the one below it on this axis.
-    float phiBelow;
-    if (GpuFluidNeighborPressure(GpuFluidPressure, slot, local, axis, -1, phiBelow))
-      velocity[axis] -= (phi - phiBelow) * invDx;
-    else
-      velocity[axis] = 0.0; // closed wall
+    const uint below = GpuFluidFaceCode(codes, axis * 2);
+    if (below == GPU_FLUID_CODE_FLUID)
+      velocity[axis] -= (phi - NeighborPhi(slot, local, axis, -1)) * invDx;
+    else if (below == GPU_FLUID_CODE_DIRICHLET)
+      velocity[axis] -= phi * invDx;
+    else if (below == GPU_FLUID_CODE_WALL)
+      velocity[axis] = 0.0;
 
     // +side face of the brick's last cell, against a missing neighbour: the apron texel.
     if (local[axis] == GPU_FLUID_BRICK_SIZE - 1)
     {
-      int3 d = int3(0, 0, 0);
-      d[axis] = 1;
-      const uint neighbor = GpuFluidNeighbor(slot, d);
-      if (neighbor >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+      if (gs_uiFaceNeighbors[axis * 2 + 1] >= GPU_FLUID_NEIGHBOR_OUTSIDE)
       {
-        const bool bOpen = neighbor == GPU_FLUID_NEIGHBOR_UNALLOCATED || GpuFluidFaceOpen(axis, 1);
-
+        const uint above = GpuFluidFaceCode(codes, axis * 2 + 1);
         int3 apron = texel;
         apron[axis] += 1;
         float4 boundary = GpuFluidVelocityTarget[apron];
-        boundary[axis] = bOpen ? boundary[axis] + phi * invDx : 0.0; // (0 - Phi) / dx subtracted
+        if (above == GPU_FLUID_CODE_DIRICHLET)
+          boundary[axis] += phi * invDx; // (0 - Phi) / dx subtracted
+        else if (above == GPU_FLUID_CODE_WALL)
+          boundary[axis] = 0.0;
         GpuFluidVelocityTarget[apron] = boundary;
       }
     }

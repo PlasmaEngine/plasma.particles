@@ -8,19 +8,21 @@ ALL
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidPressure.hlsli>
 
-// Phase Gas/Pressure: one red-black Gauss-Seidel sweep with over-relaxation (SOR) of the pressure Poisson equation
-// lap(Phi) = div u, for the cells of one colour (GpuFluidGasPass.y; a cell's colour is the parity of i + j + k, which a
-// brick of even size keeps). Two dispatches, red then black, make one iteration. Phi is warm started: it keeps the
-// last tick's solution.
+// Phase Gas/Pressure, the reference solver (GpuFluid.Gas.PressureSolver 0): one red-black Gauss-Seidel sweep with
+// over-relaxation (SOR) of the pressure Poisson equation lap(Phi) = div u, for the cells of one colour
+// (GpuFluidGasPass.y; a cell's colour is the parity of i + j + k, which a brick of even size keeps). Two dispatches, red
+// then black, make one iteration. Phi is warm started: it keeps the last tick's solution. The multigrid solves the same
+// discrete equation (GpuFluidMG.hlsli, fine level).
 //
-// Discretely, with k the number of non-Neumann neighbours: sum(Phi_n) - k Phi = dx^2 div, so
-// Phi <- (1 - w) Phi + w (sum(Phi_n) - dx^2 div) / k.
+// With the face codes of GasMGSetup: sum over FLUID faces of Phi_n - diag Phi = dx^2 div, where diag counts the FLUID and
+// DIRICHLET faces, so Phi <- (1 - w) Phi + w (sum(Phi_n) - dx^2 div) / diag. Solid cells keep Phi.
 //
 // One 8 cubed group per active brick (indirect), one thread per cell, the other colour's threads idle.
 // Params: 0 x over-relaxation w
 
 RWStructuredBuffer<float> GpuFluidPressure;
 RWStructuredBuffer<float> GpuFluidDivergence; // only read here; a UAV like everywhere else in the pass, so no state change between dispatches
+RWStructuredBuffer<uint> GpuFluidFaceCodes;   // only read here
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -34,30 +36,35 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   if (((uint)(local.x + local.y + local.z) & 1u) != colour)
     return;
 
+  const uint index = slot * GPU_FLUID_BRICK_CELLS + groupIndex;
+  const uint codes = GpuFluidFaceCodes[index];
+  if (GpuFluidCodeIsSolid(codes))
+    return;
+
   const float dx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).y;
   const float omega = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).x;
 
   float sum = 0.0;
-  float count = 0.0;
+  float diag = 0.0;
 
-  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  [unroll] for (uint face = 0; face < 6; ++face)
   {
-    [unroll] for (int s = 0; s < 2; ++s)
+    const uint code = GpuFluidFaceCode(codes, face);
+    if (code == GPU_FLUID_CODE_FLUID)
     {
-      float phi;
-      if (GpuFluidNeighborPressure(GpuFluidPressure, slot, local, axis, s == 0 ? -1 : 1, phi))
-      {
-        sum += phi;
-        count += 1.0;
-      }
+      sum += GpuFluidNeighborPhi(GpuFluidPressure, slot, local, face / 2, (face & 1u) != 0 ? 1 : -1);
+      diag += 1.0;
+    }
+    else if (code == GPU_FLUID_CODE_DIRICHLET)
+    {
+      diag += 1.0;
     }
   }
 
-  if (count <= 0.0)
+  if (diag <= 0.0)
     return; // walled in on every side: nothing to solve
 
-  const uint index = slot * GPU_FLUID_BRICK_CELLS + groupIndex;
   const float current = GpuFluidPressure[index];
-  const float target = (sum - dx * dx * GpuFluidDivergence[index]) / count;
+  const float target = (sum - dx * dx * GpuFluidDivergence[index]) / diag;
   GpuFluidPressure[index] = lerp(current, target, omega);
 }

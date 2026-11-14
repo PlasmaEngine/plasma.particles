@@ -1,0 +1,299 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidMG.hlsli>
+
+// Phase Gas/Pressure, the multigrid's dense levels: D0, one cell per brick of the virtual grid (allocated or not), and
+// its halvings down to at most GPU_FLUID_MG_COARSEST_CELLS cells (GpuFluidMG.hlsli). x and b live in GpuFluidMGDense,
+// the coefficients in GpuFluidMGDenseCoeff; a cell over open air only (no allocated brick under it) has diag = -1 and
+// x = 0, a Dirichlet cell, while one over solids only has diag = 0 and takes no part.
+//
+// Small levels run in one group of 256 threads that loops over the cells, with a device memory barrier between steps
+// (DENSE_CYCLE, DENSE_SETUP_TAIL), so the whole tail of the V-cycle costs one dispatch. Levels with more cells than the
+// tail threshold run one thread per cell over many groups, one dispatch per step (the other modes).
+//
+// Modes (GpuFluidGasPass.x), level k = Params0.w:
+// - DENSE_SETUP: k = 0: cells of D0 without an allocated brick become open air; k > 0: coefficients of level k from k - 1.
+// - DENSE_SETUP_TAIL: the same for every level below k (and D0's open air first when k = 0), one group.
+// - DENSE_SMOOTH: one red-black half-sweep of level k, colour Pass.y.
+// - DENSE_RESTRICT: b of level k + 1 from the residual of level k, x of level k + 1 = 0 (one thread per coarse cell).
+// - DENSE_PROLONG: x of level k += P(x of level k + 1).
+// - DENSE_CYCLE: from level k: pre-smoothing, restriction, ... the coarsest level's sweeps, ... prolongation and
+//   post-smoothing back to level k.
+// Params: 0 x over-relaxation, y pre-smoothing sweeps, z post-smoothing sweeps, w level k
+//         1 x sweeps on the coarsest level
+
+RWStructuredBuffer<float2> GpuFluidMGDense;
+RWStructuredBuffer<float4> GpuFluidMGDenseCoeff;
+
+#define GPU_FLUID_MG_DENSE_THREADS 256
+
+uint DenseKind(GpuFluidDenseLevel level, int3 c)
+{
+  [unroll] for (uint axis = 0; axis < 3; ++axis)
+  {
+    if (c[axis] < 0)
+      return GpuFluidFaceOpen(axis, -1) ? GPU_FLUID_KIND_DIRICHLET : GPU_FLUID_KIND_NEUMANN;
+    if (c[axis] >= int(level.m_Dims[axis]))
+      return GpuFluidFaceOpen(axis, 1) ? GPU_FLUID_KIND_DIRICHLET : GPU_FLUID_KIND_NEUMANN;
+  }
+  const float diag = GpuFluidMGDenseCoeff[GpuFluidDenseIndex(level, uint3(c)) * 2 + 1].w;
+  return diag > 0.0 ? GPU_FLUID_KIND_FLUID : (diag < 0.0 ? GPU_FLUID_KIND_DIRICHLET : GPU_FLUID_KIND_NEUMANN);
+}
+
+float XAt(GpuFluidDenseLevel level, int3 c)
+{
+  if (any(c < 0) || any(c >= int3(level.m_Dims)))
+    return 0.0;
+  return GpuFluidMGDense[GpuFluidDenseIndex(level, uint3(c))].x;
+}
+
+float NeighborSum(GpuFluidDenseLevel level, int3 c, float4 c0, float4 c1)
+{
+  return c0.x * XAt(level, c - int3(1, 0, 0)) + c0.y * XAt(level, c + int3(1, 0, 0)) + c0.z * XAt(level, c - int3(0, 1, 0)) + c0.w * XAt(level, c + int3(0, 1, 0)) +
+         c1.x * XAt(level, c - int3(0, 0, 1)) + c1.y * XAt(level, c + int3(0, 0, 1));
+}
+
+float Residual(GpuFluidDenseLevel level, uint3 c)
+{
+  const uint index = GpuFluidDenseIndex(level, c);
+  const float4 c1 = GpuFluidMGDenseCoeff[index * 2 + 1];
+  if (c1.w <= 0.0)
+    return 0.0;
+  const float4 c0 = GpuFluidMGDenseCoeff[index * 2 + 0];
+  const float2 xb = GpuFluidMGDense[index];
+  return xb.y - (NeighborSum(level, int3(c), c0, c1) - c1.w * xb.x);
+}
+
+void SmoothCell(GpuFluidDenseLevel level, uint i, uint colour, float omega)
+{
+  const uint3 c = GpuFluidDenseCoord(level, i);
+  if (((c.x + c.y + c.z) & 1u) != colour)
+    return;
+
+  const uint index = level.m_uiOffset + i;
+  const float4 c1 = GpuFluidMGDenseCoeff[index * 2 + 1];
+  if (c1.w <= 0.0)
+    return;
+
+  const float4 c0 = GpuFluidMGDenseCoeff[index * 2 + 0];
+  const float2 xb = GpuFluidMGDense[index];
+  const float x = lerp(xb.x, (NeighborSum(level, int3(c), c0, c1) - xb.y) / c1.w, omega);
+  GpuFluidMGDense[index] = float2(x, xb.y);
+}
+
+void RestrictCell(GpuFluidDenseLevel fine, GpuFluidDenseLevel coarse, uint i)
+{
+  const uint3 cc = GpuFluidDenseCoord(coarse, i);
+  float sum = 0.0;
+  [unroll] for (uint child = 0; child < 8; ++child)
+  {
+    const uint3 f = cc * 2 + uint3(child & 1u, (child >> 1) & 1u, child >> 2);
+    if (all(f < fine.m_Dims))
+      sum += Residual(fine, f);
+  }
+  GpuFluidMGDense[coarse.m_uiOffset + i] = float2(0.0, 0.5 * sum);
+}
+
+void ProlongCell(GpuFluidDenseLevel fine, GpuFluidDenseLevel coarse, uint i)
+{
+  const uint index = fine.m_uiOffset + i;
+  if (GpuFluidMGDenseCoeff[index * 2 + 1].w <= 0.0)
+    return;
+
+  const int3 l = int3(GpuFluidDenseCoord(fine, i));
+  const int3 c0 = l / 2;
+  const int3 c1 = c0 + int3((l.x & 1) != 0 ? 1 : -1, (l.y & 1) != 0 ? 1 : -1, (l.z & 1) != 0 ? 1 : -1);
+
+  if (DenseKind(coarse, c0) != GPU_FLUID_KIND_FLUID)
+    return;
+  const float parent = XAt(coarse, c0);
+
+  float correction = 0.0;
+  [unroll] for (uint corner = 0; corner < 8; ++corner)
+  {
+    const bool3 far = bool3((corner & 1u) != 0, (corner & 2u) != 0, (corner & 4u) != 0);
+    const int3 c = int3(far.x ? c1.x : c0.x, far.y ? c1.y : c0.y, far.z ? c1.z : c0.z);
+    const float weight = (far.x ? 0.25 : 0.75) * (far.y ? 0.25 : 0.75) * (far.z ? 0.25 : 0.75);
+    correction += weight * GpuFluidProlongSample(DenseKind(coarse, c), XAt(coarse, c), parent);
+  }
+
+  const float2 xb = GpuFluidMGDense[index];
+  GpuFluidMGDense[index] = float2(xb.x + GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1).z * correction, xb.y);
+}
+
+/// D0: a cell without an allocated brick is open air.
+void MarkOpenAir(GpuFluidDenseLevel d0, uint i)
+{
+  if (GpuFluidPageTable[i] != GPU_FLUID_INVALID_SLOT)
+    return;
+  GpuFluidMGDenseCoeff[i * 2 + 0] = float4(0.0, 0.0, 0.0, 0.0);
+  GpuFluidMGDenseCoeff[i * 2 + 1] = float4(0.0, 0.0, 0.0, -1.0);
+  GpuFluidMGDense[i] = float2(0.0, 0.0);
+}
+
+/// Coefficients of coarse cell i (dense level fineLevel + 1) from its children.
+void SetupCell(GpuFluidDenseLevel fine, GpuFluidDenseLevel coarse, uint fineLevel, uint i)
+{
+  const uint3 cc = GpuFluidDenseCoord(coarse, i);
+  float w[6] = {0.0, 0.0, 0.0, 0.0, 0.0, 0.0};
+  float sink = 0.0;
+  uint active = 0;
+
+  [unroll] for (uint child = 0; child < 8; ++child)
+  {
+    const uint3 bits = uint3(child & 1u, (child >> 1) & 1u, child >> 2);
+    const uint3 f = cc * 2 + bits;
+    if (any(f >= fine.m_Dims))
+      continue;
+
+    const uint index = GpuFluidDenseIndex(fine, f);
+    const float4 c0 = GpuFluidMGDenseCoeff[index * 2 + 0];
+    const float4 c1 = GpuFluidMGDenseCoeff[index * 2 + 1];
+    if (c1.w < 0.0)
+      continue; // open air: its neighbours' couplings to it are already sinks
+
+    ++active;
+    const float childW[6] = {c0.x, c0.y, c0.z, c0.w, c1.x, c1.y};
+    [unroll] for (uint face = 0; face < 6; ++face)
+    {
+      if (bits[face / 2] == (face & 1u))
+        w[face] += childW[face];
+    }
+    sink += c1.z;
+  }
+
+  const uint index = coarse.m_uiOffset + i;
+  if (active == 0)
+  {
+    GpuFluidMGDenseCoeff[index * 2 + 0] = float4(0.0, 0.0, 0.0, 0.0);
+    GpuFluidMGDenseCoeff[index * 2 + 1] = float4(0.0, 0.0, 0.0, -1.0);
+    GpuFluidMGDense[index] = float2(0.0, 0.0);
+    return;
+  }
+
+  [unroll] for (uint face = 0; face < 6; ++face)
+    w[face] *= 0.25;
+  const float s = sink * 0.25 * GpuFluidSinkFactor(GPU_FLUID_MG_LEVEL_D0 + fineLevel);
+  GpuFluidMGDenseCoeff[index * 2 + 0] = float4(w[0], w[1], w[2], w[3]);
+  GpuFluidMGDenseCoeff[index * 2 + 1] = float4(w[4], w[5], s, w[0] + w[1] + w[2] + w[3] + w[4] + w[5] + s);
+}
+
+uint CellCount(GpuFluidDenseLevel level)
+{
+  return level.m_Dims.x * level.m_Dims.y * level.m_Dims.z;
+}
+
+void SmoothLevel(GpuFluidDenseLevel level, uint groupIndex, float omega, uint sweeps)
+{
+  const uint count = CellCount(level);
+  for (uint s = 0; s < sweeps * 2; ++s)
+  {
+    for (uint i = groupIndex; i < count; i += GPU_FLUID_MG_DENSE_THREADS)
+      SmoothCell(level, i, s & 1u, omega);
+    DeviceMemoryBarrierWithGroupSync();
+  }
+}
+
+[numthreads(GPU_FLUID_MG_DENSE_THREADS, 1, 1)]
+void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
+{
+  const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
+  const uint colour = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y;
+  const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
+  const float4 params1 = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1);
+  const float omega = params.x;
+  const uint preSweeps = uint(params.y);
+  const uint postSweeps = uint(params.z);
+  const uint k = uint(params.w);
+  const uint coarsestSweeps = uint(params1.x);
+
+  const uint3 grid = GpuFluidGrid();
+  const uint levels = GpuFluidDenseLevelCount(grid);
+  const uint i = groupId.x * GPU_FLUID_MG_DENSE_THREADS + groupIndex;
+
+  if (mode == GPU_FLUID_MG_DENSE_SETUP)
+  {
+    const GpuFluidDenseLevel level = GpuFluidGetDenseLevel(grid, k);
+    if (i >= CellCount(level))
+      return;
+    if (k == 0)
+      MarkOpenAir(level, i);
+    else
+      SetupCell(GpuFluidGetDenseLevel(grid, k - 1), level, k - 1, i);
+    return;
+  }
+
+  if (mode == GPU_FLUID_MG_DENSE_SMOOTH)
+  {
+    const GpuFluidDenseLevel level = GpuFluidGetDenseLevel(grid, k);
+    if (i < CellCount(level))
+      SmoothCell(level, i, colour, omega);
+    return;
+  }
+
+  if (mode == GPU_FLUID_MG_DENSE_RESTRICT)
+  {
+    const GpuFluidDenseLevel coarse = GpuFluidGetDenseLevel(grid, k + 1);
+    if (i < CellCount(coarse))
+      RestrictCell(GpuFluidGetDenseLevel(grid, k), coarse, i);
+    return;
+  }
+
+  if (mode == GPU_FLUID_MG_DENSE_PROLONG)
+  {
+    const GpuFluidDenseLevel fine = GpuFluidGetDenseLevel(grid, k);
+    if (i < CellCount(fine))
+      ProlongCell(fine, GpuFluidGetDenseLevel(grid, k + 1), i);
+    return;
+  }
+
+  if (mode == GPU_FLUID_MG_DENSE_SETUP_TAIL)
+  {
+    if (k == 0)
+    {
+      const GpuFluidDenseLevel d0 = GpuFluidGetDenseLevel(grid, 0);
+      for (uint c = groupIndex; c < CellCount(d0); c += GPU_FLUID_MG_DENSE_THREADS)
+        MarkOpenAir(d0, c);
+      DeviceMemoryBarrierWithGroupSync();
+    }
+
+    for (uint level = k + 1; level < levels; ++level)
+    {
+      const GpuFluidDenseLevel fine = GpuFluidGetDenseLevel(grid, level - 1);
+      const GpuFluidDenseLevel coarse = GpuFluidGetDenseLevel(grid, level);
+      for (uint c = groupIndex; c < CellCount(coarse); c += GPU_FLUID_MG_DENSE_THREADS)
+        SetupCell(fine, coarse, level - 1, c);
+      DeviceMemoryBarrierWithGroupSync();
+    }
+    return;
+  }
+
+  // GPU_FLUID_MG_DENSE_CYCLE, one group.
+  for (uint level = k; level + 1 < levels; ++level)
+  {
+    const GpuFluidDenseLevel fine = GpuFluidGetDenseLevel(grid, level);
+    const GpuFluidDenseLevel coarse = GpuFluidGetDenseLevel(grid, level + 1);
+    SmoothLevel(fine, groupIndex, omega, preSweeps);
+    for (uint c = groupIndex; c < CellCount(coarse); c += GPU_FLUID_MG_DENSE_THREADS)
+      RestrictCell(fine, coarse, c);
+    DeviceMemoryBarrierWithGroupSync();
+  }
+
+  SmoothLevel(GpuFluidGetDenseLevel(grid, levels - 1), groupIndex, omega, coarsestSweeps);
+
+  for (uint up = levels - 1; up > k; --up)
+  {
+    const GpuFluidDenseLevel fine = GpuFluidGetDenseLevel(grid, up - 1);
+    const GpuFluidDenseLevel coarse = GpuFluidGetDenseLevel(grid, up);
+    for (uint c = groupIndex; c < CellCount(fine); c += GPU_FLUID_MG_DENSE_THREADS)
+      ProlongCell(fine, coarse, c);
+    DeviceMemoryBarrierWithGroupSync();
+    SmoothLevel(fine, groupIndex, omega, postSweeps);
+  }
+}

@@ -6,7 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #include <Shaders/Common/Common.h>
-#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+#include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
 // Phase Gas/Finalize, once per frame after the last tick. One 8 cubed group per active brick (indirect).
 //
@@ -20,13 +20,47 @@ ALL
 //   so the march skips the brick.
 // - Stats: bounds of the bricks with content, mass, density-weighted centroid, maxima, and the largest and summed |div u|
 //   after the projection (the "after" half of the projection check), all integer atomics or float maxima as uint.
+//   Solid cells (the last tick's face codes) are left out of the divergence; the largest density left in one goes to
+//   GPU_FLUID_STAT_SOLID_DENSITY.
+// - Requests for the next frame's allocation (design plan section 3, "marking by face flux and proximity"): a cell has
+//   content when its density, temperature or fuel is above the allocation threshold. The brick asks for itself
+//   (bucket 1) when any cell has content; for a neighbour across a face, edge or corner when content lies within
+//   GPU_FLUID_ALLOC_PROXIMITY voxels of the shared boundary (bucket 3), or when the cell's velocity carries it into the
+//   neighbour within the lookahead (bucket 2; at most one brick away). The neighbour mask and the alive flag also go to
+//   the slot's meta (N1 checks the allocation against them).
 //
-// Params: 0 x allocation threshold, y brick mean floor
+// Params: 0 x allocation threshold, y brick mean floor, z lookahead (s), w request words per bucket
 
 RWTexture3D<float4> GpuFluidScalarTarget;
 RWTexture3D<float4> GpuFluidVelocityTarget;
 RWTexture3D<float4> GpuFluidIndirectionOutput;
 RWByteAddressBuffer GpuFluidStats;
+RWStructuredBuffer<uint> GpuFluidFaceCodes; // only read here
+RWByteAddressBuffer GpuFluidRequests;
+RWStructuredBuffer<uint> GpuFluidBrickMeta;
+
+groupshared uint gs_uiContent;
+groupshared uint gs_uiProximityMask;
+groupshared uint gs_uiFluxMask;
+
+/// The 27-bit neighbour mask of the offsets allowed per axis (bit i of each mask: offset i - 1).
+uint NeighbourMask(uint3 allowed)
+{
+  uint mask = 0;
+  [unroll] for (uint n = 0; n < GPU_FLUID_NEIGHBOR_COUNT; ++n)
+  {
+    const uint3 o = uint3(n % 3, (n / 3) % 3, n / 9);
+    if ((allowed.x & (1u << o.x)) != 0 && (allowed.y & (1u << o.y)) != 0 && (allowed.z & (1u << o.z)) != 0)
+      mask |= 1u << n;
+  }
+  return mask & ~(1u << GPU_FLUID_NEIGHBOR_SELF);
+}
+
+void Request(uint bucket, uint brickLinear, uint words)
+{
+  uint previous;
+  GpuFluidRequests.InterlockedOr((bucket * words + (brickLinear >> 5)) * 4, 1u << (brickLinear & 31u), previous);
+}
 
 groupshared uint gs_uiPeakDensity;
 groupshared uint gs_uiPeakTemperature;
@@ -37,6 +71,7 @@ groupshared uint gs_uiNaN;
 groupshared uint gs_uiMaxDivergence;
 groupshared uint gs_uiSumDivergence;
 groupshared uint gs_uiOverflow;
+groupshared uint gs_uiSolidDensity;
 
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
@@ -61,6 +96,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     gs_uiMaxDivergence = 0;
     gs_uiSumDivergence = 0;
     gs_uiOverflow = 0;
+    gs_uiSolidDensity = 0;
+    gs_uiContent = 0;
+    gs_uiProximityMask = 0;
+    gs_uiFluxMask = 0;
   }
   GroupMemoryBarrierWithGroupSync();
 
@@ -113,22 +152,76 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     [unroll] for (uint axis = 0; axis < 3; ++axis)
       InterlockedAdd(gs_uiCentroid[axis], (uint)round(min(density, 64.0) * position[axis] * GPU_FLUID_MASS_SCALE));
 
-    // Finite here: the guard above zeroed every non-finite face.
-    const float divergence = abs((plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx);
+    // Finite here: the guard above zeroed every non-finite face. A solid cell's faces move with the solid.
+    const bool bSolid = GpuFluidCodeIsSolid(GpuFluidFaceCodes[slot * GPU_FLUID_BRICK_CELLS + groupIndex]);
+    if (bSolid)
+      InterlockedMax(gs_uiSolidDensity, asuint(density));
+    const float divergence = bSolid ? 0.0 : abs((plusX - minus.x + plusY - minus.y + plusZ - minus.z) * invDx);
     const float scaled = round(divergence * GPU_FLUID_DIV_SCALE);
     if (scaled > 1048576.0)
       InterlockedAdd(gs_uiOverflow, 1u);
     InterlockedMax(gs_uiMaxDivergence, asuint(divergence));
     InterlockedAdd(gs_uiSumDivergence, (uint)min(scaled, 1048576.0));
+
+    // Requests: content near a face (proximity), and where its velocity takes it within the lookahead (flux).
+    if (max(max(density, s.g), s.b) > rules.x)
+    {
+      InterlockedOr(gs_uiContent, 1u);
+
+      const uint3 lo = uint3(local < GPU_FLUID_ALLOC_PROXIMITY);
+      const uint3 hi = uint3(local >= GPU_FLUID_BRICK_SIZE - GPU_FLUID_ALLOC_PROXIMITY);
+      const uint3 proximity = uint3(2 | lo.x | (hi.x << 2), 2 | lo.y | (hi.y << 2), 2 | lo.z | (hi.z << 2));
+      InterlockedOr(gs_uiProximityMask, NeighbourMask(proximity));
+
+      const float3 velocity = 0.5 * (minus + float3(plusX, plusY, plusZ));
+      const float3 target = float3(local) + 0.5 + velocity * (rules.z * invDx);
+      const int3 reach = GpuFluidIsFinite(float4(target, 0.0)) ? clamp(int3(floor(target / GPU_FLUID_BRICK_SIZE)), -1, 1) : int3(0, 0, 0);
+      const uint3 flux = uint3(2u | (1u << uint(reach.x + 1)), 2u | (1u << uint(reach.y + 1)), 2u | (1u << uint(reach.z + 1)));
+      InterlockedOr(gs_uiFluxMask, NeighbourMask(flux));
+    }
   }
   GroupMemoryBarrierWithGroupSync();
+
+  const bool bContent = gs_uiContent != 0;
+
+  // One thread per neighbour issues the requests: bucket 2 for flux, else 3 for proximity, 1 for the brick itself.
+  if (groupIndex < GPU_FLUID_NEIGHBOR_COUNT)
+  {
+    const uint words = uint(rules.w);
+    const int3 grid = int3(GpuFluidGrid());
+    const int3 d = int3(groupIndex % 3, (groupIndex / 3) % 3, groupIndex / 9) - 1;
+    const int3 other = int3(brick) + d;
+    const uint bit = 1u << groupIndex;
+
+    if (all(other >= 0) && all(other < grid))
+    {
+      const uint otherLinear = GpuFluidBrickLinear(uint3(other), uint3(grid));
+      if (groupIndex == GPU_FLUID_NEIGHBOR_SELF)
+      {
+        if (bContent)
+          Request(GPU_FLUID_BUCKET_ALIVE, otherLinear, words);
+      }
+      else if ((gs_uiFluxMask & bit) != 0)
+      {
+        Request(GPU_FLUID_BUCKET_FLUX, otherLinear, words);
+      }
+      else if ((gs_uiProximityMask & bit) != 0)
+      {
+        Request(GPU_FLUID_BUCKET_PROXIMITY, otherLinear, words);
+      }
+    }
+  }
+
+  if (groupIndex == 1)
+  {
+    GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_ALIVE] = bContent ? 1u : 0u;
+    GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASK] = gs_uiFluxMask | gs_uiProximityMask;
+  }
 
   if (groupIndex != 0)
     return;
 
-  const float peak = asfloat(gs_uiPeakDensity);
   const float mean = float(gs_uiDensitySum) / (GPU_FLUID_MEAN_SCALE * GPU_FLUID_BRICK_CELLS);
-  const bool bContent = peak > rules.x || asfloat(gs_uiPeakTemperature) > rules.x;
 
   const float3 atlasBrick = float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks()));
   GpuFluidIndirectionOutput[brick] = float4(atlasBrick / 255.0, bContent ? max(mean, rules.y) : 0.0);
@@ -156,6 +249,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_TEMPERATURE * 4, gs_uiPeakTemperature);
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_MAX_SPEED * 4, gs_uiPeakSpeed);
   GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_DIV_POST * 4, gs_uiMaxDivergence);
+  GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_SOLID_DENSITY * 4, gs_uiSolidDensity);
   GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_DIV_POST_SUM, gs_uiSumDivergence, overflow);
   if (gs_uiNaN > 0)
     GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_NAN * 4, gs_uiNaN);

@@ -1,0 +1,56 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
+
+// Phase Gas/Forces, before GasForces when vorticity confinement is on: the curl of the velocity at every interior cell
+// centre into Scratch (xyz: w = curl u in 1/s, w: |w|), from the MAC faces of the halo-filled next velocity. One 8 cubed
+// group per active brick (indirect). GasHalo (copy mode) then fills Scratch's apron, so GasForces can take the gradient
+// of |w| at every face.
+//
+// The cell-centred velocity of a cell is the mean of its two faces on each axis; w_x = dw/dy - dv/dz etc. by central
+// differences of the neighbours' cell-centred velocities. Every texel this needs lies in the stored brick (-1..8).
+
+Texture3D<float4> GpuFluidVelocityIn; // read-only view of the next velocity
+RWTexture3D<float4> GpuFluidScratch;
+
+/// Component `axis` of the cell-centred velocity of the cell at texel t.
+float Centred(int3 t, uint axis)
+{
+  int3 up = t;
+  up[axis] += 1;
+  return 0.5 * (GpuFluidVelocityIn.Load(int4(t, 0))[axis] + GpuFluidVelocityIn.Load(int4(up, 0))[axis]);
+}
+
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  const uint slot = GpuFluidGroupSlot(groupId);
+  if (slot == GPU_FLUID_INVALID_SLOT)
+    return;
+
+  const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
+  const int3 local = int3(groupThreadId.xy, groupThreadId.z + groupId.z * (GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS));
+  const int3 t = GpuFluidTexel(slot, local);
+  const int3 ex = int3(1, 0, 0);
+  const int3 ey = int3(0, 1, 0);
+  const int3 ez = int3(0, 0, 1);
+
+  const float dwdy = Centred(t + ey, 2) - Centred(t - ey, 2);
+  const float dvdz = Centred(t + ez, 1) - Centred(t - ez, 1);
+  const float dudz = Centred(t + ez, 0) - Centred(t - ez, 0);
+  const float dwdx = Centred(t + ex, 2) - Centred(t - ex, 2);
+  const float dvdx = Centred(t + ex, 1) - Centred(t - ex, 1);
+  const float dudy = Centred(t + ey, 0) - Centred(t - ey, 0);
+
+  float3 curl = 0.5 * invDx * float3(dwdy - dvdz, dudz - dwdx, dvdx - dudy);
+  if (!GpuFluidIsFinite(float4(curl, 0.0)))
+    curl = float3(0.0, 0.0, 0.0); // GasForces counts the velocity's NaN; the curl only steers the confinement
+
+  GpuFluidScratch[t] = float4(curl, length(curl));
+}
