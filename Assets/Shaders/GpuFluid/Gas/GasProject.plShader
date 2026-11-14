@@ -21,12 +21,37 @@ RWTexture3D<float4> GpuFluidVelocityTarget;
 RWStructuredBuffer<float> GpuFluidPressure;   // only read here
 RWStructuredBuffer<uint> GpuFluidFaceCodes;   // only read here
 
+groupshared uint gs_uiFaceNeighbors[6]; // face f = axis * 2 + (side > 0)
+
+/// Phi across a FLUID face of cell `local`, the face neighbours looked up once for the group.
+float NeighborPhi(uint slot, int3 local, uint axis, int side)
+{
+  int3 other = local;
+  other[axis] += side;
+  if (other[axis] >= 0 && other[axis] < GPU_FLUID_BRICK_SIZE)
+    return GpuFluidPressure[slot * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
+
+  const uint neighbor = gs_uiFaceNeighbors[axis * 2 + (side > 0 ? 1 : 0)];
+  if (neighbor >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+    return 0.0; // not a FLUID face
+  other[axis] -= side * GPU_FLUID_BRICK_SIZE;
+  return GpuFluidPressure[neighbor * GPU_FLUID_BRICK_CELLS + GpuFluidCellIndex(uint3(other))];
+}
+
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
   const uint slot = GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
+
+  if (groupIndex < 6)
+  {
+    int3 d = int3(0, 0, 0);
+    d[groupIndex / 2] = (groupIndex & 1u) != 0 ? 1 : -1;
+    gs_uiFaceNeighbors[groupIndex] = GpuFluidNeighbor(slot, d);
+  }
+  GroupMemoryBarrierWithGroupSync();
 
   const float invDx = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasStep).z;
   const int3 local = int3(groupThreadId);
@@ -42,7 +67,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     // -side face: between this cell and the one below it on this axis.
     const uint below = GpuFluidFaceCode(codes, axis * 2);
     if (below == GPU_FLUID_CODE_FLUID)
-      velocity[axis] -= (phi - GpuFluidNeighborPhi(GpuFluidPressure, slot, local, axis, -1)) * invDx;
+      velocity[axis] -= (phi - NeighborPhi(slot, local, axis, -1)) * invDx;
     else if (below == GPU_FLUID_CODE_DIRICHLET)
       velocity[axis] -= phi * invDx;
     else if (below == GPU_FLUID_CODE_WALL)
@@ -51,9 +76,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     // +side face of the brick's last cell, against a missing neighbour: the apron texel.
     if (local[axis] == GPU_FLUID_BRICK_SIZE - 1)
     {
-      int3 d = int3(0, 0, 0);
-      d[axis] = 1;
-      if (GpuFluidNeighbor(slot, d) >= GPU_FLUID_NEIGHBOR_OUTSIDE)
+      if (gs_uiFaceNeighbors[axis * 2 + 1] >= GPU_FLUID_NEIGHBOR_OUTSIDE)
       {
         const uint above = GpuFluidFaceCode(codes, axis * 2 + 1);
         int3 apron = texel;
