@@ -111,14 +111,62 @@ namespace
     return c;
   }
 
+  /// UAV barriers wait here and go out together right before the next dispatch: one buffer call and one texture call
+  /// per dispatch boundary instead of one call per resource. Every call is a separate barrier submission on DX12 (the
+  /// render graph's encoder tracks no states, so each flushes on its own), and the gas tick issued two to four of them
+  /// between most of its 60 to 80 dispatches. Per thread: the render graph records passes on several workers.
+  struct PendingUavBarriers
+  {
+    plHybridArray<plGALBufferHandle, 16> m_Buffers;
+    plHybridArray<plGALTextureHandle, 8> m_Textures;
+  };
+  thread_local PendingUavBarriers t_PendingBarriers;
+
   void UavBarrier(plGALCommandEncoder* pEncoder, plGALTextureHandle hTexture)
   {
-    pEncoder->TextureBarrier(hTexture, plGALResourceState::UnorderedAccessWrite, plGALResourceState::UnorderedAccessWrite);
+    PL_IGNORE_UNUSED(pEncoder);
+    if (!t_PendingBarriers.m_Textures.Contains(hTexture))
+      t_PendingBarriers.m_Textures.PushBack(hTexture);
   }
 
   void UavBarrier(plGALCommandEncoder* pEncoder, plGALBufferHandle hBuffer)
   {
-    pEncoder->BufferBarrier(hBuffer, plGALResourceState::UnorderedAccessWrite, plGALResourceState::UnorderedAccessWrite);
+    PL_IGNORE_UNUSED(pEncoder);
+    if (!t_PendingBarriers.m_Buffers.Contains(hBuffer))
+      t_PendingBarriers.m_Buffers.PushBack(hBuffer);
+  }
+
+  /// Issues the waiting UAV barriers. Called before every dispatch. A pass's last barriers go out at the next pass's
+  /// first dispatch, after the render graph's own barriers: redundant there, and harmless (every resource here is a
+  /// persistent import).
+  void FlushUavBarriers(plGALCommandEncoder* pEncoder)
+  {
+    if (!t_PendingBarriers.m_Buffers.IsEmpty())
+    {
+      plHybridArray<plGALBufferBarrier, 16> barriers;
+      for (const plGALBufferHandle& hBuffer : t_PendingBarriers.m_Buffers)
+      {
+        plGALBufferBarrier& barrier = barriers.ExpandAndGetRef();
+        barrier.m_hBuffer = hBuffer;
+        barrier.m_StateBefore = plGALResourceState::UnorderedAccessWrite;
+        barrier.m_StateAfter = plGALResourceState::UnorderedAccessWrite;
+      }
+      pEncoder->BufferBarrier(barriers);
+      t_PendingBarriers.m_Buffers.Clear();
+    }
+    if (!t_PendingBarriers.m_Textures.IsEmpty())
+    {
+      plHybridArray<plGALTextureBarrier, 8> barriers;
+      for (const plGALTextureHandle& hTexture : t_PendingBarriers.m_Textures)
+      {
+        plGALTextureBarrier& barrier = barriers.ExpandAndGetRef();
+        barrier.m_hTexture = hTexture;
+        barrier.m_StateBefore = plGALResourceState::UnorderedAccessWrite;
+        barrier.m_StateAfter = plGALResourceState::UnorderedAccessWrite;
+      }
+      pEncoder->TextureBarrier(barriers);
+      t_PendingBarriers.m_Textures.Clear();
+    }
   }
 
   /// Binds the shader and the grid, dispatches one group per active brick.
@@ -128,6 +176,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_ACTIVE * sizeof(plUInt32)).IgnoreResult();
   }
 
@@ -138,6 +187,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_SLABS * sizeof(plUInt32)).IgnoreResult();
   }
 
@@ -148,6 +198,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_NEW * sizeof(plUInt32)).IgnoreResult();
   }
 
@@ -158,6 +209,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_NEW_SLABS * sizeof(plUInt32)).IgnoreResult();
   }
 
@@ -175,6 +227,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hColourArgs), uiColour * GPU_FLUID_ARGS_WORDS * sizeof(plUInt32)).IgnoreResult();
   }
 
@@ -185,6 +238,7 @@ namespace
     pContext->BindShader(hShader);
     plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
     pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    FlushUavBarriers(ctx.GetCommandEncoder());
     pContext->Dispatch(plMath::Max(uiGroups, 1u), 1, 1).IgnoreResult();
   }
 

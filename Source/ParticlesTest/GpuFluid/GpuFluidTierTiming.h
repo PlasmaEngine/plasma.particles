@@ -40,6 +40,7 @@ private:
 
   /// Per phase: its name, and one value per measured frame (ms, every run of the phase in that frame summed).
   plDynamicArray<plString> m_PhaseNames;
+  plDynamicArray<double> m_FrameGpuMs; ///< the whole frame's GPU time (RENDER FRAME), a clock independent of the pass split
   plDynamicArray<plDynamicArray<double>> m_PhaseValues;
 
   plUInt32 m_uiActiveBricks = 0;

@@ -136,6 +136,7 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
   m_iFrame = -1;
   m_PhaseNames.Clear();
   m_PhaseValues.Clear();
+  m_FrameGpuMs.Clear();
   m_uiActiveBricks = 0;
   m_uiTicksPerFrame = 0;
   m_uiNaN = 0;
@@ -274,6 +275,11 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
     plDynamicArray<plString> names;
     plDynamicArray<plVariant> values;
     plStats::GetStatsWithPrefix("Renderer/GPU/Gas/", names, values);
+    // Read once: a stat keeps its value after its pass stops running, so the "#2" runs of a two-tick tier were summed
+    // into every later sub-test's numbers (Medium read 2.0 ms a frame after High, 0.88 ms on its own, with the same
+    // whole-frame GPU time). A frame whose timings have not arrived yet adds nothing.
+    for (const plString& sName : names)
+      plStats::RemoveStat(sName);
 
     plHybridArray<double, 16> frameValues;
     frameValues.SetCount(m_PhaseNames.GetCount(), 0.0);
@@ -298,8 +304,15 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
       frameValues[uiIndex] += values[i].ConvertTo<double>();
     }
 
-    for (plUInt32 i = 0; i < frameValues.GetCount(); ++i)
-      m_PhaseValues[i].PushBack(frameValues[i]);
+    if (!names.IsEmpty())
+    {
+      for (plUInt32 i = 0; i < frameValues.GetCount(); ++i)
+        m_PhaseValues[i].PushBack(frameValues[i]);
+    }
+
+    const plVariant frameGpu = plStats::GetStatValue("Renderer/GPU/RENDER FRAME[ms]");
+    if (frameGpu.IsValid() && frameGpu.CanConvertTo<double>())
+      m_FrameGpuMs.PushBack(frameGpu.ConvertTo<double>());
   }
 
   if (m_iFrame + 1 < m_iWarmupFrames + s_iMeasuredFrames)
@@ -394,6 +407,8 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
     const double fMedian = Percentile(totals, 0.5);
     const double fP90 = Percentile(totals, 0.9);
     sCsv.AppendFormat("{},Gas frame total,1,{},{},{},{},{}\n", szTier, plArgF(fMedian, 4), plArgF(fP90, 4), plArgF(fMedian, 4), plArgF(uiBricks > 0 ? fMedian * 1000.0 / uiBricks : 0.0, 4), uiFrames);
+    // The whole frame on the GPU: the pass timers' sum can be checked against it (a pass split changes the former).
+    sCsv.AppendFormat("{},Whole frame GPU,1,{},{},{},0,{}\n", szTier, plArgF(Percentile(m_FrameGpuMs, 0.5), 4), plArgF(Percentile(m_FrameGpuMs, 0.9), 4), plArgF(Percentile(m_FrameGpuMs, 0.5), 4), m_FrameGpuMs.GetCount());
 
     plTestFramework::Output(plTestOutput::Message, "Tier %s: gas frame median %.3f ms, p90 %.3f ms; %.3f ms per tick (%.2f us per brick-tick) x %u ticks + %.3f ms once per frame; %u bricks", szTier, fMedian, fP90, fPerTick,
       uiBricks > 0 ? fPerTick * 1000.0 / uiBricks : 0.0, uiTicks, fFrameOnceMedian, uiBricks);

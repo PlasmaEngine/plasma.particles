@@ -1,0 +1,37 @@
+# GpuFluid tier timing, tier MediumSOR, Smoke Column (whole box), 1024 active bricks, 1 ticks per frame, 60 warm-up + 180 measured frames, DX12, NVIDIA GeForce RTX 4080, Dev build (optimised, Windows_Release), Rendering.Pipeline.Injections off
+# gas settings: PressureSolver=0 PressureCycles=0 MGShortCycles=0 MGPreSmooth=2 MGPostSmooth=2 VelocityMacCormack=-1 Vorticity=-1
+# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs
+tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples
+MediumSOR,Gas/Advect,1,0.1523,0.1557,0.1523,0.1488,171
+MediumSOR,Gas/Alloc Clear,1,0.0031,0.0043,0.0031,0.0030,171
+MediumSOR,Gas/Alloc,1,0.0358,0.0379,0.0358,0.0349,171
+MediumSOR,Gas/Emit,1,0.0143,0.0145,0.0143,0.0140,171
+MediumSOR,Gas/Finalize,1,0.0205,0.0401,0.0205,0.0200,171
+MediumSOR,Gas/Forces,1,0.0634,0.0656,0.0634,0.0619,171
+MediumSOR,Gas/Pressure,1,0.9420,2.1524,0.9420,0.9199,171
+MediumSOR,Gas tick phases,1,1.1725,2.3942,1.1725,1.1451,171
+MediumSOR,Gas frame total,1,1.2331,2.5518,1.2331,1.2042,171
+MediumSOR,Whole frame GPU,1,6.0990,8.1992,6.0990,0,180
+# other passes of the last frame (ms)
+# Renderer/GPU/AllocatedBytes[MB],741.108
+# Renderer/GPU/CaptureImage[ms],0.145
+# Renderer/GPU/Contact Shadow Trace[ms],0.089
+# Renderer/GPU/EditorRenderPass[ms],0.094
+# Renderer/GPU/LitOpaqueStatic[ms],0.116
+# Renderer/GPU/Queue/Compute/Busy[ms],0.137
+# Renderer/GPU/Queue/Compute/Segments,2.000
+# Renderer/GPU/RENDER FRAME[ms],5.349
+# Renderer/GPU/RenderGraph[ms],2.119
+# Renderer/GPU/StartLatency[ms],0.984
+# Renderer/GPU/TAA Resolve[ms],0.067
+# Renderer/GPU/VDB March[ms],1.248
+# Renderer/GPU/VRAMBudget[MB],15280.000
+# Renderer/GPU/VRAMUsage[MB],874.020
+# Renderer/GPU/VSM Atlas Clear[ms],0.149
+# Renderer/GPU/View: GpuFluid[ms],1.238
+# Renderer/GPU/View: MainView[ms],2.344
+# Renderer/GPU/View: Reflection Probe Filter 0[ms],0.050
+# Renderer/GPU/View: Reflection Probe Render 0[ms],0.057
+# Renderer/GPU/View: VSM Region 2[ms],0.155
+# Renderer/GPU/View: VSM Region 3[ms],0.052
+# Renderer/GPU/_TotalTracked[ms],12.214

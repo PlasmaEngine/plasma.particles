@@ -74,11 +74,19 @@ void plGpuFluidScan::UavBarrier(plGALCommandEncoder* pEncoder, plArrayPtr<const 
   if (pEncoder == nullptr)
     return;
 
+  // One call for all of them: every BufferBarrier call is its own barrier submission on DX12.
+  plHybridArray<plGALBufferBarrier, 32> barriers;
   for (const plGALBufferHandle& hBuffer : buffers)
   {
-    if (!hBuffer.IsInvalidated())
-      pEncoder->BufferBarrier(hBuffer, plGALResourceState::UnorderedAccessWrite, plGALResourceState::UnorderedAccessWrite);
+    if (hBuffer.IsInvalidated())
+      continue;
+    plGALBufferBarrier& barrier = barriers.ExpandAndGetRef();
+    barrier.m_hBuffer = hBuffer;
+    barrier.m_StateBefore = plGALResourceState::UnorderedAccessWrite;
+    barrier.m_StateAfter = plGALResourceState::UnorderedAccessWrite;
   }
+  if (!barriers.IsEmpty())
+    pEncoder->BufferBarrier(barriers);
 }
 
 void plGpuFluidScan::RecordExclusiveScan(plRenderContext* pContext, plGALCommandEncoder* pEncoder, const Layout& layout, plGALBufferHandle hInput,
