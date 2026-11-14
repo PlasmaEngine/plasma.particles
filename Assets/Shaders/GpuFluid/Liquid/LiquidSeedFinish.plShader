@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // After the fill boxes of a reset: set A holds GpuFluidLiqPass.x particles. Writes its dispatch arguments and adds
@@ -13,9 +14,11 @@ ALL
 RWByteAddressBuffer GpuFluidLiqArgsOutput;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(1, 1, 1)]
 void main()
 {
+  GPU_FLUID_KERNEL_MODES
   const uint count = LIQ_CONST(GpuFluidLiqPass).x;
   const uint groups = (count + GPU_FLUID_LIQUID_PARTICLE_GROUP - 1) / GPU_FLUID_LIQUID_PARTICLE_GROUP;
   const uint groupsX = min(groups, (uint)GPU_FLUID_SCAN_MAX_GROUPS_X);

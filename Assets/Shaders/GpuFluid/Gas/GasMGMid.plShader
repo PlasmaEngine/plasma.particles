@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
@@ -276,9 +277,11 @@ void FixRestrict(uint slot, uint groupIndex, float omega, uint sweeps)
     GpuFluidMGLocal[localBase + GPU_FLUID_MG_XC0 + groupIndex] = gs_fX[TileOf(CoordOf(groupIndex, 2), 2)];
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(64, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   // A brick-colour launch runs over that colour's list (GpuFluidSparse.hlsli).
   const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
   const uint slot = GpuFluidGroupSlotOfColour(groupId, pass.y);

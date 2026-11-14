@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
@@ -200,9 +201,11 @@ void SmoothLevel(GpuFluidDenseLevel level, uint groupIndex, float omega, uint sw
   }
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_MG_DENSE_THREADS, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint mode = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).x;
   const uint colour = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).y;
   const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);

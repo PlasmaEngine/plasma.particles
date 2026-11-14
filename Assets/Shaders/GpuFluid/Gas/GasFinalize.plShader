@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidMG.hlsli>
 
@@ -78,9 +79,11 @@ groupshared uint gs_uiSumDivergence;
 groupshared uint gs_uiOverflow;
 groupshared uint gs_uiSolidDensity;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint slot = GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;

@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // End of a tick, one thread: the counters into the stats that are read back, the tick and substep totals, and the
@@ -16,9 +17,11 @@ RWByteAddressBuffer GpuFluidLiqCounters;
 RWByteAddressBuffer GpuFluidLiqStats;
 RWByteAddressBuffer GpuFluidLiqDrawArgs;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(1, 1, 1)]
 void main()
 {
+  GPU_FLUID_KERNEL_MODES
   const uint alive = GpuFluidLiqParticleArgs.Load(12);
   const uint substeps = LIQ_CONST(GpuFluidLiqPass).x;
 

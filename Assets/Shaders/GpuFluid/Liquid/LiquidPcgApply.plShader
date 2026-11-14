@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
 
 // q = A p at the liquid cells of the active bricks (p bound as GpuFluidLiqMgX, the multigrid's fine stencil), and per
@@ -12,9 +13,11 @@ ALL
 
 RWByteAddressBuffer GpuFluidLiqPcgQ;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   int3 cell;
   const bool bCell = LiqBrickCell(groupId, groupThreadId, cell);
 

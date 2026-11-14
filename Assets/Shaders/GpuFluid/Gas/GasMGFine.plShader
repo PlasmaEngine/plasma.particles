@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidDivergence.hlsli>
 
@@ -193,9 +194,11 @@ float Prolong(int3 l)
   return result;
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   // A brick-colour launch runs over that colour's list (GpuFluidSparse.hlsli).
   const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
   const uint slot = GpuFluidGroupSlotOfColour(groupId, pass.y);

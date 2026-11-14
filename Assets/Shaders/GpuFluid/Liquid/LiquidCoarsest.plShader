@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
 
 // The coarsest multigrid level (at most GPU_FLUID_LIQUID_COARSEST_MAX_CELLS cells), solved by one group: red-black
@@ -12,9 +13,11 @@ ALL
 
 groupshared float gs_fX[GPU_FLUID_LIQUID_COARSEST_MAX_CELLS];
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_COARSEST_GROUP, 1, 1)]
 void main(uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint3 dims = LiqLevelDims(MgLevel());
   const uint count = min(dims.x * dims.y * dims.z, (uint)GPU_FLUID_LIQUID_COARSEST_MAX_CELLS);
   const float air = LiqInvTheta();

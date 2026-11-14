@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // One thread. GpuFluidLiqPass.x = 0: zero the surface counters before the vertices and quads are written.
@@ -16,9 +17,11 @@ RWByteAddressBuffer GpuFluidLiqSurfCounters;
 RWByteAddressBuffer GpuFluidLiqSurfDrawArgs;
 RWByteAddressBuffer GpuFluidLiqStats;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(1, 1, 1)]
 void main()
 {
+  GPU_FLUID_KERNEL_MODES
   if (LIQ_CONST(GpuFluidLiqPass).x == 0)
   {
     [unroll] for (uint i = 0; i < GPU_FLUID_LIQUID_SURFACE_CTR_WORDS; ++i)

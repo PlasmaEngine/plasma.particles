@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 
 #define GPU_FLUID_SPARSE_WRITABLE
@@ -110,9 +111,11 @@ bool IsRequested(uint bucket, uint brickLinear, uint words)
   return (word & (1u << (brickLinear & 31u))) != 0;
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(64, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
   const float4 params = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0);
   const uint mode = pass.x;

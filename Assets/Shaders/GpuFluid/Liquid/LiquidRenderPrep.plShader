@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // End of a tick, per particle: the point the debug renderer draws (world position, speed), and the particle stats
@@ -27,9 +28,11 @@ groupshared uint gs_uiMin[3];
 groupshared uint gs_uiMax[3];
 groupshared uint gs_uiCentroid[3];
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   if (groupIndex == 0)
   {
     gs_uiMaxSpeed = 0;

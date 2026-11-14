@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Start of a substep: zero the per-cell particle counts, the brick occupancy and the per-substep counters.
@@ -13,9 +14,11 @@ RWByteAddressBuffer GpuFluidLiqCellCount;
 RWByteAddressBuffer GpuFluidLiqBrickOccupied;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint i = dispatchThreadId.x;
   const uint3 cells = LiqCells();
   const uint3 bricks = LiqBricks();

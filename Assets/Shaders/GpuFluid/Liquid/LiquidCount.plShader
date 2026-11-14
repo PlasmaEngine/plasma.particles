@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Counting sort, step 1: each particle takes a rank inside its cell. A particle outside the domain is removed: it
@@ -18,9 +19,11 @@ RWByteAddressBuffer GpuFluidLiqRank;
 RWByteAddressBuffer GpuFluidLiqBrickOccupied;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   uint index;
   if (!LiqParticleIndex(groupId, groupIndex, index))
     return;

@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
 
 // Restriction to coarse level L = GpuFluidLiqPass.x from level L - 1: the coarse cell's type from its 8 children, its
@@ -15,9 +16,11 @@ RWByteAddressBuffer GpuFluidLiqMgFineX;
 RWByteAddressBuffer GpuFluidLiqMgFineB;
 RWByteAddressBuffer GpuFluidLiqMgFineType;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint level = MgLevel();
   const uint3 dims = LiqLevelDims(level);
   const uint3 fineDims = LiqLevelDims(level - 1);

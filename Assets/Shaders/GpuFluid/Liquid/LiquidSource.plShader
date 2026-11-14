@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Inflow from one source, before the tick's substeps: GpuFluidLiqPass.x new particles appended to the current set
@@ -21,9 +22,11 @@ RWByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqVelocities;
 RWByteAddressBuffer GpuFluidLiqAffine;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint4 pass = LIQ_CONST(GpuFluidLiqPass);
   const uint i = dispatchThreadId.x;
   if (i >= pass.x)

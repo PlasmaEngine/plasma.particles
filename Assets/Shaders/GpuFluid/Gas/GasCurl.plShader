@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
@@ -27,9 +28,11 @@ float Centred(int3 t, uint axis)
   return 0.5 * (GpuFluidVelocityIn.Load(int4(t, 0))[axis] + GpuFluidVelocityIn.Load(int4(up, 0))[axis]);
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint slot = GpuFluidGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;

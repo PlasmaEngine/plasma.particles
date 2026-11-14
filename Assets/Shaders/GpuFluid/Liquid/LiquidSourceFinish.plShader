@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // One thread, after LiquidSource: the GpuFluidLiqPass.x particles it appended join the alive count (as many as the
@@ -14,9 +15,11 @@ ALL
 RWByteAddressBuffer GpuFluidLiqParticleArgs;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(1, 1, 1)]
 void main()
 {
+  GPU_FLUID_KERNEL_MODES
   const uint alive = GpuFluidLiqParticleArgs.Load(12);
   const uint count = min(alive + LIQ_CONST(GpuFluidLiqPass).x, LiqCapacity());
   const uint groups = (count + GPU_FLUID_LIQUID_PARTICLE_GROUP - 1) / GPU_FLUID_LIQUID_PARTICLE_GROUP;

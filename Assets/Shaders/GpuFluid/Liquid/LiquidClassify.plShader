@@ -7,6 +7,7 @@ ALL
 
 #define GPU_FLUID_LIQUID_BRICK_DISPATCH
 #define GPU_FLUID_LIQUID_USE_SHAPES
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
 // Cell types: solid when the centre is inside an analytic solid (the domain walls are faces, not cells); liquid, with
@@ -75,9 +76,11 @@ float SurfacePhi(float phi)
   return phi - LIQ_CONST(GpuFluidLiqPassF).y;
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   if (groupIndex == 0)
   {
     gs_uiVolume = 0;

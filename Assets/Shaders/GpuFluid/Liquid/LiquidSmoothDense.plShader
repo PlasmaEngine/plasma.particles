@@ -5,13 +5,16 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
 
 // One colour of a red-black Gauss-Seidel sweep on a coarse level, dense.
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP, GPU_FLUID_LIQUID_LEVEL_GROUP)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint3 dims = LiqLevelDims(MgLevel());
   const int3 cell = int3(dispatchThreadId);
   if (!LiqInsideDims(cell, dims))

@@ -7,6 +7,7 @@ ALL
 
 #define GPU_FLUID_LIQUID_PARTICLE_DISPATCH
 #define GPU_FLUID_LIQUID_USE_SHAPES
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // G2P: per particle, trilinear (8 taps per MAC component) from the projected, extrapolated grid.
@@ -54,9 +55,11 @@ float3 SampleVelocity(ByteAddressBuffer set, float3 g)
   return float3(SampleComponent(set, 0, g, unused), SampleComponent(set, 1, g, unused), SampleComponent(set, 2, g, unused));
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   uint index;
   if (!LiqParticleIndex(groupId, groupIndex, index))
     return;

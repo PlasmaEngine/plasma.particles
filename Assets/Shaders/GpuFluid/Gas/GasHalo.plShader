@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
@@ -131,9 +132,11 @@ bool HaloValue(RWTexture3D<float4> target, uint mode, HaloSource source, float4 
 
 // GPU_FLUID_SLABS groups of 128 threads per brick (the slab dispatch arguments): thread t of the brick = slab * 128 +
 // its index; no groupshared memory, each thread reads its neighbour's entry itself.
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
 
   const uint slot = (pass.w & 1u) != 0 ? GpuFluidNewGroupSlot(groupId) : GpuFluidGroupSlot(groupId);

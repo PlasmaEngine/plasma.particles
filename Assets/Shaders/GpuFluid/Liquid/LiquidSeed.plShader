@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_SEED_KERNEL
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Seeds one fill box: n particles per cell on average (GpuFluidSeedCellMin.w), placed by hashes, so a seed is the
@@ -22,9 +23,11 @@ RWByteAddressBuffer GpuFluidLiqAffine;
 
 static const uint s_EvenOctants[4] = {0u, 3u, 5u, 6u};
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_PARTICLE_GROUP, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint4 cellMin = SEED_CONST(GpuFluidSeedCellMin);
   const uint4 cellCount = SEED_CONST(GpuFluidSeedCellCount);
   const float4 velocityJitter = SEED_CONST(GpuFluidSeedVelocity);

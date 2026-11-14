@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Active bricks: those holding particles plus one brick around them. Every grid kernel of the substep runs on this
@@ -16,9 +17,11 @@ RWByteAddressBuffer GpuFluidLiqBrickActive;
 RWByteAddressBuffer GpuFluidLiqBrickListOut;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint3 bricks = LiqBricks();
   const uint brick = dispatchThreadId.x;
   if (brick >= bricks.x * bricks.y * bricks.z)

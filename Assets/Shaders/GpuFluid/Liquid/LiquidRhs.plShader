@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
 // Right-hand side of the pressure solve. The unknown is phi = p * dt / (rho * dx) (m/s), so a face's projection is
@@ -43,9 +44,11 @@ float BSpline2(float t)
   return a < 0.5 ? 0.75 - a * a : (a < 1.5 ? 0.5 * (1.5 - a) * (1.5 - a) : 0.0);
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   int3 cell;
   if (!LiqBrickCell(groupId, groupThreadId, cell))
     return;

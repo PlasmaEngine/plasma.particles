@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // Start of a liquid volume's GPU frame: resets the stats it reads back, the per-frame counters, and on a reset
@@ -13,9 +14,11 @@ ALL
 RWByteAddressBuffer GpuFluidLiqStats;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(256, 1, 1)]
 void main(uint3 dispatchThreadId : SV_DispatchThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint word = dispatchThreadId.x;
   const bool bReset = LIQ_CONST(GpuFluidLiqPass).x != 0;
 

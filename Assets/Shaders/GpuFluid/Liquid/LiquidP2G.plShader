@@ -6,6 +6,7 @@ ALL
 [COMPUTESHADER]
 
 #define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
 
 // P2G as a gather: the thread of a cell owns that cell's low u, v and w faces (and the high ones on the domain's
@@ -45,9 +46,11 @@ bool AddClamped(inout int a, int b)
   return false;
 }
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 {
+  GPU_FLUID_KERNEL_MODES
   int3 cell;
   if (!LiqBrickCell(groupId, groupThreadId, cell))
     return;

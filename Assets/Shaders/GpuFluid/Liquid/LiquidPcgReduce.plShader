@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
 // One group: the sum of the partials of the active bricks, in a fixed order (thread t adds bricks t, t + 256, ...,
@@ -17,9 +18,11 @@ RWByteAddressBuffer GpuFluidLiqPcgPartials;
 
 groupshared float gs_fSum[GPU_FLUID_LIQUID_COARSEST_GROUP];
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_COARSEST_GROUP, 1, 1)]
 void main(uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint3 bricks = LiqBricks();
   const uint count = bricks.x * bricks.y * bricks.z;
 

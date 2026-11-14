@@ -5,6 +5,7 @@ ALL
 
 [COMPUTESHADER]
 
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
 #include <Shaders/Common/Common.h>
 #include <Shaders/GpuFluid/GpuFluidSparse.hlsli>
 
@@ -27,9 +28,11 @@ RWStructuredBuffer<uint> GpuFluidFaceCodes;
 RWStructuredBuffer<float> GpuFluidMGLocal;
 RWStructuredBuffer<float4> GpuFluidMGCoeff;
 
+GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
+  GPU_FLUID_KERNEL_MODES
   const uint slot = GpuFluidNewGroupSlot(groupId);
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
