@@ -41,6 +41,7 @@ void plGpuFluidLiquidShaders::Load()
   m_hSmoothBricksBlock = Load("LiquidSmoothBricksBlock");
   m_hP2GScatter = Load("LiquidP2GScatter");
   m_hSmoothDenseBlock = Load("LiquidSmoothDenseBlock");
+  m_hRestrictBricks = Load("LiquidRestrictBricks");
   m_hP2G = Load("LiquidP2G");
   m_hExtrapolate = Load("LiquidExtrapolate");
   m_hClassify = Load("LiquidClassify");
@@ -52,6 +53,7 @@ void plGpuFluidLiquidShaders::Load()
   m_hProlongBricks = Load("LiquidProlongBricks");
   m_hProlongDense = Load("LiquidProlongDense");
   m_hCoarsest = Load("LiquidCoarsest");
+  m_hRestrictBlock = Load("LiquidRestrictBlock");
   m_hResidual = Load("LiquidResidual");
   m_hProject = Load("LiquidProject");
   m_hG2P = Load("LiquidG2P");
@@ -283,6 +285,7 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
   {
     const plUInt64 uiCells = plUInt64(m_LevelDims[l].x) * m_LevelDims[l].y * m_LevelDims[l].z;
     m_hLevelX[l] = Make(uiCells * 4, "GpuFluid Liquid MG X");
+    m_hLevelSmoothed[l] = Make(uiCells * 4, "GpuFluid Liquid MG X Smoothed");
     m_hLevelB[l] = Make(uiCells * 4, "GpuFluid Liquid MG B");
     m_hLevelType[l] = Make(uiCells * 4, "GpuFluid Liquid MG Type");
   }
@@ -291,6 +294,7 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
   m_hPcgZ = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG Z");
   m_hPcgP = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG P");
   m_hPcgQ = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG Q");
+  m_hPcgP2 = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid PCG P2");
   m_hPcgPartials = Make(plUInt64(m_uiBrickCount) * 4, "GpuFluid Liquid PCG Partials");
   m_hPcgScalars = Make(GPU_FLUID_LIQUID_PCG_WORDS * 4, "GpuFluid Liquid PCG Scalars");
   m_hLevelRegion = Make(GPU_FLUID_LIQUID_MAX_LEVELS * GPU_FLUID_LIQUID_REGION_STRIDE, "GpuFluid Liquid Level Region", true);
@@ -416,6 +420,7 @@ void plGpuFluidLiquidSolver::Destroy()
   for (plUInt32 l = 0; l < GPU_FLUID_LIQUID_MAX_LEVELS; ++l)
   {
     Free(m_hLevelX[l]);
+    Free(m_hLevelSmoothed[l]);
     Free(m_hLevelB[l]);
     Free(m_hLevelType[l]);
   }
@@ -423,6 +428,7 @@ void plGpuFluidLiquidSolver::Destroy()
   Free(m_hPcgZ);
   Free(m_hPcgP);
   Free(m_hPcgQ);
+  Free(m_hPcgP2);
   Free(m_hPcgPartials);
   Free(m_hPcgScalars);
   Free(m_hLevelRegion);
@@ -1178,10 +1184,14 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
           {
             plGpuFluidLiquidConstants lc = c;
             lc.GpuFluidLiqPassF = vLevelSetParams;
+            {
+            const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/LevelSet");
             rec.RunIndirect(pShaders->m_hLevelSet, lc, hBrickArgs,
               {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart),
                 R("GpuFluidLiqPositions", hPos), W("GpuFluidLiqPhiOut", hPhiRaw)});
+            }
 
+            const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/LevelSet smooth");
             lc.GpuFluidLiqPassF = plVec4(vLevelSetParams.y, vLevelSetParams.z, 0.5f, 0.4f);
             for (plUInt32 i = 0; i < uiLevelSetSmoothPairs; ++i)
             {
@@ -1212,8 +1222,10 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       plGALBufferHandle levelX[GPU_FLUID_LIQUID_MAX_LEVELS];
       plGALBufferHandle levelB[GPU_FLUID_LIQUID_MAX_LEVELS];
       plGALBufferHandle levelType[GPU_FLUID_LIQUID_MAX_LEVELS];
+      plGALBufferHandle levelSmoothed[GPU_FLUID_LIQUID_MAX_LEVELS];
       for (plUInt32 l = 0; l < GPU_FLUID_LIQUID_MAX_LEVELS; ++l)
       {
+        levelSmoothed[l] = l == 0 ? plGALBufferHandle() : m_hLevelSmoothed[l];
         levelDims[l] = l < uiLevels ? m_LevelDims[l] : plVec3U32::MakeZero();
         levelX[l] = l == 0 ? hPressure : m_hLevelX[l];
         levelB[l] = l == 0 ? hRhs : m_hLevelB[l];
@@ -1230,12 +1242,19 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       const plUInt32 uiFineSweeps = plMath::Clamp<plUInt32>(input.m_uiFineSweeps, 1, 16);
       const plUInt32 uiFinePasses = plMath::Clamp<plUInt32>(input.m_uiFinePasses, 1, 8);
       const bool bBlockSmoothCoarse = input.m_bBlockSmoothCoarse;
+      const bool bBrickRestrict = input.m_bBrickRestrict;
+      const bool bFuseProlong = input.m_bFuseProlong && uiPost > 0;
       const plUInt32 uiCoarsePasses = plMath::Clamp<plUInt32>(input.m_uiCoarsePasses, 1, 8);
       const plUInt32 uiCoarseSweeps = plMath::Clamp<plUInt32>(input.m_uiCoarseSweeps, 1, 16);
       const plGALBufferHandle hPcgR = m_hPcgR, hPcgZ = m_hPcgZ, hPcgP = m_hPcgP, hPcgQ = m_hPcgQ, hPcgPartials = m_hPcgPartials, hPcgScalars = m_hPcgScalars;
+      const plGALBufferHandle hPcgP2 = m_hPcgP2;
+      const bool bFusePcg = input.m_bFusePcg && bPcg && bBlockSmooth && uiPre > 0 && uiPost > 0;
+      const bool bBlockRestrict = input.m_bBlockRestrict;
 
       // With m_bProfileKernels the stages are passes of their own: 1 classify, forces, right-hand side; 2 the pressure
       // solve; 4 residual, projection, extrapolation.
+      // The residual (N2) is a statistic of the frame's last substep only; the counters start over every substep.
+      const bool bLastSubstep = uiSub + 1 == uiSubsteps;
       auto AddSolvePass = [&](const char* szName, plUInt32 uiStages)
       {
       auto pass = ref_graph.AddComputePass(szName);
@@ -1245,11 +1264,14 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
       for (plGALBufferHandle h : {hCellType, hVelG, hVelS, hVelT, hValid0, hValid1, hPressure, hRhs, hCounters, hPcgR, hPcgZ, hPcgP, hPcgQ, hPcgPartials, hPcgScalars})
         pass.WriteBuffer(G(h));
+      pass.WriteBuffer(G(hPcgP2));
       for (plUInt32 l = 1; l < uiLevels; ++l)
       {
         pass.WriteBuffer(G(levelX[l]));
         pass.WriteBuffer(G(levelB[l]));
         pass.WriteBuffer(G(levelType[l]));
+        if (bFuseProlong)
+          pass.WriteBuffer(G(levelSmoothed[l]));
       }
       pass.HasSideEffects();
       pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
@@ -1265,13 +1287,20 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             plGpuFluidLiquidConstants classifyConstants = c;
             classifyConstants.GpuFluidLiqPass = plVec4U32(uiClassifyFlags, uiLiquidMinCount, 0, 0);
             classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, fLiquidPhi, fSprayPhi, 0.0f);
+            {
+            const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Classify");
             rec.RunIndirect(pShaders->m_hClassify, classifyConstants, hBrickArgs,
               {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqPhi", hPhiRaw), R("GpuFluidLiqShapes", hShapes), R("GpuFluidLiqSolidSdf", hSolidSdf),
                 R("GpuFluidLiqRegions", hRegions), W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqCounters", hCounters)});
+            }
 
+            {
+            const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Forces");
             rec.RunIndirect(pShaders->m_hForces, c, hBrickArgs,
               {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqVelStar", hVelS)});
+            }
 
+            const ProfileScope rhsScope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Rhs");
             plGpuFluidLiquidConstants rhsConstants = c;
             rhsConstants.GpuFluidLiqPassF = vDensityParams;
             rec.RunIndirect(pShaders->m_hRhs, rhsConstants, hBrickArgs,
@@ -1287,35 +1316,61 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             return lc;
           };
 
+          // The MGPCG direction p: with bFusePcg each q = A p writes the new one to the other buffer.
+          plGALBufferHandle hPcgDir = hPcgP;
+
           // Red-black sweeps; bReverse runs black before red (the post-smoothing, so a V-cycle is symmetric). On the
           // fine level x and b are the given buffers: the pressure and rhs, or z and r of the MGPCG preconditioner.
-          auto Smooth = [&](plUInt32 uiLevel, plUInt32 uiSweeps, bool bReverse, plGALBufferHandle hFineX, plGALBufferHandle hFineB)
+          //
+          // hCoarseX valid: the block smoothers' first launch adds that correction of level uiLevel + 1 as it loads
+          // (the prolongation folded in) and writes to another buffer, so no group reads a halo cell that already has
+          // it: the fine level to the PCG's q (free during a V-cycle), whose second launch copies back; a coarse level
+          // to its m_hLevelSmoothed. Returns the buffer that holds the level's x afterwards.
+          // uiFirstFlags and uiLastFlags: LiquidSmoothBricksBlock's MGPCG flags (bits 2 and 3) for the fine level's first
+          // and last launch.
+          auto Smooth = [&](plUInt32 uiLevel, plUInt32 uiSweeps, bool bReverse, plGALBufferHandle hFineX, plGALBufferHandle hFineB,
+                          plGALBufferHandle hCoarseX = plGALBufferHandle(), plUInt32 uiFirstFlags = 0, plUInt32 uiLastFlags = 0) -> plGALBufferHandle
           {
+            const bool bProlong = !hCoarseX.IsInvalidated();
+            const plGALBufferHandle hCoarseBind = bProlong ? hCoarseX : (uiLevel == 0 ? hFineX : levelX[uiLevel]);
             if (uiLevel == 0 && bBlockSmooth && uiSweeps > 0)
             {
               const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Smooth fine");
               plGpuFluidLiquidConstants lc = LevelConstants(0, 0, 1.0f);
-              lc.GpuFluidLiqPass = plVec4U32(0, bReverse ? 1u : 0u, uiFineSweeps, 0);
               for (plUInt32 uiPass = 0; uiPass < uiFinePasses; ++uiPass)
               {
+                const bool bFirst = bProlong && uiPass == 0, bCopyBack = bProlong && uiPass == 1;
+                const plGALBufferHandle hIn = bCopyBack ? hPcgQ : hFineX;
+                const plGALBufferHandle hOut = bFirst ? hPcgQ : hFineX;
+                const plUInt32 uiFlags = (bFirst ? 3u : (bCopyBack ? 2u : 0u)) | (uiPass == 0 ? uiFirstFlags : 0u) | (uiPass + 1 == uiFinePasses ? uiLastFlags : 0u);
+                lc.GpuFluidLiqPass = plVec4U32(0, bReverse ? 1u : 0u, uiFineSweeps, uiFlags);
                 rec.RunIndirect(pShaders->m_hSmoothBricksBlock, lc, hBrickArgs,
-                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hFineX), W("GpuFluidLiqMgB", hFineB), W("GpuFluidLiqMgType", levelType[0])});
+                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hIn), W("GpuFluidLiqMgXOut", hOut), W("GpuFluidLiqMgB", hFineB), W("GpuFluidLiqMgType", levelType[0]),
+                    W("GpuFluidLiqMgCoarseX", hCoarseBind), W("GpuFluidLiqPcgX", hPressure), W("GpuFluidLiqPcgP", hPcgDir), W("GpuFluidLiqPcgQ", hPcgQ),
+                    W("GpuFluidLiqPcgScalars", hPcgScalars), W("GpuFluidLiqPcgPartials", hPcgPartials)});
               }
-              return;
+              return hFineX;
             }
             if (uiLevel > 0 && bBlockSmoothCoarse && uiSweeps > 0)
             {
               const ProfileScope scope(bProfileKernels, rec.m_pEncoder, uiLevel == 1 ? "GpuFluid LiqProf/Smooth L1" : "GpuFluid LiqProf/Smooth L2+");
               plGpuFluidLiquidConstants lc = LevelConstants(uiLevel, 0, 1.0f);
-              lc.GpuFluidLiqPass = plVec4U32(uiLevel, bReverse ? 1u : 0u, uiCoarseSweeps, 0);
+              const plGALBufferHandle hSmoothed = levelSmoothed[uiLevel];
+              plGALBufferHandle hResult = levelX[uiLevel];
               for (plUInt32 uiPass = 0; uiPass < uiCoarsePasses; ++uiPass)
               {
+                const bool bFirst = bProlong && uiPass == 0, bCopyBack = bProlong && uiPass == 1;
+                const plGALBufferHandle hIn = bCopyBack ? hSmoothed : levelX[uiLevel];
+                hResult = bFirst ? hSmoothed : levelX[uiLevel];
+                lc.GpuFluidLiqPass = plVec4U32(uiLevel, bReverse ? 1u : 0u, uiCoarseSweeps, bFirst ? 3u : (bCopyBack ? 2u : 0u));
                 rec.RunIndirect(pShaders->m_hSmoothDenseBlock, lc, hLevelRegion,
-                  {brickActive, region, W("GpuFluidLiqMgX", levelX[uiLevel]), W("GpuFluidLiqMgB", levelB[uiLevel]), W("GpuFluidLiqMgType", levelType[uiLevel])},
+                  {brickActive, region, W("GpuFluidLiqMgX", hIn), W("GpuFluidLiqMgXOut", hResult), W("GpuFluidLiqMgB", levelB[uiLevel]), W("GpuFluidLiqMgType", levelType[uiLevel]),
+                    W("GpuFluidLiqMgCoarseX", hCoarseBind)},
                   uiLevel * GPU_FLUID_LIQUID_REGION_STRIDE + GPU_FLUID_LIQUID_REGION_BLOCK_ARGS);
               }
-              return;
+              return hResult;
             }
+            PL_ASSERT_DEV(!bProlong && uiFirstFlags == 0 && uiLastFlags == 0, "Only the block smoothers fold other steps in");
             const ProfileScope scope(bProfileKernels && uiSweeps > 0, rec.m_pEncoder, uiLevel == 0 ? "GpuFluid LiqProf/Smooth fine" : (uiLevel == 1 ? "GpuFluid LiqProf/Smooth L1" : "GpuFluid LiqProf/Smooth L2+"));
             for (plUInt32 s = 0; s < uiSweeps; ++s)
             {
@@ -1336,11 +1391,13 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
                 }
               }
             }
+            return uiLevel == 0 ? hFineX : levelX[uiLevel];
           };
 
           // One V-cycle on A x = b of the fine level, the recursion unrolled: down with pre-smoothing and
           // restriction, the coarsest solved in one group, up with prolongation and post-smoothing.
-          auto VCycle = [&](plGALBufferHandle hFineX, plGALBufferHandle hFineB)
+          // uiFirstFlags, uiLastFlags: see Smooth, for the fine level's pre-smoothing and post-smoothing.
+          auto VCycle = [&](plGALBufferHandle hFineX, plGALBufferHandle hFineB, plUInt32 uiFirstFlags = 0, plUInt32 uiLastFlags = 0)
           {
             if (uiLevels == 1)
             {
@@ -1350,8 +1407,23 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
             for (plUInt32 l = 0; l + 1 < uiLevels; ++l)
             {
-              Smooth(l, uiPre, false, hFineX, hFineB);
-              const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Restrict");
+              Smooth(l, uiPre, false, hFineX, hFineB, plGALBufferHandle(), l == 0 ? uiFirstFlags : 0u);
+              const ProfileScope scope(bProfileKernels, rec.m_pEncoder, l == 0 ? "GpuFluid LiqProf/Restrict fine" : "GpuFluid LiqProf/Restrict");
+              if (l == 0 && bBrickRestrict)
+              {
+                rec.RunIndirect(pShaders->m_hRestrictBricks, LevelConstants(1, 0, 1.0f), hBrickArgs,
+                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgFineX", hFineX), W("GpuFluidLiqMgFineB", hFineB), W("GpuFluidLiqMgFineType", levelType[0]),
+                    W("GpuFluidLiqMgX", levelX[1]), W("GpuFluidLiqMgB", levelB[1]), W("GpuFluidLiqMgType", levelType[1])});
+                continue;
+              }
+              if (bBlockRestrict && l > 0)
+              {
+                rec.RunIndirect(pShaders->m_hRestrictBlock, LevelConstants(l, 0, 1.0f), hLevelRegion,
+                  {brickActive, region, W("GpuFluidLiqMgFineX", levelX[l]), W("GpuFluidLiqMgFineB", levelB[l]), W("GpuFluidLiqMgFineType", levelType[l]),
+                    W("GpuFluidLiqMgX", levelX[l + 1]), W("GpuFluidLiqMgB", levelB[l + 1]), W("GpuFluidLiqMgType", levelType[l + 1])},
+                  l * GPU_FLUID_LIQUID_REGION_STRIDE + GPU_FLUID_LIQUID_REGION_BLOCK_ARGS);
+                continue;
+              }
               rec.RunIndirect(pShaders->m_hRestrict, LevelConstants(l + 1, 0, 1.0f), hLevelRegion,
                 {brickActive, region, W("GpuFluidLiqMgFineX", l == 0 ? hFineX : levelX[l]), W("GpuFluidLiqMgFineB", l == 0 ? hFineB : levelB[l]), W("GpuFluidLiqMgFineType", levelType[l]),
                   W("GpuFluidLiqMgX", levelX[l + 1]), W("GpuFluidLiqMgB", levelB[l + 1]), W("GpuFluidLiqMgType", levelType[l + 1])},
@@ -1365,24 +1437,34 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
               {brickActive, region, W("GpuFluidLiqMgX", levelX[uiCoarsest]), W("GpuFluidLiqMgB", levelB[uiCoarsest]), W("GpuFluidLiqMgType", levelType[uiCoarsest])});
             }
 
+            // hCoarseX: where level l + 1's x is after its post-smoothing.
+            plGALBufferHandle hCoarseX = levelX[uiCoarsest];
             for (plUInt32 l = uiLevels - 1; l-- > 0;)
             {
               const plGpuFluidLiquidConstants lc = LevelConstants(l, 0, 1.0f);
+              // With bFuseProlong the block post-smoothing of level l adds the correction as it loads. The fine level
+              // needs a second launch to copy back from q.
+              const bool bFused = bFuseProlong && (l == 0 ? bBlockSmooth && uiFinePasses >= 2 : bBlockSmoothCoarse);
+              if (bFused)
+              {
+                hCoarseX = Smooth(l, uiPost, true, hFineX, hFineB, hCoarseX, 0u, l == 0 ? uiLastFlags : 0u);
+                continue;
+              }
               {
               const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Prolong");
               if (l == 0)
               {
                 rec.RunIndirect(pShaders->m_hProlongBricks, lc, hBrickArgs,
-                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hFineX), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqMgCoarseX", levelX[1])});
+                  {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", hFineX), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqMgCoarseX", hCoarseX)});
               }
               else
               {
                 rec.RunIndirect(pShaders->m_hProlongDense, lc, hLevelRegion,
-                  {brickActive, region, W("GpuFluidLiqMgX", levelX[l]), W("GpuFluidLiqMgType", levelType[l]), W("GpuFluidLiqMgCoarseX", levelX[l + 1])},
+                  {brickActive, region, W("GpuFluidLiqMgX", levelX[l]), W("GpuFluidLiqMgType", levelType[l]), W("GpuFluidLiqMgCoarseX", hCoarseX)},
                   l * GPU_FLUID_LIQUID_REGION_STRIDE);
               }
               }
-              Smooth(l, uiPost, true, hFineX, hFineB);
+              hCoarseX = Smooth(l, uiPost, true, hFineX, hFineB, plGALBufferHandle(), 0u, l == 0 ? uiLastFlags : 0u);
             }
           };
 
@@ -1411,23 +1493,57 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             rec.RunIndirect(pShaders->m_hPcgInit, c, hBrickArgs,
               {brickArgs, brickList, brickActive, type, W("GpuFluidLiqMgX", hPressure), W("GpuFluidLiqMgB", hRhs), W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ),
                 W("GpuFluidLiqPcgP", hPcgP)});
-            VCycle(hPcgZ, hPcgR);
-            DotRZ(GPU_FLUID_LIQUID_PCG_REDUCE_START);
+
+            // With bFusePcg: r * z in the V-cycle's last launch, the new p in q = A p, x and r in the next V-cycle's
+            // first launch (which starts z from zero, as UpdateX left it).
+            constexpr plUInt32 uiDotFlag = 4u, uiUpdateXFlags = 8u | 2u;
+            auto UpdateX = [&]()
+            {
+              rec.RunIndirect(pShaders->m_hPcgUpdateX, c, hBrickArgs,
+                {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqMgX", hPressure), W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgP", hPcgDir),
+                  W("GpuFluidLiqPcgQ", hPcgQ)});
+            };
+
+            VCycle(hPcgZ, hPcgR, 0u, bFusePcg ? uiDotFlag : 0u);
+            if (bFusePcg)
+              Reduce(GPU_FLUID_LIQUID_PCG_REDUCE_START);
+            else
+              DotRZ(GPU_FLUID_LIQUID_PCG_REDUCE_START);
 
             const plUInt32 uiIterations = plMath::Max(uiCycles, 1u);
             for (plUInt32 uiIteration = 0; uiIteration < uiIterations; ++uiIteration)
             {
               {
               const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/PCG apply");
-              rec.RunIndirect(pShaders->m_hPcgApply, c, hBrickArgs, {brickArgs, brickList, brickActive, type, W("GpuFluidLiqMgX", hPcgP), W("GpuFluidLiqPcgQ", hPcgQ), partials});
+              if (bFusePcg)
+              {
+                const plGALBufferHandle hNewDir = hPcgDir == hPcgP ? hPcgP2 : hPcgP;
+                plGpuFluidLiquidConstants lc = c;
+                lc.GpuFluidLiqPass.w = 1;
+                rec.RunIndirect(pShaders->m_hPcgApply, lc, hBrickArgs,
+                  {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqMgX", hPcgDir), W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgPOut", hNewDir), W("GpuFluidLiqPcgQ", hPcgQ), partials});
+                hPcgDir = hNewDir;
+              }
+              else
+              {
+                rec.RunIndirect(pShaders->m_hPcgApply, c, hBrickArgs,
+                  {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqMgX", hPcgP), W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgPOut", hPcgP2), W("GpuFluidLiqPcgQ", hPcgQ), partials});
+              }
               }
               Reduce(GPU_FLUID_LIQUID_PCG_REDUCE_ALPHA);
-              rec.RunIndirect(pShaders->m_hPcgUpdateX, c, hBrickArgs,
-                {brickArgs, brickList, brickActive, type, scalars, W("GpuFluidLiqMgX", hPressure), W("GpuFluidLiqPcgR", hPcgR), W("GpuFluidLiqPcgZ", hPcgZ), W("GpuFluidLiqPcgP", hPcgP),
-                  W("GpuFluidLiqPcgQ", hPcgQ)});
 
-              if (uiIteration + 1 < uiIterations)
+              if (uiIteration + 1 == uiIterations)
               {
+                UpdateX();
+              }
+              else if (bFusePcg)
+              {
+                VCycle(hPcgZ, hPcgR, uiUpdateXFlags, uiDotFlag);
+                Reduce(GPU_FLUID_LIQUID_PCG_REDUCE_BETA);
+              }
+              else
+              {
+                UpdateX();
                 VCycle(hPcgZ, hPcgR);
                 DotRZ(GPU_FLUID_LIQUID_PCG_REDUCE_BETA);
               }
@@ -1441,8 +1557,11 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
           if ((uiStages & 4u) != 0)
           {
-            rec.RunIndirect(pShaders->m_hResidual, LevelConstants(0, 0, 1.0f), hBrickArgs,
-              {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgB", levelB[0]), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqCounters", hCounters)});
+            if (bLastSubstep)
+            {
+              rec.RunIndirect(pShaders->m_hResidual, LevelConstants(0, 0, 1.0f), hBrickArgs,
+                {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgB", levelB[0]), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqCounters", hCounters)});
+            }
 
             rec.RunIndirect(pShaders->m_hProject, c, hBrickArgs,
               {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqPressure", hPressure), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqValidOut", hValid0)});
@@ -1612,15 +1731,21 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
         c.GpuFluidLiqPass = plVec4U32(uiTag, 0, 0, 0);
         c.GpuFluidLiqPassF = plVec4(fOutside, fFar, fBlend, fCellsPerVelocity);
+        {
+        const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Surface blend");
         rec.RunIndirect(pShaders->m_hSurfaceBlend, c, hBrickArgs,
           {brickArgs, brickList, brickActive, shapes, solids,W("GpuFluidLiqSurfPhi", hPhiRaw), R("GpuFluidLiqPhiPrev", hPhiPrev), R("GpuFluidLiqStampPrev", hStampPrev), R("GpuFluidLiqVel", hVelT),
             W("GpuFluidLiqPhiOut", hPhiCur), W("GpuFluidLiqStampOut", hStampCur)});
+        }
 
         c.GpuFluidLiqPassF = plVec4(fOutside, fFar, fSmoothGain, fSmoothClamp);
+        {
+        const ProfileScope scope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Surface smooth");
         for (plUInt32 i = 0; i < uiSmoothPairs; ++i)
         {
           rec.RunIndirect(pShaders->m_hSurfaceSmooth, c, hBrickArgs, {brickArgs, brickList, brickActive, shapes, solids,W("GpuFluidLiqSurfPhi", hPhiCur), W("GpuFluidLiqPhiOut", hPhiTmp)});
           rec.RunIndirect(pShaders->m_hSurfaceSmooth, c, hBrickArgs, {brickArgs, brickList, brickActive, shapes, solids,W("GpuFluidLiqSurfPhi", hPhiTmp), W("GpuFluidLiqPhiOut", hPhiCur)});
+        }
         }
 
         c.GpuFluidLiqPass = plVec4U32(0, uiMaxQuads, uiMaxVertices, 0);
@@ -1628,6 +1753,7 @@ bool plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
         c.GpuFluidLiqPass = plVec4U32(uiMaxVertices, uiMaxQuads, 0, 0);
         c.GpuFluidLiqPassF = plVec4(fOutside, fFar, 0.0f, 0.0f);
+        const ProfileScope meshScope(bProfileKernels, rec.m_pEncoder, "GpuFluid LiqProf/Surface mesh");
         rec.RunIndirect(pShaders->m_hSurfaceVerts, c, hBrickArgs,
           {brickArgs, brickList, brickActive, shapes, solids,W("GpuFluidLiqSurfPhi", hPhiCur), W("GpuFluidLiqSurfVertices", hVertices), W("GpuFluidLiqSurfCubeMap", hCubeMap),
             W("GpuFluidLiqSurfCounters", hSurfCounters)});

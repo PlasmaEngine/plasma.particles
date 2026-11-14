@@ -12,7 +12,12 @@ ALL
 // 8^3 block of the level's region (LiquidLevelRegion), the block and a one-cell halo of the solution in groupshared
 // memory, red-black Gauss-Seidel inside the block with the halo held. Coarse levels take theta as the constant.
 //
-// GpuFluidLiqPass: x level, y 1 runs black before red in every sweep, z the sweeps.
+// GpuFluidLiqPass: x level, y 1 runs black before red in every sweep, z the sweeps, w flags as LiquidSmoothBricksBlock:
+// bit 0 adds the correction of level x + 1 (GpuFluidLiqMgCoarseX) first, LiquidProlongDense folded into the load on
+// the same liquid cells of the region, the halo's included; bit 1 writes every cell of the region to GpuFluidLiqMgXOut.
+
+RWByteAddressBuffer GpuFluidLiqMgCoarseX;
+RWByteAddressBuffer GpuFluidLiqMgXOut;
 
 #define LIQ_BLOCK GPU_FLUID_LIQUID_BRICK
 #define LIQ_TILE (LIQ_BLOCK + 2)
@@ -34,11 +39,21 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   const uint level = MgLevel();
   const uint3 dims = LiqLevelDims(level);
   const int3 origin = int3(GpuFluidLiqLevelRegion.Load3(level * GPU_FLUID_LIQUID_REGION_STRIDE + 16) + groupId * LIQ_BLOCK);
+  const bool bProlong = (LIQ_CONST(GpuFluidLiqPass).w & 1u) != 0;
+  const bool bWriteAll = (LIQ_CONST(GpuFluidLiqPass).w & 2u) != 0;
+  const uint3 coarseDims = LiqLevelDims(level + 1);
 
   for (uint i = groupIndex; i < LIQ_TILE_CELLS; i += LIQ_BLOCK * LIQ_BLOCK * LIQ_BLOCK)
   {
     const int3 c = origin + int3(i % LIQ_TILE, (i / LIQ_TILE) % LIQ_TILE, i / (LIQ_TILE * LIQ_TILE)) - 1;
-    gs_fX[i] = LiqInsideDims(c, dims) ? asfloat(GpuFluidLiqMgX.Load(LiqCellIndexIn(c, dims) * 4)) : 0.0;
+    float x = 0.0;
+    if (LiqInsideDims(c, dims))
+    {
+      x = asfloat(GpuFluidLiqMgX.Load(LiqCellIndexIn(c, dims) * 4));
+      if (bProlong && MgInRegion(level, c) && MgTypeAt(GpuFluidLiqMgType, c, dims, level) == GPU_FLUID_LIQUID_CELL_LIQUID)
+        x += asfloat(GpuFluidLiqMgCoarseX.Load(LiqCellIndexIn(c / 2, coarseDims) * 4));
+    }
+    gs_fX[i] = x;
   }
 
   const int3 local = int3(groupThreadId);
@@ -50,12 +65,12 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   if (LiqInsideDims(cell, dims) && MgInRegion(level, cell))
   {
     const uint index = LiqCellIndexIn(cell, dims);
-    if ((GpuFluidLiqMgType.Load(index * 4) & 3u) == GPU_FLUID_LIQUID_CELL_LIQUID)
+    if (MgTypeAt(GpuFluidLiqMgType, cell, dims, level) == GPU_FLUID_LIQUID_CELL_LIQUID)
     {
       const float air = LiqInvTheta();
       [unroll] for (uint n = 0; n < 6; ++n)
       {
-        const uint t = LiqTypeAt(GpuFluidLiqMgType, cell + LiqNeighbourOffset(n), dims, false);
+        const uint t = MgTypeAt(GpuFluidLiqMgType, cell + LiqNeighbourOffset(n), dims, level);
         if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
         {
           if (LiqNeighbourSideOpen(n))
@@ -101,6 +116,6 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     }
   }
 
-  if (bLiquid)
-    GpuFluidLiqMgX.Store(LiqCellIndexIn(cell, dims) * 4, asuint(gs_fX[own]));
+  if (bLiquid || (bWriteAll && LiqInsideDims(cell, dims) && MgInRegion(level, cell)))
+    GpuFluidLiqMgXOut.Store(LiqCellIndexIn(cell, dims) * 4, asuint(gs_fX[own]));
 }

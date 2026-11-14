@@ -20,5 +20,5 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   if (!MgRegionCell(MgLevel(), dispatchThreadId, cell) || !LiqInsideDims(cell, dims))
     return;
 
-  MgSmoothCell(cell, dims, false);
+  MgSmoothCell(cell, dims, MgLevel());
 }

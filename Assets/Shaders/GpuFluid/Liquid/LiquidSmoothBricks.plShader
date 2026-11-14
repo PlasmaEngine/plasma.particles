@@ -20,5 +20,5 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   if (!LiqBrickCell(groupId, groupThreadId, cell))
     return;
 
-  MgSmoothCell(cell, LiqCells(), true);
+  MgSmoothCell(cell, LiqCells(), 0);
 }

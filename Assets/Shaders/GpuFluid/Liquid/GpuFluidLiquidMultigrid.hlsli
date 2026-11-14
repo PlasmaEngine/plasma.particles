@@ -44,9 +44,24 @@ uint MgSweeps() { return LIQ_CONST(GpuFluidLiqPass).z; }
 float MgOmega() { return LIQ_CONST(GpuFluidLiqPassF).x; }
 float MgRestrictScale() { return LIQ_CONST(GpuFluidLiqPassF).y; }
 
-/// Diagonal and the sum of the liquid neighbours' solution of cell c.
-void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 dims, bool bFine, out float out_diag, out float out_sum)
+/// Type of cell c of multigrid level `level` (0 the fine grid). Level 1 is restricted brick by brick from the active
+/// fine bricks only (LiquidRestrictBricks), so its cells over an inactive fine brick are air (as the dense restriction
+/// wrote them from the air its children read as) whatever an earlier substep left in them.
+uint MgTypeAt(RWByteAddressBuffer types, int3 c, uint3 dims, uint level)
 {
+  if (level == 0)
+    return LiqTypeAt(types, c, dims, true);
+  if (!LiqInsideDims(c, dims))
+    return GPU_FLUID_LIQUID_CELL_OUTSIDE;
+  if (level == 1 && GpuFluidLiqBrickActive.Load(LiqBrickIndex(c * 2) * 4) == 0)
+    return GPU_FLUID_LIQUID_CELL_AIR;
+  return types.Load(LiqCellIndexIn(c, dims) * 4) & 3u;
+}
+
+/// Diagonal and the sum of the liquid neighbours' solution of cell c of level `level`.
+void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 dims, uint level, out float out_diag, out float out_sum)
+{
+  const bool bFine = level == 0;
   // The fine level takes theta per face from the cell's type word (the level set's free surface); the coarse levels,
   // which only precondition, use the constant.
   const uint ownWord = bFine ? types.Load(LiqCellIndexIn(c, dims) * 4) : 0u;
@@ -56,7 +71,7 @@ void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 
   [unroll] for (uint n = 0; n < 6; ++n)
   {
     const int3 nb = c + LiqNeighbourOffset(n);
-    const uint t = LiqTypeAt(types, nb, dims, bFine);
+    const uint t = MgTypeAt(types, nb, dims, level);
     const float air = bFine ? LiqAirInvTheta(ownWord, n) : LiqInvTheta();
     if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
     {
@@ -76,26 +91,26 @@ void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 
 }
 
 /// b - A x at liquid cell c.
-float MgResidual(RWByteAddressBuffer types, RWByteAddressBuffer xs, RWByteAddressBuffer bs, int3 c, uint3 dims, bool bFine)
+float MgResidual(RWByteAddressBuffer types, RWByteAddressBuffer xs, RWByteAddressBuffer bs, int3 c, uint3 dims, uint level)
 {
   float diag, sum;
-  MgStencil(types, xs, c, dims, bFine, diag, sum);
+  MgStencil(types, xs, c, dims, level, diag, sum);
   const uint index = LiqCellIndexIn(c, dims);
   return asfloat(bs.Load(index * 4)) - (diag * asfloat(xs.Load(index * 4)) - sum);
 }
 
 /// One red-black Gauss-Seidel (SOR) update of cell c, when it has this pass's colour and is liquid.
-void MgSmoothCell(int3 c, uint3 dims, bool bFine)
+void MgSmoothCell(int3 c, uint3 dims, uint level)
 {
   if ((((uint)(c.x + c.y + c.z)) & 1u) != MgColour())
     return;
 
   const uint index = LiqCellIndexIn(c, dims);
-  if ((GpuFluidLiqMgType.Load(index * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
+  if (MgTypeAt(GpuFluidLiqMgType, c, dims, level) != GPU_FLUID_LIQUID_CELL_LIQUID)
     return;
 
   float diag, sum;
-  MgStencil(GpuFluidLiqMgType, GpuFluidLiqMgX, c, dims, bFine, diag, sum);
+  MgStencil(GpuFluidLiqMgType, GpuFluidLiqMgX, c, dims, level, diag, sum);
   if (diag <= 0.0)
     return;
 

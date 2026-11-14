@@ -61,7 +61,8 @@ struct plGpuFluidLiquidFrameInput
   /// instead of breaking the CFL number.
   plUInt32 m_uiMaxSubsteps = 4;
   plUInt32 m_uiMinSubsteps = 1;
-  float m_fCflNumber = 2.5f;
+  /// 3 cells per substep: the liquid gallery (the Medium room, the P8 flood) passes at it as at 2.5.
+  float m_fCflNumber = 3.0f;
   /// Fine-level smoothing: every sweep of a smoothing call in one launch per brick (block Gauss-Seidel in groupshared
   /// memory, LiquidSmoothBricksBlock) instead of one launch per colour and sweep.
   bool m_bBlockSmooth = true;
@@ -80,9 +81,22 @@ struct plGpuFluidLiquidFrameInput
   bool m_bBlockSmoothCoarse = true;
   plUInt32 m_uiCoarsePasses = 1;
   plUInt32 m_uiCoarseSweeps = 2;
+  /// The restriction to level 1 brick by brick over the active fine bricks (LiquidRestrictBricks): every fine residual
+  /// worked out once, instead of eight per coarse cell over the dense region.
+  bool m_bBrickRestrict = true;
+  /// Prolongation folded into the first launch of the block post-smoothing that follows it (one launch fewer per level
+  /// and V-cycle, the same result).
+  bool m_bFuseProlong = true;
+  /// The MGPCG vector updates folded into the kernels around them (the new direction into q = A p, x and r into the
+  /// first smoothing launch of the V-cycle after, r * z into its last): three launches fewer per iteration, the same
+  /// result. Needs block smoothing on the fine level and both pre- and post-smoothing.
+  bool m_bFusePcg = true;
+  /// The restriction between dense levels per 8^3 block, a thread per fine cell (LiquidRestrictBlock), instead of a
+  /// thread per coarse cell. The same sums.
+  bool m_bBlockRestrict = true;
   plUInt32 m_uiSpeedHistory = 8;
   plUInt32 m_uiSubstepHoldTicks = 15;
-  float m_fSubstepDownMargin = 0.8f;
+  float m_fSubstepDownMargin = 0.95f;
 
   /// Pressure solve: MGPCG (conjugate gradients, one multigrid V-cycle as the preconditioner per iteration) or, when
   /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep, a fixed count (no readback). Measured
@@ -306,6 +320,7 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hSmoothBricksBlock;
   plShaderResourceHandle m_hP2GScatter;
   plShaderResourceHandle m_hSmoothDenseBlock;
+  plShaderResourceHandle m_hRestrictBricks;
   plShaderResourceHandle m_hP2G;
   plShaderResourceHandle m_hExtrapolate;
   plShaderResourceHandle m_hClassify;
@@ -317,6 +332,7 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hProlongBricks;
   plShaderResourceHandle m_hProlongDense;
   plShaderResourceHandle m_hCoarsest;
+  plShaderResourceHandle m_hRestrictBlock;
   plShaderResourceHandle m_hResidual;
   plShaderResourceHandle m_hProject;
   plShaderResourceHandle m_hG2P;
@@ -445,8 +461,10 @@ private:
   plGALBufferHandle m_hBrickList;
   plGALBufferHandle m_hBrickArgs;
 
-  // Multigrid levels 1..: solution, right-hand side, type.
+  // Multigrid levels 1..: solution, right-hand side, type, and the solution after the fused prolongation and
+  // post-smoothing (m_bFuseProlong), which the prolongation onto the level below reads.
   plGALBufferHandle m_hLevelX[GPU_FLUID_LIQUID_MAX_LEVELS];
+  plGALBufferHandle m_hLevelSmoothed[GPU_FLUID_LIQUID_MAX_LEVELS];
   plGALBufferHandle m_hLevelB[GPU_FLUID_LIQUID_MAX_LEVELS];
   plGALBufferHandle m_hLevelType[GPU_FLUID_LIQUID_MAX_LEVELS];
 
@@ -456,6 +474,7 @@ private:
   plGALBufferHandle m_hPcgZ;
   plGALBufferHandle m_hPcgP;
   plGALBufferHandle m_hPcgQ;
+  plGALBufferHandle m_hPcgP2; ///< the other direction buffer: with m_bFusePcg each q = A p writes the new p to the other
   plGALBufferHandle m_hPcgPartials;
   plGALBufferHandle m_hPcgScalars;
   plGALBufferHandle m_hLevelRegion; ///< per coarse multigrid level: the region a V-cycle works on, as dispatch arguments

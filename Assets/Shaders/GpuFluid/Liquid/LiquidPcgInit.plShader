@@ -25,7 +25,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     return;
 
   const uint index = LiqCellIndex(cell);
-  const float r = PcgIsLiquid(cell) ? MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, LiqCells(), true) : 0.0;
+  const float r = PcgIsLiquid(cell) ? MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, LiqCells(), 0) : 0.0;
   GpuFluidLiqPcgR.Store(index * 4, asuint(r));
   GpuFluidLiqPcgZ.Store(index * 4, 0u);
   GpuFluidLiqPcgP.Store(index * 4, 0u);

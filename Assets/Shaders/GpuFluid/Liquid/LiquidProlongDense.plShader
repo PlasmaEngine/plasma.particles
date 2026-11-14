@@ -25,7 +25,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     return;
 
   const uint index = LiqCellIndexIn(cell, dims);
-  if ((GpuFluidLiqMgType.Load(index * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
+  if (MgTypeAt(GpuFluidLiqMgType, cell, dims, level) != GPU_FLUID_LIQUID_CELL_LIQUID)
     return;
 
   const float correction = asfloat(GpuFluidLiqMgCoarseX.Load(LiqCellIndexIn(cell / 2, LiqLevelDims(level + 1)) * 4));

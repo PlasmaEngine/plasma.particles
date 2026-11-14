@@ -27,6 +27,6 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   if ((GpuFluidLiqMgType.Load(LiqCellIndexIn(cell, dims) * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID)
     return;
 
-  const float r = MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, dims, true);
+  const float r = MgResidual(GpuFluidLiqMgType, GpuFluidLiqMgX, GpuFluidLiqMgB, cell, dims, 0);
   GpuFluidLiqCounters.InterlockedMax(GPU_FLUID_LIQUID_CTR_RESIDUAL_MAX * 4, asuint(abs(r)));
 }

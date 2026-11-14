@@ -37,11 +37,11 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
   [unroll] for (uint o = 0; o < 8; ++o)
   {
     const int3 child = cell * 2 + int3(o & 1u, (o >> 1) & 1u, (o >> 2) & 1u);
-    const uint t = LiqTypeAt(GpuFluidLiqMgFineType, child, fineDims, bFine);
+    const uint t = MgTypeAt(GpuFluidLiqMgFineType, child, fineDims, level - 1);
     if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
     {
       bAnyLiquid = true;
-      sum += MgResidual(GpuFluidLiqMgFineType, GpuFluidLiqMgFineX, GpuFluidLiqMgFineB, child, fineDims, bFine);
+      sum += MgResidual(GpuFluidLiqMgFineType, GpuFluidLiqMgFineX, GpuFluidLiqMgFineB, child, fineDims, level - 1);
     }
     else if (t == GPU_FLUID_LIQUID_CELL_AIR)
     {

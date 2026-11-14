@@ -43,7 +43,7 @@ void main(uint groupIndex : SV_GroupIndex)
     gs_fInvDiag[i] = 0.0;
 
     const int3 c = int3(i % dims.x, (i / dims.x) % dims.y, i / (dims.x * dims.y));
-    if ((GpuFluidLiqMgType.Load(i * 4) & 3u) != GPU_FLUID_LIQUID_CELL_LIQUID || !MgInRegion(level, c))
+    if (MgTypeAt(GpuFluidLiqMgType, c, dims, level) != GPU_FLUID_LIQUID_CELL_LIQUID || !MgInRegion(level, c))
       continue;
 
     float diag = 0.0;
@@ -57,7 +57,7 @@ void main(uint groupIndex : SV_GroupIndex)
           diag += air;
         continue;
       }
-      const uint t = GpuFluidLiqMgType.Load(LiqCellIndexIn(nb, dims) * 4) & 3u;
+      const uint t = MgTypeAt(GpuFluidLiqMgType, nb, dims, level);
       if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
       {
         diag += 1.0;

@@ -5,9 +5,8 @@ ALL
 
 [COMPUTESHADER]
 
-#define GPU_FLUID_LIQUID_BRICK_DISPATCH
 #include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
-#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidPcg.hlsli>
 
 // Every sweep of one smoothing call on the fine level in one launch: per active brick, the brick and a one-cell halo of
 // the solution in groupshared memory, red-black Gauss-Seidel inside the brick with the halo held at its value from the
@@ -16,7 +15,24 @@ ALL
 // costs, not the cells, were most of the solve.
 //
 // GpuFluidLiqPass: y 1 runs black before red in every sweep (the post-smoothing, so a V-cycle stays symmetric for the
-// MGPCG preconditioner), z the sweeps.
+// MGPCG preconditioner), z the sweeps, w flags:
+// - bit 0 adds the level-1 correction (GpuFluidLiqMgCoarseX) first: LiquidProlongBricks folded into the load, the same
+//   piecewise-constant correction on the same liquid cells, the halo's included, one launch fewer;
+// - bit 1 writes every cell of the brick to GpuFluidLiqMgXOut, not only the smoothed ones;
+// - bit 2 stores the brick's MGPCG partial of r * z (x is z, b is r here): LiquidPcgDot folded into the last launch of
+//   the preconditioner's V-cycle, the same products summed in the same order;
+// - bit 3 starts from z = 0 after the MGPCG step x += alpha p, r -= alpha q (GpuFluidLiqPcgX, GpuFluidLiqPcgP,
+//   GpuFluidLiqPcgQ), which it makes for its own cell first: LiquidPcgUpdateX folded into the first launch of the
+//   V-cycle (bit 1 too, so every z of the brick is written, as UpdateX zeroed them).
+// The result goes to GpuFluidLiqMgXOut. When that is GpuFluidLiqMgX, a group can read a halo cell that the next brick
+// has already written; with the correction added on load that cell would get it twice, so a launch with bit 0 writes
+// to another buffer (and bit 1 keeps every cell of it defined), and the next launch copies back.
+
+RWByteAddressBuffer GpuFluidLiqMgCoarseX;
+RWByteAddressBuffer GpuFluidLiqMgXOut;
+RWByteAddressBuffer GpuFluidLiqPcgX;
+RWByteAddressBuffer GpuFluidLiqPcgP;
+RWByteAddressBuffer GpuFluidLiqPcgQ;
 
 #define GPU_FLUID_LIQUID_TILE (GPU_FLUID_LIQUID_BRICK + 2)
 #define GPU_FLUID_LIQUID_TILE_CELLS (GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE)
@@ -45,12 +61,24 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   const uint3 bricks = LiqBricks();
   const int3 origin = int3(uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y)) * GPU_FLUID_LIQUID_BRICK);
   const uint3 dims = LiqCells();
+  const bool bProlong = (LIQ_CONST(GpuFluidLiqPass).w & 1u) != 0;
+  const bool bWriteAll = (LIQ_CONST(GpuFluidLiqPass).w & 2u) != 0;
+  const bool bDot = (LIQ_CONST(GpuFluidLiqPass).w & 4u) != 0;
+  const bool bUpdateX = (LIQ_CONST(GpuFluidLiqPass).w & 8u) != 0;
+  const uint3 coarseDims = LiqLevelDims(1);
 
   for (uint i = groupIndex; i < GPU_FLUID_LIQUID_TILE_CELLS; i += GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK)
   {
     const int3 local = int3(i % GPU_FLUID_LIQUID_TILE, (i / GPU_FLUID_LIQUID_TILE) % GPU_FLUID_LIQUID_TILE, i / (GPU_FLUID_LIQUID_TILE * GPU_FLUID_LIQUID_TILE)) - 1;
     const int3 c = origin + local;
-    gs_fX[i] = LiqInside(c) ? asfloat(GpuFluidLiqMgX.Load(LiqCellIndex(c) * 4)) : 0.0;
+    float x = 0.0;
+    if (LiqInside(c) && !bUpdateX)
+    {
+      x = asfloat(GpuFluidLiqMgX.Load(LiqCellIndex(c) * 4));
+      if (bProlong && MgTypeAt(GpuFluidLiqMgType, c, dims, 0) == GPU_FLUID_LIQUID_CELL_LIQUID)
+        x += asfloat(GpuFluidLiqMgCoarseX.Load(LiqCellIndexIn(c / 2, coarseDims) * 4));
+    }
+    gs_fX[i] = x;
   }
 
   // This cell's stencil, fixed for the launch: the diagonal, which neighbours are liquid, and b.
@@ -60,12 +88,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   float diag = 0.0;
   uint liquidMask = 0;
   float b = 0.0;
+  bool bOwnLiquid = false;
   if (LiqInside(cell))
   {
     const uint index = LiqCellIndex(cell);
     const uint ownWord = GpuFluidLiqMgType.Load(index * 4);
     if ((ownWord & 3u) == GPU_FLUID_LIQUID_CELL_LIQUID)
     {
+      bOwnLiquid = true;
       [unroll] for (uint n = 0; n < 6; ++n)
       {
         const uint t = LiqTypeAt(GpuFluidLiqMgType, cell + LiqNeighbourOffset(n), dims, true);
@@ -87,6 +117,14 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       }
       bLiquid = diag > 0.0;
       b = asfloat(GpuFluidLiqMgB.Load(index * 4));
+      if (bUpdateX)
+      {
+        const float alpha = PcgScalar(GPU_FLUID_LIQUID_PCG_ALPHA);
+        const float x = asfloat(GpuFluidLiqPcgX.Load(index * 4)) + alpha * asfloat(GpuFluidLiqPcgP.Load(index * 4));
+        b = b - alpha * asfloat(GpuFluidLiqPcgQ.Load(index * 4));
+        GpuFluidLiqPcgX.Store(index * 4, asuint(x));
+        GpuFluidLiqMgB.Store(index * 4, asuint(b));
+      }
     }
   }
   GroupMemoryBarrierWithGroupSync();
@@ -115,6 +153,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     }
   }
 
-  if (bLiquid)
-    GpuFluidLiqMgX.Store(LiqCellIndex(cell) * 4, asuint(gs_fX[own]));
+  if (bLiquid || (bWriteAll && LiqInside(cell)))
+    GpuFluidLiqMgXOut.Store(LiqCellIndex(cell) * 4, asuint(gs_fX[own]));
+
+  // The group takes this branch as a whole (a launch constant).
+  if (bDot)
+    PcgStorePartial(groupIndex, LiqInside(cell), cell, bOwnLiquid ? b * gs_fX[own] : 0.0);
 }

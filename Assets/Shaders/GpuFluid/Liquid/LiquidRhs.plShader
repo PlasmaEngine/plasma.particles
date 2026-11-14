@@ -44,13 +44,73 @@ float BSpline2(float t)
   return a < 0.5 ? 0.75 - a * a : (a < 1.5 ? 0.5 * (1.5 - a) * (1.5 - a) : 0.0);
 }
 
+#define LIQ_HALO (GPU_FLUID_LIQUID_BRICK + 2)
+#define LIQ_HALO_CELLS (LIQ_HALO * LIQ_HALO * LIQ_HALO)
+#define LIQ_THREADS (GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK)
+#define LIQ_DENSITY_SCALE 1048576.0 // fixed point of the density sums: a cell overflows past about 2048 (n0 is 8)
+#define LIQ_DENSITY_MAX_PER_CELL 256
+
+// The density by scatter: one thread per liquid cell of the brick and of the one-cell halo around it reads its particles
+// once and adds their kernel weights to the cells of the brick they reach (integer sums, so the order does not
+// matter). Gathering it per cell read every particle 27 times; a scatter per particle took 27 atomics per particle.
+groupshared int gs_iDensity[LIQ_THREADS];
+
 GPU_FLUID_KERNEL_CAPS
 [numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
-void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
   GPU_FLUID_KERNEL_MODES
-  int3 cell;
-  if (!LiqBrickCell(groupId, groupThreadId, cell))
+
+  // The whole group takes the same branch: past the end of the brick list it leaves before the barrier.
+  const uint4 args = GpuFluidLiqBrickArgs.Load4(0);
+  const uint listIndex = GpuFluidLinearGroup(groupId, args.x);
+  if (listIndex >= args.w)
+    return;
+  const uint brick = GpuFluidLiqBrickList.Load(listIndex * 4);
+  const uint3 bricks = LiqBricks();
+  const int3 origin = int3(uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y)) * GPU_FLUID_LIQUID_BRICK);
+  const uint3 cells = LiqCells();
+  const float invDx = LiqInvDx();
+
+  gs_iDensity[groupIndex] = 0;
+  GroupMemoryBarrierWithGroupSync();
+
+  for (uint h = groupIndex; h < LIQ_HALO_CELLS; h += LIQ_THREADS)
+  {
+    const int3 source = origin + int3(h % LIQ_HALO, (h / LIQ_HALO) % LIQ_HALO, h / (LIQ_HALO * LIQ_HALO)) - 1;
+    if (LiqTypeAt(GpuFluidLiqCellType, source, cells, true) != GPU_FLUID_LIQUID_CELL_LIQUID)
+      continue;
+    const uint sourceIndex = LiqCellIndex(source);
+    const uint count = min(GpuFluidLiqCellCount.Load(sourceIndex * 4), (uint)LIQ_DENSITY_MAX_PER_CELL);
+    const uint start = GpuFluidLiqCellStart.Load(sourceIndex * 4);
+    if (count == 0)
+      continue;
+
+    // The cell's kernel weight at the 27 cell centres around it, summed over its particles in registers, then one
+    // atomic per target inside the brick.
+    float sums[27];
+    [unroll] for (uint o = 0; o < 27; ++o)
+      sums[o] = 0.0;
+    for (uint k = 0; k < count; ++k)
+    {
+      const float3 d = asfloat(GpuFluidLiqPositions.Load3((start + k) * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx - (float3(source) + 0.5);
+      float3 w[3];
+      [unroll] for (uint j = 0; j < 3; ++j)
+        w[j] = float3(BSpline2(d.x - float(j) + 1.0), BSpline2(d.y - float(j) + 1.0), BSpline2(d.z - float(j) + 1.0));
+      [unroll] for (uint o = 0; o < 27; ++o)
+        sums[o] += w[o % 3].x * w[(o / 3) % 3].y * w[o / 9].z;
+    }
+    [unroll] for (uint o = 0; o < 27; ++o)
+    {
+      const int3 local = source + int3(o % 3, (o / 3) % 3, o / 9) - 1 - origin;
+      if (all(local >= 0) && all(local < GPU_FLUID_LIQUID_BRICK) && sums[o] > 0.0)
+        InterlockedAdd(gs_iDensity[local.x + GPU_FLUID_LIQUID_BRICK * (local.y + GPU_FLUID_LIQUID_BRICK * local.z)], (int)round(sums[o] * LIQ_DENSITY_SCALE));
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const int3 cell = origin + int3(groupThreadId);
+  if (!LiqInside(cell))
     return;
 
   const uint index = LiqCellIndex(cell);
@@ -72,12 +132,9 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
   const float4 params = LIQ_CONST(GpuFluidLiqPassF);
   const float dt = max(LiqDt(), 1e-6);
   const float n0 = LiqParticlesPerCell();
-  const uint3 cells = LiqCells();
-  const float3 centre = float3(cell) + 0.5;
-  const float invDx = LiqInvDx();
 
   // Kernel mass of a cell at offset o from the centre, per axis: 2/3 for the cell itself, 1/6 for each side.
-  float density = 0.0;
+  const float density = float(gs_iDensity[groupIndex]) / LIQ_DENSITY_SCALE;
   float mass = 0.0;
   bool bDeep = true;
   for (int z = -1; z <= 1; ++z)
@@ -107,15 +164,6 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
 
         const float3 share = float3(abs(o.x) == 0 ? 2.0 / 3.0 : 1.0 / 6.0, abs(o.y) == 0 ? 2.0 / 3.0 : 1.0 / 6.0, abs(o.z) == 0 ? 2.0 / 3.0 : 1.0 / 6.0);
         mass += share.x * share.y * share.z;
-
-        const uint nbIndex = LiqCellIndex(nb);
-        const uint count = GpuFluidLiqCellCount.Load(nbIndex * 4);
-        const uint start = GpuFluidLiqCellStart.Load(nbIndex * 4);
-        for (uint k = 0; k < count; ++k)
-        {
-          const float3 d = asfloat(GpuFluidLiqPositions.Load3((start + k) * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx - centre;
-          density += BSpline2(d.x) * BSpline2(d.y) * BSpline2(d.z);
-        }
       }
     }
   }

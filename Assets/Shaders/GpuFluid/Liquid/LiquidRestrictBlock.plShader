@@ -1,0 +1,86 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// LiquidRestrict from dense level l = GpuFluidLiqPass.x to l + 1, laid out as LiquidRestrictBricks: one group per 8^3
+// block of level l's region (LiquidLevelRegion; its smallest cell is even, so a block holds all 2^3 children of its
+// 4^3 coarse cells), each thread works out its cell's residual once into groupshared memory, then one thread per coarse
+// cell sums its children as LiquidRestrict does. LiquidRestrict, a thread per coarse cell working out 8 residuals in a
+// row, had a few thousand threads on the small levels, each waiting on a long chain of loads.
+//
+// GpuFluidLiqMgFineX/B/Type: level l. GpuFluidLiqMgX/B/Type: level l + 1. GpuFluidLiqPassF.y: scale of the restricted
+// residual.
+
+RWByteAddressBuffer GpuFluidLiqMgFineX;
+RWByteAddressBuffer GpuFluidLiqMgFineB;
+RWByteAddressBuffer GpuFluidLiqMgFineType;
+
+#define LIQ_BLOCK GPU_FLUID_LIQUID_BRICK
+#define LIQ_BLOCK_CELLS (LIQ_BLOCK * LIQ_BLOCK * LIQ_BLOCK)
+
+groupshared float gs_fResidual[LIQ_BLOCK_CELLS];
+groupshared uint gs_uiFlags[LIQ_BLOCK_CELLS]; // bit 0 liquid, bit 1 air
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(LIQ_BLOCK, LIQ_BLOCK, LIQ_BLOCK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint level = LIQ_CONST(GpuFluidLiqPass).x;
+  const uint3 fineDims = LiqLevelDims(level);
+  const int3 origin = int3(GpuFluidLiqLevelRegion.Load3(level * GPU_FLUID_LIQUID_REGION_STRIDE + 16) + groupId * LIQ_BLOCK);
+
+  // This thread's cell of level l: liquid (with its residual), air, or neither (solid, past the level, or outside the
+  // region, whose cells no coarse cell of the region has as a child).
+  const int3 cell = origin + int3(groupThreadId);
+  uint flags = 0;
+  float residual = 0.0;
+  if (MgInRegion(level, cell))
+  {
+    const uint t = MgTypeAt(GpuFluidLiqMgFineType, cell, fineDims, level);
+    if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      flags = 1u;
+      residual = MgResidual(GpuFluidLiqMgFineType, GpuFluidLiqMgFineX, GpuFluidLiqMgFineB, cell, fineDims, level);
+    }
+    else if (t == GPU_FLUID_LIQUID_CELL_AIR)
+    {
+      flags = 2u;
+    }
+  }
+  gs_fResidual[groupIndex] = residual;
+  gs_uiFlags[groupIndex] = flags;
+  GroupMemoryBarrierWithGroupSync();
+
+  // One thread per coarse cell: the threads whose cell is the low corner of its 2^3 children.
+  if (any((groupThreadId & 1u) != 0))
+    return;
+  const uint coarseLevel = level + 1;
+  const uint3 dims = LiqLevelDims(coarseLevel);
+  const int3 coarse = cell / 2;
+  if (!LiqInsideDims(coarse, dims) || !MgInRegion(coarseLevel, coarse))
+    return;
+
+  float sum = 0.0;
+  uint childFlags = 0;
+  [unroll] for (uint o = 0; o < 8; ++o)
+  {
+    const uint3 child = groupThreadId + uint3(o & 1u, (o >> 1) & 1u, (o >> 2) & 1u);
+    const uint childIndex = child.x + LIQ_BLOCK * (child.y + LIQ_BLOCK * child.z);
+    sum += gs_fResidual[childIndex];
+    childFlags |= gs_uiFlags[childIndex];
+  }
+  // A coarse cell touching the free surface is Dirichlet (air), as in LiquidRestrict.
+  const bool bLiquid = (childFlags & 1u) != 0 && (childFlags & 2u) == 0;
+  const uint type = bLiquid ? GPU_FLUID_LIQUID_CELL_LIQUID : ((childFlags & 2u) != 0 ? GPU_FLUID_LIQUID_CELL_AIR : GPU_FLUID_LIQUID_CELL_SOLID);
+  const uint index = LiqCellIndexIn(coarse, dims);
+  GpuFluidLiqMgType.Store(index * 4, type);
+  GpuFluidLiqMgB.Store(index * 4, asuint(bLiquid ? MgRestrictScale() * sum : 0.0));
+  GpuFluidLiqMgX.Store(index * 4, 0u);
+}

@@ -218,6 +218,10 @@ namespace
     pLiquid->m_Tuning.m_uiFinePasses = static_cast<plUInt32>(TuningFloat("FINE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiFinePasses)));
     pLiquid->m_Tuning.m_bP2GScatter = TuningFloat("P2G_SCATTER", pLiquid->m_Tuning.m_bP2GScatter ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_bBlockSmoothCoarse = TuningFloat("BLOCK_COARSE", pLiquid->m_Tuning.m_bBlockSmoothCoarse ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bBrickRestrict = TuningFloat("BRICK_RESTRICT", pLiquid->m_Tuning.m_bBrickRestrict ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bFuseProlong = TuningFloat("FUSE_PROLONG", pLiquid->m_Tuning.m_bFuseProlong ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bFusePcg = TuningFloat("FUSE_PCG", pLiquid->m_Tuning.m_bFusePcg ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bBlockRestrict = TuningFloat("BLOCK_RESTRICT", pLiquid->m_Tuning.m_bBlockRestrict ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_uiCoarsePasses = static_cast<plUInt32>(TuningFloat("COARSE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiCoarsePasses)));
     pLiquid->m_Tuning.m_uiCoarseSweeps = static_cast<plUInt32>(TuningFloat("COARSE_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiCoarseSweeps)));
 
