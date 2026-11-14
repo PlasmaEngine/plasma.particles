@@ -24,6 +24,39 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidQuality
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidQuality);
 
+/// \brief How often a gas volume ticks: its quality's rate (plGpuFluidGasTier), or a fixed one.
+struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasTickRate
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Quality, ///< the quality tier's rate
+    Hz30,
+    Hz60,
+
+    Default = Quality
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidGasTickRate);
+
+/// \brief One gas row of the quality tiers (design plan section 9, rewritten from the P2 Release measurements, see
+/// plGpuFluidGetGasTier). A volume's MaxBricks, PressureCycles and TickRate override the row; the
+/// GpuFluid.Gas.VelocityMacCormack and GpuFluid.Gas.PressureCycles CVars override it for comparisons.
+struct plGpuFluidGasTier
+{
+  plUInt32 m_uiBrickCap = 1536;     ///< pool slots, created at activation and never resized
+  float m_fTickSeconds = 1.0f / 30; ///< fixed tick; at most plGpuFluidMaxGasTicksPerFrame a frame
+  plUInt32 m_uiPressureCycles = 2;  ///< multigrid V(2,2) cycles per tick
+  bool m_bMacCormack = true;        ///< MacCormack correction of the scalars' advection
+  bool m_bMacCormackVelocity = false; ///< and of the velocity's
+  bool m_bVorticity = true;         ///< vorticity confinement
+};
+
+/// The gas row of a quality tier.
+PL_PARTICLEPLUGIN_DLL const plGpuFluidGasTier& plGpuFluidGetGasTier(plGpuFluidQuality::Enum quality);
+
 /// \brief What a GpuFluid volume simulates.
 struct PL_PARTICLEPLUGIN_DLL plGpuFluidKind
 {
@@ -137,9 +170,9 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidGasSettings
   }
 };
 
-/// Gas tick, seconds: 60 Hz, 30 Hz on Low (design plan, section 4). GpuFluid.Debug.StepTime overrides it.
+/// The shortest gas tick, seconds (60 Hz; the tiers' own rates are in plGpuFluidGasTier). GpuFluid.Debug.StepTime
+/// overrides a volume's tick.
 constexpr float plGpuFluidGasTick = 1.0f / 60.0f;
-constexpr float plGpuFluidGasTickLow = 1.0f / 30.0f;
 
 /// Most gas ticks one frame runs; beyond that the simulation runs in slow motion.
 constexpr plUInt32 plGpuFluidMaxGasTicksPerFrame = 2;

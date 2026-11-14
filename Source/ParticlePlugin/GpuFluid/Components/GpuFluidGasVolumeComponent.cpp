@@ -13,7 +13,7 @@
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <Shaders/GpuFluid/GpuFluidGasConstants.h>
 
-plCVarFloat cvar_GpuFluidDebugStepTime("GpuFluid.Debug.StepTime", 0.0f, plCVarFlags::Default, "Overrides the gas solver's fixed tick, in seconds (0: 1/60 s, 1/30 s on Low).");
+plCVarFloat cvar_GpuFluidDebugStepTime("GpuFluid.Debug.StepTime", 0.0f, plCVarFlags::Default, "Overrides the gas solver's fixed tick, in seconds (0: the volume's TickRate, by default its quality's: 1/30 s on Low and Medium, 1/60 s from High up).");
 plCVarBool cvar_GpuFluidDebugInjectNaN("GpuFluid.Debug.InjectNaN", false, plCVarFlags::Default, "Test hook: the next simulated gas tick writes one NaN into the density at its source's centre, then this turns itself off.");
 plCVarBool cvar_GpuFluidDebugSemiLagrangian("GpuFluid.Debug.SemiLagrangian", false, plCVarFlags::Default, "Advects the gas scalars and velocity semi-Lagrangian only, without the MacCormack correction, whatever the quality.");
 plCVarInt cvar_GpuFluidGasPressureSolver("GpuFluid.Gas.PressureSolver", 1, plCVarFlags::Default, "Gas pressure solver: 0 red-black SOR (the volume's PressureIterations sweeps), 1 multigrid V-cycles.");
@@ -33,9 +33,21 @@ plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 40
 plCVarInt cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", -1, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection: -1 the quality's default (High and up), 0 off, 1 on (from Medium up).");
 plCVarBool cvar_GpuFluidGasMassCorrection("GpuFluid.Gas.MassCorrection", true, plCVarFlags::Default, "Closed gas volumes (every face closed, AllocateAll) scale their density each tick so the advection keeps the total mass.");
 plCVarFloat cvar_GpuFluidGasVorticity("GpuFluid.Gas.Vorticity", -1.0f, plCVarFlags::Default, "Overrides the gas volumes' vorticity confinement epsilon (negative: each volume's own).");
-plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws the edges of every allocated gas brick into the gas, glowing by the bucket that keeps it: pale yellow a source's, orange with content, red-orange flux, dark red proximity, faint idle; the gas itself is shown without its glow.");
+plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws the edges of every allocated gas brick into the gas, glowing in the colour of the bucket that keeps it: orange a source's, green with content, cyan flux, blue proximity, grey idle; the gas itself is shown without its glow.");
 plCVarBool cvar_GpuFluidDebugBrickLines("GpuFluid.Debug.BrickLines", false, plCVarFlags::Default, "Draws every allocated gas brick as a debug line box (orange a source's, green with content, cyan flux, blue proximity, grey idle). On Metal the VDB march then draws no gas in that view.");
 plCVarBool cvar_GpuFluidDebugBrickStats("GpuFluid.Debug.BrickStats", false, plCVarFlags::Default, "Shows the gas volumes' active bricks and pool size on screen.");
+
+namespace
+{
+  /// The brick view: optical depth of one crossing of a brick edge (about a voxel of edge density). A faint edge hardly
+  /// dims the gas behind the lattice.
+  constexpr float s_fBrickViewEdgeDepth = 0.01f;
+  /// Optical depth per voxel of gas above which the edges inside it fade (GasFinalize): thick smoke keeps its look.
+  constexpr float s_fBrickViewGasDepth = 0.02f;
+} // namespace
+
+plCVarFloat cvar_GpuFluidDebugBrickGlow("GpuFluid.Debug.BrickGlow", 0.04f, plCVarFlags::Default, "The brick view: how much of its colour one crossing of a brick edge puts on screen. A ray through a plume crosses the edges of many bricks, each adding its glow, so above about 0.05 the lattice tints the dark parts of the gas until they read as transparent (the P2 review's vanishing smoke; the gas data itself is unchanged).");
+
 plCVarFloat cvar_GpuFluidGasVorticityRate("GpuFluid.Gas.VorticityRate", 10.0f, plCVarFlags::Default, "Vorticity confinement: the rate k (1/s) of the acceleration eps dx k (N x w).");
 
 // clang-format off
@@ -48,6 +60,7 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidGasVolumeComponent, 4, plComponentMode::Static
     PL_MEMBER_PROPERTY("MaxBricks", m_uiMaxBricks)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 204 * 204 * 204)),
     PL_MEMBER_PROPERTY("AllocateAll", m_bAllocateAll)->AddAttributes(new plDefaultValueAttribute(false)),
     PL_ENUM_MEMBER_PROPERTY("Quality", plGpuFluidQuality, m_Quality),
+    PL_ENUM_MEMBER_PROPERTY("TickRate", plGpuFluidGasTickRate, m_TickRate),
     PL_BITFLAGS_MEMBER_PROPERTY("OpenFaces", plGpuFluidFaces, m_OpenFaces),
     PL_MEMBER_PROPERTY("Buoyancy", m_fBuoyancy)->AddAttributes(new plGroupAttribute("Simulation"), new plDefaultValueAttribute(6.0f), new plClampValueAttribute(-100.0f, 100.0f), new plSuffixAttribute(" m/s²")),
     PL_MEMBER_PROPERTY("DensityWeight", m_fDensityWeight)->AddAttributes(new plDefaultValueAttribute(0.1f), new plClampValueAttribute(-100.0f, 100.0f), new plSuffixAttribute(" m/s²")),
@@ -291,17 +304,7 @@ plGpuFluidGasSettings plGpuFluidGasVolumeComponent::ComputeSettings() const
 
 plUInt32 plGpuFluidGasVolumeComponent::GetTierBrickCap(plGpuFluidQuality::Enum quality)
 {
-  switch (quality)
-  {
-    case plGpuFluidQuality::Low:
-      return 512;
-    case plGpuFluidQuality::High:
-      return 3072;
-    case plGpuFluidQuality::Ultra:
-      return 6144;
-    default:
-      return 1536;
-  }
+  return plGpuFluidGetGasTier(quality).m_uiBrickCap;
 }
 
 plUInt32 plGpuFluidGasVolumeComponent::GetPoolCapacity() const
@@ -419,6 +422,7 @@ void plGpuFluidGasVolumeComponent::Update()
   input.m_Simulation.m_bBrickView = cvar_GpuFluidDebugBricks.GetValue();
   input.m_bDebugGridVirtual = m_bDebugGridReadback;
   input.m_bHashState = m_bDebugHashState;
+  input.m_bReverseSlots = m_bDebugReverseSlots;
 
   m_pManager->SetGasFrameInput(m_VolumeId, input);
 
@@ -430,18 +434,25 @@ void plGpuFluidGasVolumeComponent::Update()
     plGpuFluidGasStats stats;
     if (GetStats(stats))
     {
-      plDebugRenderer::DrawInfoText(GetWorld(), plDebugTextPlacement::TopLeft, "GpuFluid", plFmt("Gas bricks: {} active of {} in the pool, {} with content, {} new, {} freed, {} denied", stats.m_uiAllocActive,
-                                                                                              GetPoolCapacity(), stats.m_uiAllocatedBricks, stats.m_uiNewBricks, stats.m_uiFreedBricks, stats.m_uiDeniedBricks));
+      plDebugRenderer::DrawInfoText(GetWorld(), plDebugTextPlacement::TopLeft, "GpuFluid", plFmt("Gas bricks: {} active of {} in the pool, {} with content, {} new, {} freed, {} evicted, {} denied", stats.m_uiAllocActive,
+                                                                                              GetPoolCapacity(), stats.m_uiAllocatedBricks, stats.m_uiNewBricks, stats.m_uiFreedBricks, stats.m_uiEvictedBricks, stats.m_uiDeniedBricks));
     }
   }
 }
 
 void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGasSimulation& out_simulation)
 {
-  // Fixed ticks: 60 Hz (30 Hz on Low), at most two a frame; time beyond that is dropped, so a slow frame runs the gas
-  // in slow motion rather than spiralling. The harness's fixed 1/30 s step gives exactly two ticks every frame.
+  // Fixed ticks at the tier's rate (30 Hz on Low and Medium, 60 Hz from High up) or the volume's TickRate, at most two
+  // a frame; time beyond that is dropped, so a slow frame runs the gas in slow motion rather than spiralling. The
+  // harness's fixed 1/30 s step gives one 30 Hz or two 60 Hz ticks every frame.
+  const plGpuFluidGasTier& tier = plGpuFluidGetGasTier(m_Quality);
+  float fTickSeconds = tier.m_fTickSeconds;
+  if (m_TickRate == plGpuFluidGasTickRate::Hz30)
+    fTickSeconds = 1.0f / 30.0f;
+  else if (m_TickRate == plGpuFluidGasTickRate::Hz60)
+    fTickSeconds = 1.0f / 60.0f;
   const float fOverride = cvar_GpuFluidDebugStepTime.GetValue();
-  const plTime tick = plTime::MakeFromSeconds(fOverride > 0.0f ? fOverride : (m_Quality == plGpuFluidQuality::Low ? plGpuFluidGasTickLow : plGpuFluidGasTick));
+  const plTime tick = plTime::MakeFromSeconds(fOverride > 0.0f ? fOverride : fTickSeconds);
 
   m_SimAccumulator += timeDiff;
 
@@ -492,21 +503,23 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
   sim.m_fEdgeFadeVoxels = m_fEdgeFade / fVoxel;
   sim.m_uiPressureIterations = m_uiPressureIterations;
   // MacCormack scalars from Medium up; MacCormack velocity from High up (Medium advects the velocity semi-Lagrangian:
-  // it costs about 0.9 ms a tick at 1024 bricks and gains gas in a closed box, see N4), unless the CVar says otherwise.
-  sim.m_bMacCormack = m_Quality != plGpuFluidQuality::Low && !cvar_GpuFluidDebugSemiLagrangian.GetValue();
+  // it costs about 0.7 ms a tick at 1000 bricks and gains gas in a closed box, see N4), unless the CVar says otherwise.
+  sim.m_bMacCormack = tier.m_bMacCormack && !cvar_GpuFluidDebugSemiLagrangian.GetValue();
   const plInt32 iVelocityMacCormack = cvar_GpuFluidGasVelocityMacCormack.GetValue();
-  sim.m_bMacCormackVelocity = sim.m_bMacCormack && (iVelocityMacCormack < 0 ? m_Quality >= plGpuFluidQuality::High : iVelocityMacCormack > 0);
+  sim.m_bMacCormackVelocity = sim.m_bMacCormack && (iVelocityMacCormack < 0 ? tier.m_bMacCormackVelocity : iVelocityMacCormack > 0);
 
   // The closed-box mass correction: only where nothing may leave.
   sim.m_bMassCorrection = cvar_GpuFluidGasMassCorrection.GetValue() && m_bAllocateAll && m_OpenFaces.GetValue() == 0;
   sim.m_fAllocThreshold = m_fAllocThreshold;
   sim.m_fMeanFloor = 1e-4f;
+  sim.m_fBrickViewEdgeDensity = s_fBrickViewEdgeDepth / (plMath::Max(m_fDensityScale, 1e-3f) * fVoxel);
+  sim.m_fBrickViewGasDensity = s_fBrickViewGasDepth / (plMath::Max(m_fDensityScale, 1e-3f) * fVoxel);
   // Twice the frame's ticks, so the next frame's ticks never carry content past what was allocated for it.
   sim.m_fAllocLookahead = 2.0f * static_cast<float>(plMath::Max(uiTicks, 1u)) * sim.m_fTickSeconds;
 
   // Vorticity confinement from Medium up.
   const float fVorticity = cvar_GpuFluidGasVorticity.GetValue() >= 0.0f ? cvar_GpuFluidGasVorticity.GetValue() : m_fVorticity;
-  sim.m_fVorticity = m_Quality != plGpuFluidQuality::Low ? fVorticity : 0.0f;
+  sim.m_fVorticity = tier.m_bVorticity ? fVorticity : 0.0f;
   sim.m_fVorticityRate = plMath::Max(cvar_GpuFluidGasVorticityRate.GetValue(), 0.0f);
 
   // Pressure: the multigrid unless the reference solver is asked for.
@@ -586,15 +599,7 @@ void plGpuFluidGasVolumeComponent::FillSimulation(plTime timeDiff, plGpuFluidGas
 
 plUInt32 plGpuFluidGasVolumeComponent::GetDefaultPressureCycles(plGpuFluidQuality::Enum quality)
 {
-  switch (quality)
-  {
-    case plGpuFluidQuality::Low:
-      return 1;
-    case plGpuFluidQuality::Ultra:
-      return 3;
-    default:
-      return 2;
-  }
+  return plGpuFluidGetGasTier(quality).m_uiPressureCycles;
 }
 
 namespace
@@ -906,15 +911,17 @@ void plGpuFluidGasVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderData
   pRenderData->m_fEmissionScale = m_fEmissionScale;
   if (publish.m_bBrickView)
   {
-    // The brick view's edges glow by their bucket through the blackbody ramp of the temperature channel.
+    // The brick view's edges glow in their bucket's colour, which GasFinalize writes into the emission channel (gba).
+    // An edge crossing has an optical depth of s_fBrickViewEdgeDepth, so this puts about GpuFluid.Debug.BrickGlow of its
+    // colour on screen.
     pRenderData->m_EmissionColor = plColor::White;
-    pRenderData->m_fEmissionScale = 8.0f;
+    pRenderData->m_fEmissionScale = plMath::Max(cvar_GpuFluidDebugBrickGlow.GetValue(), 0.0f) / s_fBrickViewEdgeDepth;
   }
   pRenderData->m_fAnisotropy = m_fAnisotropy;
   // The march's majorant: the solver clamps density to DensityMax, the analytic sphere peaks at PeakDensity.
   pRenderData->m_fMaxDensity = m_DebugSource == plGpuFluidDebugSource::None ? plMath::Max(m_fDensityMax, 1e-3f) : plMath::Max(m_fPeakDensity, 1e-3f);
   pRenderData->m_uiFrame = 0;
-  pRenderData->m_Channels = plVDBVolumeChannel::Density | plVDBVolumeChannel::Temperature;
+  pRenderData->m_Channels = publish.m_bBrickView ? (plVDBVolumeChannel::Density | plVDBVolumeChannel::Emission) : (plVDBVolumeChannel::Density | plVDBVolumeChannel::Temperature);
   // The coarse taps lose the temperature (design plan F4): the brick view needs the full march.
   pRenderData->m_RenderMode = m_RenderMode;
   if (publish.m_bBrickView)

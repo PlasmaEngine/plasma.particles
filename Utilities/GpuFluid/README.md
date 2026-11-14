@@ -121,18 +121,42 @@ stay those of the whole box). The pool is the quality's cap (Low 512, Medium 153
   may be left. `N1_Allocation.csv` (the `alloc_*` and `denied_b*` columns).
 - **N1 Allocation Cap**: the same plume in a 64 brick pool: no NaN or overflow, the pool fills, requests are denied, and
   a bucket is only denied once every request of every later bucket was (bucket 3 first). `N1_AllocationCap.csv`.
-- **N11 Determinism**: the plume four times, hashed every frame in virtual brick order (GasHash): twice with the
-  defaults and a 1024 pool, then with `GpuFluid.Gas.ExactSampling` and pools of 1024 and 512. Each pair must match on
-  every frame. Hardware filtering differs in the last bits between pools (the atlas coordinate's rounding depends on
-  the slot), so cross-pool determinism needs exact sampling, which costs about 3.6 times the advection.
+- **N1 Allocation Evict**: the plume in a 96 brick pool; once the pool is full the source travels 9 m along +x into
+  bricks without a slot. The allocator must evict bricks no source overlaps (idle first, then proximity only, flux,
+  content) so that no source request is denied and every frame still emits at least 90% of the median emission before
+  the pool filled; the N1 invariants hold on every readback. The `alloc_evicted` and `mass_dropped` CSV columns
+  (`N1_AllocationEvict.csv`) count the evicted slots and the gas they still held.
+- **N11 Determinism**: the plume five times, hashed every frame in virtual brick order (GasHash): twice with the
+  defaults and a 1024 pool, then with `GpuFluid.Gas.ExactSampling` and pools of 1024 and 512, and once more with exact
+  sampling, the 1024 pool and the free slots handed out in descending order (`m_bDebugReverseSlots`), so every brick,
+  and every slot freed and taken again, lands in another slot than in the ascending run. Each pair must match on every
+  frame. Hardware filtering differs in the last bits between pools (the atlas coordinate's rounding depends on the
+  slot), so cross-pool determinism needs exact sampling, which costs about 3.6 times the advection. This is an open
+  item against the design's N11 (the default mode is deterministic per pool and slot layout only).
+- **Smoke Column Sparse**: the Smoke Column twice with the same seed and ticks, the whole box allocated and then sparse.
+  The mass curves must agree within 2.4% until the plume reaches the open top (frame 110) and within 14% over the
+  run, the last images within 0.95% of white on average (the measured run plus 50%: 1.6%, 9.3% and 0.48-0.63%).
+  `SmokeColumnSparse.csv`, `SmokeColumnTwin_Whole.png`, `SmokeColumnTwin_Sparse.png`. The difference is the flow, not
+  lost gas: freeing drops nothing here (the plume only grows), but an unallocated neighbour is open air (p = 0, the
+  ambient wind), so the sparse plume's boundary is a free surface a brick or two from the gas instead of simulated
+  still air; its centroid rises up to 0.18 m slower and less of it reaches the open top. Gas advected into an
+  unallocated neighbour is not counted anywhere (the flux lookahead requests those bricks a frame ahead).
 - **Moving Emitter Video**: with `PL_GPUFLUID_VIDEO=1`, hero demo (a): a source driving across a 64 x 48 m courtyard at
-  25 cm (6144 virtual bricks, the Medium pool), walls, pillars, a gatehouse and a well as colliders, a 1.5 m/s wind;
-  `GpuFluid.Debug.Bricks` draws the brick edges into the gas from 4.5 to 10 s and `GpuFluid.Debug.BrickStats` shows
-  the allocation. 450 frames into `GpuFluidGallery/MovingEmitter/`.
+  25 cm (6144 virtual bricks, Medium at 30 Hz, a pool of 640 so it fills during the clip and the source's bricks
+  evict others), walls, pillars, a gatehouse and a well as colliders, a 1.5 m/s wind; `GpuFluid.Debug.Bricks` draws
+  the brick edges into the gas from 4.5 to 10 s and `GpuFluid.Debug.BrickStats` shows the allocation. No source
+  request may be denied. 450 frames into `GpuFluidGallery/MovingEmitter/`.
 
-Debug CVars: `GpuFluid.Debug.Bricks` (the brick view: the edges of every allocated brick drawn into the gas, glowing by
-the bucket that keeps it), `GpuFluid.Debug.BrickStats` (the allocation as on-screen text), `GpuFluid.Debug.BrickLines`
-(the bricks as debug line boxes, for the editor; on Metal the VDB march then draws no gas in that view).
+Freeing and eviction: a slot is freed after 8 allocation steps without a request in any bucket. When the sources'
+pending bricks (bucket 0) outnumber the free slots, GasAlloc evicts slots of bricks no source overlaps for them, lowest
+class first (idle, proximity only, flux, content) and in slot order within a class, so a full pool never starves a
+source. The gas a freed or evicted brick still held at its last Finalize is counted in `plGpuFluidGasStats::m_fMassDropped`.
+
+Debug CVars: `GpuFluid.Debug.Bricks` (the brick view: the gas's density without its glow, and the edges of every
+allocated brick drawn in as a faint gas glowing in its bucket's colour: orange a source's, green content, cyan flux,
+blue proximity, grey idle; every allocated brick is marched in this view, also those without content),
+`GpuFluid.Debug.BrickStats` (the allocation as on-screen text), `GpuFluid.Debug.BrickLines` (the bricks as debug line
+boxes, for the editor; on Metal the VDB march then draws no gas in that view).
 
 ## Timing (`GpuFluid Tier Timing`)
 

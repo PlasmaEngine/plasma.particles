@@ -27,8 +27,9 @@ public:
   plResult SetupHandoffScene(float fSeparation, bool bPulse);
 
   /// The smoke column of P1: a simulated 4 x 4 x 8 m box standing on the stage's floor, open on every side but the
-  /// bottom, fed by a warm sphere source near the floor.
-  plResult SetupSmokeColumnScene();
+  /// bottom, fed by a warm sphere source near the floor, ticking at 60 Hz. The whole box is allocated unless
+  /// bAllocateAll is false (Smoke Column Sparse).
+  plResult SetupSmokeColumnScene(bool bAllocateAll = true);
 
   /// The simulated volume of the smoke scenes.
   plGpuFluidGasVolumeComponent* GetSmokeVolume();
@@ -167,6 +168,8 @@ protected:
     N11Determinism,
     MovingEmitterVideo,
     N4GasMassVelocityMacCormack,
+    N1AllocationEvict,
+    SmokeColumnSparse,
   };
 
   /// One stats readback of a simulated volume, with the simulation time it was recorded at.
@@ -200,6 +203,8 @@ protected:
     plUInt32 m_uiAllocFreed = 0;     ///< bricks freed
     plUInt32 m_uiAllocDenied = 0;    ///< requests denied
     plUInt32 m_uiDeniedBucket[4] = {};
+    plUInt32 m_uiAllocEvicted = 0;   ///< slots evicted for the sources' bricks
+    float m_fMassDropped = 0.0f;     ///< gas the freed and evicted bricks still held
     float m_fMassCorrection = 1.0f;  ///< the last tick's correction factor
     float m_fMassAdvect[4] = {};     ///< interior density before and after each tick's advection (with the correction)
   };
@@ -243,6 +248,8 @@ private:
   plTestAppRun RunN1Allocation(bool bCap);
   plTestAppRun RunN11Determinism();
   plTestAppRun RunMovingEmitterVideo();
+  plTestAppRun RunN1AllocationEvict();
+  plTestAppRun RunSmokeColumnSparse();
 
   /// N1's invariants on one grid debug readback; false (and logged) when one fails. uiDenied: the frame's denials.
   bool CheckAllocationInvariants(const plGpuFluidGridDebug& debug, plUInt32 uiDenied);
@@ -295,6 +302,14 @@ private:
   plDynamicArray<plHashTable<plUInt64, plUInt64>> m_N11Hashes;
   plDynamicArray<plUInt32> m_N11MaxActive;
   plDynamicArray<plUInt32> m_N11Denied;
+  plDynamicArray<plUInt32> m_N11Freed;
+  /// P2 Smoke Column Sparse: per phase (whole box, sparse) the mass and the centroid's height (m) per relative frame, and
+  /// the last frame's image.
+  plDynamicArray<plHashTable<plUInt64, plVec2>> m_TwinMass;
+  plImage m_TwinImages[2];
+  float m_fTwinDropped = 0.0f;
+  float m_fTwinEmitted[2] = {};
+  plUInt32 m_uiTwinMaxActive = 0;
 
   plImage m_GpuAlone;
   plImage m_GpuAgain;

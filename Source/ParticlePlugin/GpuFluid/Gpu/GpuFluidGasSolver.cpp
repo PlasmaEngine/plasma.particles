@@ -617,9 +617,10 @@ void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFlui
   plGpuFluidGasConstants constants = MakeConstants(grid, sim, 0.0f);
   constants.GpuFluidGasParams0 = plVec4(vAmbientWind.x, vAmbientWind.y, vAmbientWind.z, 0.0f);
 
-  // The new bricks' aprons in the current sides, scalars and velocity in one launch.
+  // The new bricks' aprons in the current sides, scalars and velocity in one launch, and the aprons of their allocated
+  // neighbours that face them (which still hold open air, or GasProject's faces against it).
   plGpuFluidGasConstants halo = constants;
-  halo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, GPU_FLUID_HALO_VELOCITY + 1, 0, 1);
+  halo.GpuFluidGasPass = plVec4U32(GPU_FLUID_HALO_SCALAR, GPU_FLUID_HALO_VELOCITY + 1, 0, 3);
 
   const plRenderGraphTextureHandle hVelocity0 = ref_graph.ImportTexture(m_hVelocity[0]);
   const plRenderGraphTextureHandle hVelocity1 = ref_graph.ImportTexture(m_hVelocity[1]);
@@ -1275,7 +1276,24 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
     plGpuFluidGasConstants finalize = MakeConstants(grid, sim, sim.m_fTime + sim.m_uiTicks * sim.m_fTickSeconds);
     finalize.GpuFluidGasParams0 = plVec4(sim.m_fAllocThreshold, sim.m_fMeanFloor, sim.m_fAllocLookahead, static_cast<float>(grid.GetRequestWords()));
     finalize.GpuFluidGasPass.w = sim.m_bBrickView ? 1u : 0u;
+    finalize.GpuFluidGasParams1 = plVec4(sim.m_fBrickViewEdgeDensity, sim.m_fBrickViewGasDensity, 0.0f, 0.0f);
     const plRenderGraphTextureHandle hBrickView = res.m_hScratch;
+
+    // With GpuFluid.Gas.ProfileKernels an empty pass on the same resources goes first, so whatever of the last tick
+    // still runs when Finalize's timer starts is counted there and not in Finalize.
+    if (sim.m_bProfileKernels)
+    {
+      auto fence = ref_graph.AddComputePass("Gas/Finalize Fence");
+      plGpuFluidSparseGrid::DeclareReadOnly(fence, gridGraph);
+      fence.WriteTexture(hBrickView);
+      fence.WriteTexture(hScalar0);
+      fence.WriteTexture(hVelocityCur);
+      fence.WriteTexture(gridGraph.m_hIndirection);
+      fence.WriteBuffer(hStats);
+      fence.WriteBuffer(hFaceCodes);
+      fence.HasSideEffects();
+      fence.SetExecuteCallback([](const plRenderGraphContext&) {});
+    }
 
     auto pass = ref_graph.AddComputePass("Gas/Finalize");
     plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);

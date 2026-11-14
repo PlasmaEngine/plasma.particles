@@ -8,14 +8,22 @@
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidGasVolumeComponent.h>
 #include <ParticlesTest/GpuFluid/GpuFluidTierTiming.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
+#include <RendererFoundation/Device/Device.h>
 
 static plGameEngineTestGpuFluidTierTiming s_GameEngineTestGpuFluidTierTiming;
 
-// The command line drops the define's quotes, so it is stringized here.
+// The command line drops the define's quotes, so it is stringized here. BUILDSYSTEM_BUILDTYPE is "Dev" for both the
+// Development (-O0) and the Release (-O3) configurations on the Mac, so the optimisation level and the binary's folder
+// are stamped as well (plan amendment A1.7: only Release timings count).
 #if defined(BUILDSYSTEM_BUILDTYPE)
 #  define PL_GPUFLUID_TIMING_BUILD PL_PP_STRINGIFY(BUILDSYSTEM_BUILDTYPE)
 #else
 #  define PL_GPUFLUID_TIMING_BUILD "unknown"
+#endif
+#if defined(__OPTIMIZE__) || defined(PLASMABUILD_RELEASE) || defined(PLASMABUILD_SHIPPING) // MSVC Release (/O2) does not define NDEBUG here
+#  define PL_GPUFLUID_TIMING_OPTIMISED "optimised"
+#else
+#  define PL_GPUFLUID_TIMING_OPTIMISED "not optimised"
 #endif
 
 namespace
@@ -44,6 +52,8 @@ namespace
     {"Gas Medium", plGpuFluidQuality::Medium, false, "tier-timing-medium.csv"},
     {"Gas Medium SOR", plGpuFluidQuality::Medium, true, "tier-timing-medium-sor.csv"},
     {"Gas Medium Sparse", plGpuFluidQuality::Medium, false, "tier-timing-medium-sparse.csv", true},
+    {"Gas Low Sparse", plGpuFluidQuality::Low, false, "tier-timing-low-sparse.csv", true},
+    {"Gas High Sparse", plGpuFluidQuality::High, false, "tier-timing-high-sparse.csv", true},
   };
 
   /// The pressure solver settings in force, for the CSV header and the log.
@@ -95,7 +105,7 @@ namespace
   /// per tick.
   bool IsPerFramePhase(plStringView sPhase)
   {
-    return sPhase == "Gas/Finalize" || sPhase.StartsWith("Gas/Alloc");
+    return sPhase.StartsWith("Gas/Finalize") || sPhase.StartsWith("Gas/Alloc");
   }
 } // namespace
 
@@ -155,6 +165,7 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
     if (pGas == nullptr)
       return PL_FAILURE;
     pGas->m_Quality = s_Tiers[iIdentifier].m_Quality;
+    pGas->m_TickRate = plGpuFluidGasTickRate::Quality; // the tier's own tick rate
   }
 
   if (s_Tiers[iIdentifier].m_bSparse)
@@ -324,10 +335,19 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
     return values[uiIndex];
   };
 
+  // The folder the test binary runs from names the configuration (Binaries/Mac_Release, Binaries/Mac_Development).
+  plStringBuilder sBinaryFolder = plOSFile::GetApplicationDirectory();
+  sBinaryFolder.Trim(nullptr, "/\\");
+  const plStringView sConfiguration = sBinaryFolder.GetFileName();
+
   plStringBuilder sCsv;
-  sCsv.AppendFormat("# GpuFluid tier timing, tier {}, {}, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, {} build, "
+  plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
+  const plStringBuilder sRenderer(pDevice->GetRenderer(), ", ", pDevice->GetCapabilities().m_sAdapterName);
+
+  sCsv.AppendFormat("# GpuFluid tier timing, tier {}, {}, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, {}, {} build ({}, {}), "
                     "Rendering.Pipeline.Injections off\n# gas settings:{}\n",
-    szTier, tier.m_bSparse ? "sparse gate scene (mean active bricks over the measured frames)" : "Smoke Column (whole box)", uiBricks, uiTicks, m_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
+    szTier, tier.m_bSparse ? "sparse gate scene (mean active bricks over the measured frames)" : "Smoke Column (whole box)", uiBricks, uiTicks, m_iWarmupFrames, s_iMeasuredFrames, sRenderer,
+    PL_GPUFLUID_TIMING_BUILD, PL_GPUFLUID_TIMING_OPTIMISED, sConfiguration, sSettings);
   sCsv.Append("# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs\n");
   sCsv.Append("tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples\n");
 
@@ -422,5 +442,13 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
   else
     PL_TEST_INT(uiBricks, 8 * 8 * 16);
   PL_TEST_INT(m_uiNaN, 0);
-  PL_TEST_INT(uiTicks, quality == plGpuFluidQuality::Low ? 1u : 2u);
+  // The harness's fixed 1/30 s frame runs one tick of a 30 Hz tier and two of a 60 Hz one (GpuFluid.Debug.StepTime
+  // overrides the tier's rate, then any count is fine).
+  plCVarFloat* pStepTime = static_cast<plCVarFloat*>(plCVar::FindCVarByName("GpuFluid.Debug.StepTime"));
+  if (pStepTime == nullptr || pStepTime->GetValue() <= 0.0f)
+  {
+    const float fTick = plGpuFluidGetGasTier(quality).m_fTickSeconds;
+    const plUInt32 uiExpected = plMath::Clamp(static_cast<plUInt32>((1.0f / 30.0f) / fTick + 0.5f), 1u, plGpuFluidMaxGasTicksPerFrame);
+    PL_TEST_INT(uiTicks, uiExpected);
+  }
 }

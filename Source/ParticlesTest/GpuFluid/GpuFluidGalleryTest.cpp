@@ -334,7 +334,7 @@ void plGpuFluidGalleryApplication::SetupStage(plUInt32 uiSeed, const plVec3& vTo
   AddBox("Wall", plVec3(0.0f, 7.5f, 1.5f), plVec3(12.0f, 0.4f, 3.0f), plColor(0.58f, 0.57f, 0.55f));
 }
 
-plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene()
+plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene(bool bAllocateAll)
 {
   PL_LOCK(m_pWorld->GetWriteMarker());
   SetupStage(0x47465032u, s_vSmokeToSun, true);
@@ -351,7 +351,8 @@ plResult plGpuFluidGalleryApplication::SetupSmokeColumnScene()
   pGas->m_vExtents = s_vSmokeExtents;
   pGas->m_fVoxelSize = s_fSmokeVoxel;
   pGas->m_uiMaxBricks = 1536;
-  pGas->m_bAllocateAll = true; // the P1 scenes and their numbers are for the whole box
+  pGas->m_bAllocateAll = bAllocateAll; // the P1 scenes and their numbers are for the whole box; Smoke Column Sparse twins it
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P1 and P3 numbers were measured at 60 Hz (Tier Timing sets the tier's)
 
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default; // open but the floor
@@ -720,6 +721,8 @@ void plGameEngineTestGpuFluidGallery::SetupSubTests()
   AddSubTest("N1 Allocation Cap", SubTests::N1AllocationCap);
   AddSubTest("N11 Determinism", SubTests::N11Determinism);
   AddSubTest("Moving Emitter Video", SubTests::MovingEmitterVideo);
+  AddSubTest("N1 Allocation Evict", SubTests::N1AllocationEvict);
+  AddSubTest("Smoke Column Sparse", SubTests::SmokeColumnSparse);
 }
 
 plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -791,6 +794,8 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
     case SubTests::N1AllocationCap:
     case SubTests::N11Determinism:
     case SubTests::MovingEmitterVideo:
+    case SubTests::N1AllocationEvict:
+    case SubTests::SmokeColumnSparse:
       return InitializeP2SubTest(iIdentifier);
 
     default:
@@ -910,6 +915,10 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, pl
       return RunN11Determinism();
     case SubTests::MovingEmitterVideo:
       return RunMovingEmitterVideo();
+    case SubTests::N1AllocationEvict:
+      return RunN1AllocationEvict();
+    case SubTests::SmokeColumnSparse:
+      return RunSmokeColumnSparse();
   }
 
   return plTestAppRun::Quit;
@@ -1271,6 +1280,8 @@ void plGameEngineTestGpuFluidGallery::CollectGasSample()
   sample.m_uiAllocNew = stats.m_uiNewBricks;
   sample.m_uiAllocFreed = stats.m_uiFreedBricks;
   sample.m_uiAllocDenied = stats.m_uiDeniedBricks;
+  sample.m_uiAllocEvicted = stats.m_uiEvictedBricks;
+  sample.m_fMassDropped = stats.m_fMassDropped;
   for (plUInt32 b = 0; b < 4; ++b)
     sample.m_uiDeniedBucket[b] = stats.m_uiDeniedPerBucket[b];
   sample.m_fMassCorrection = stats.m_fMassCorrection;
@@ -1461,7 +1472,8 @@ void plGameEngineTestGpuFluidGallery::EvaluateSmokeColumn()
 void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample>& samples, plStringView sPath)
 {
   plStringBuilder sCsv("seconds,frame,mass,centroid_z_m,max_density,max_speed,div_before_max,div_after_max,div_before_mean,div_after_mean,nan,content_bricks,active_bricks,overflow,speed_clamped,emitted,solid_cleared,"
-                       "alloc_active,alloc_new,alloc_freed,alloc_denied,denied_b0,denied_b1,denied_b2,denied_b3,mass_correction,advect0_before,advect0_after,advect1_before,advect1_after\n");
+                       "alloc_active,alloc_new,alloc_freed,alloc_denied,denied_b0,denied_b1,denied_b2,denied_b3,mass_correction,advect0_before,advect0_after,advect1_before,advect1_after,"
+                       "alloc_evicted,mass_dropped\n");
   for (const GasSample& s : samples)
   {
     sCsv.AppendFormat("{},{},{},{},{},{},", s.m_fSeconds, s.m_uiFrame, s.m_fMass, s.m_fCentroidZ, s.m_fMaxDensity, s.m_fMaxSpeed);
@@ -1469,7 +1481,8 @@ void plGameEngineTestGpuFluidGallery::WriteGasCsv(const plDynamicArray<GasSample
     sCsv.AppendFormat("{},{},{},{},", s.m_uiOverflow, s.m_uiSpeedClamped, s.m_fEmitted, s.m_fSolidCleared);
     sCsv.AppendFormat("{},{},{},{},{},{},{},{},{},", s.m_uiAllocActive, s.m_uiAllocNew, s.m_uiAllocFreed, s.m_uiAllocDenied, s.m_uiDeniedBucket[0], s.m_uiDeniedBucket[1],
       s.m_uiDeniedBucket[2], s.m_uiDeniedBucket[3], plArgF(s.m_fMassCorrection, 7));
-    sCsv.AppendFormat("{},{},{},{}\n", plArgF(s.m_fMassAdvect[0], 4), plArgF(s.m_fMassAdvect[1], 4), plArgF(s.m_fMassAdvect[2], 4), plArgF(s.m_fMassAdvect[3], 4));
+    sCsv.AppendFormat("{},{},{},{},", plArgF(s.m_fMassAdvect[0], 4), plArgF(s.m_fMassAdvect[1], 4), plArgF(s.m_fMassAdvect[2], 4), plArgF(s.m_fMassAdvect[3], 4));
+    sCsv.AppendFormat("{},{}\n", s.m_uiAllocEvicted, plArgF(s.m_fMassDropped, 4));
   }
 
   plFileWriter csv;

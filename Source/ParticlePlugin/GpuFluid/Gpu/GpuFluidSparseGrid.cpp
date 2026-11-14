@@ -29,6 +29,7 @@ namespace
   constexpr plUInt32 s_uiAllocLists = 8;
   constexpr plUInt32 s_uiAllocArgs = 9;
   constexpr plUInt32 s_uiAllocDebug = 10;
+  constexpr plUInt32 s_uiAllocEvict = 11;
 
   constexpr plUInt32 s_uiAllocThreads = 64;
 
@@ -84,6 +85,7 @@ bool plGpuFluidGridDebug::Decode(plArrayPtr<const plUInt8> data, plUInt32 uiCapa
 
   const plUInt32* pSlots = pWords + GPU_FLUID_COUNTER_WORDS;
   m_SlotBrick.SetCountUninitialized(uiCapacity);
+  m_SlotMass.SetCountUninitialized(uiCapacity);
   m_SlotIdle.SetCountUninitialized(uiCapacity);
   m_SlotAlive.SetCountUninitialized(uiCapacity);
   m_SlotMask.SetCountUninitialized(uiCapacity);
@@ -92,10 +94,11 @@ bool plGpuFluidGridDebug::Decode(plArrayPtr<const plUInt8> data, plUInt32 uiCapa
   {
     const plUInt32* p = pSlots + s * GPU_FLUID_DEBUG_SLOT_WORDS;
     m_SlotBrick[s] = p[0];
-    m_SlotIdle[s] = p[1 + GPU_FLUID_META_IDLE];
+    m_SlotMass[s] = p[1 + GPU_FLUID_META_MASS];
     m_SlotAlive[s] = p[1 + GPU_FLUID_META_ALIVE];
     m_SlotMask[s] = p[1 + GPU_FLUID_META_MASK];
-    m_SlotBuckets[s] = p[1 + GPU_FLUID_META_BUCKETS];
+    m_SlotBuckets[s] = p[1 + GPU_FLUID_META_BUCKETS] & GPU_FLUID_META_BUCKET_BITS;
+    m_SlotIdle[s] = p[1 + GPU_FLUID_META_BUCKETS] >> GPU_FLUID_META_IDLE_SHIFT;
   }
 
   const plUInt32* pList = pSlots + uiCapacity * GPU_FLUID_DEBUG_SLOT_WORDS;
@@ -156,6 +159,7 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
 
   m_RequestLayout = plGpuFluidScan::ComputeLayout(uiBucketWords);
   m_SlotLayout = plGpuFluidScan::ComputeLayout(uiCapacity);
+  m_EvictLayout = plGpuFluidScan::ComputeLayout(GPU_FLUID_EVICT_CLASSES * uiCapacity);
 
   m_hPageTable = CreateUIntBuffer(pDevice, uiVirtualBricks, false, "GpuFluid Gas PageTable");
   m_hActiveList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas ActiveList");
@@ -171,6 +175,8 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
   m_hRequestScratch = CreateRawBuffer(pDevice, m_RequestLayout.m_uiScratchBytes, "GpuFluid Gas RequestScratch");
   m_hSlotScan = CreateRawBuffer(pDevice, uiCapacity * 4, "GpuFluid Gas SlotScan");
   m_hSlotScratch = CreateRawBuffer(pDevice, m_SlotLayout.m_uiScratchBytes, "GpuFluid Gas SlotScratch");
+  m_hEvictScan = CreateRawBuffer(pDevice, GPU_FLUID_EVICT_CLASSES * uiCapacity * 4, "GpuFluid Gas EvictScan");
+  m_hEvictScratch = CreateRawBuffer(pDevice, m_EvictLayout.m_uiScratchBytes, "GpuFluid Gas EvictScratch");
   m_hFreeList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas FreeList");
   m_hNewList = CreateUIntBuffer(pDevice, uiCapacity, false, "GpuFluid Gas NewList");
   m_hBrickMeta = CreateUIntBuffer(pDevice, uiCapacity * 4, false, "GpuFluid Gas BrickMeta");
@@ -195,7 +201,8 @@ plResult plGpuFluidSparseGrid::Create(const plVec3U32& vBrickGrid, plUInt32 uiCa
   }
 
   for (const plGALBufferHandle* pBuffer : {&m_hPageTable, &m_hActiveList, &m_hBrickCoords, &m_hNeighbors, &m_hCounters, &m_hDispatchArgs, &m_hColourList, &m_hColourArgs, &m_hRequests,
-         &m_hPending, &m_hRequestScan, &m_hRequestScratch, &m_hSlotScan, &m_hSlotScratch, &m_hFreeList, &m_hNewList, &m_hBrickMeta, &m_hEmitterBricks})
+         &m_hPending, &m_hRequestScan, &m_hRequestScratch, &m_hSlotScan, &m_hSlotScratch, &m_hEvictScan, &m_hEvictScratch, &m_hFreeList, &m_hNewList, &m_hBrickMeta,
+         &m_hEmitterBricks})
   {
     if (pBuffer->IsInvalidated())
     {
@@ -221,7 +228,8 @@ void plGpuFluidSparseGrid::Destroy()
   plGALDevice* pDevice = plGALDevice::GetDefaultDevice();
 
   for (plGALBufferHandle* pBuffer : {&m_hPageTable, &m_hActiveList, &m_hBrickCoords, &m_hNeighbors, &m_hCounters, &m_hDispatchArgs, &m_hColourList, &m_hColourArgs, &m_hRequests, &m_hPending,
-         &m_hRequestScan, &m_hRequestScratch, &m_hSlotScan, &m_hSlotScratch, &m_hFreeList, &m_hNewList, &m_hBrickMeta, &m_hEmitterBricks, &m_hGridDebug})
+         &m_hRequestScan, &m_hRequestScratch, &m_hSlotScan, &m_hSlotScratch, &m_hEvictScan, &m_hEvictScratch, &m_hFreeList, &m_hNewList, &m_hBrickMeta,
+         &m_hEmitterBricks, &m_hGridDebug})
   {
     if (!pBuffer->IsInvalidated())
       pDevice->DestroyBuffer(*pBuffer);
@@ -297,12 +305,16 @@ void plGpuFluidSparseGrid::AddAllocPasses(
   const plRenderGraphBufferHandle hSlotScan = ref_graph.ImportBuffer(m_hSlotScan);
   const plRenderGraphBufferHandle hSlotScratch = ref_graph.ImportBuffer(m_hSlotScratch);
   const plRenderGraphBufferHandle hFreeList = ref_graph.ImportBuffer(m_hFreeList);
+  const plRenderGraphBufferHandle hEvictScan = ref_graph.ImportBuffer(m_hEvictScan);
+  const plRenderGraphBufferHandle hEvictScratch = ref_graph.ImportBuffer(m_hEvictScratch);
   const plRenderGraphBufferHandle hGridDebug = bDebug ? ref_graph.ImportBuffer(m_hGridDebug) : plRenderGraphBufferHandle();
 
   const bool bInit = !m_bInitialised;
   const bool bAllocateAll = input.m_bAllocateAll;
+  const plUInt32 uiPassFlags = input.m_bReverseSlots ? 1u : 0u;
   const plGpuFluidScan::Layout slotLayout = m_SlotLayout;
   const plGpuFluidScan::Layout requestLayout = m_RequestLayout;
+  const plGpuFluidScan::Layout evictLayout = m_EvictLayout;
   const plGpuFluidScan* pScan = &m_Scan;
 
   // One pass builder at a time: the readback below is added after this one is done.
@@ -325,6 +337,8 @@ void plGpuFluidSparseGrid::AddAllocPasses(
   pass.WriteBuffer(hSlotScan);
   pass.WriteBuffer(hSlotScratch);
   pass.WriteBuffer(hFreeList);
+  pass.WriteBuffer(hEvictScan);
+  pass.WriteBuffer(hEvictScratch);
   pass.WriteBuffer(hStats);
   pass.ReadBuffer(hEmitterBricks, plGALResourceState::ComputeShaderRead);
   if (bDebug)
@@ -340,11 +354,15 @@ void plGpuFluidSparseGrid::AddAllocPasses(
       const plGALBufferHandle hSlotScratchGAL = ctx.ResolveBuffer(hSlotScratch);
       const plGALBufferHandle hRequestScanGAL = ctx.ResolveBuffer(hRequestScan);
       const plGALBufferHandle hRequestScratchGAL = ctx.ResolveBuffer(hRequestScratch);
+      const plGALBufferHandle hEvictScanGAL = ctx.ResolveBuffer(hEvictScan);
+      const plGALBufferHandle hEvictScratchGAL = ctx.ResolveBuffer(hEvictScratch);
+      const plGALTextureHandle hIndirectionGAL = ctx.ResolveTexture(grid.m_hIndirection);
 
       const plGALBufferHandle barrier[] = {ctx.ResolveBuffer(grid.m_hPageTable), ctx.ResolveBuffer(grid.m_hActiveList), ctx.ResolveBuffer(grid.m_hBrickCoords),
         ctx.ResolveBuffer(grid.m_hNeighbors), ctx.ResolveBuffer(grid.m_hCounters), ctx.ResolveBuffer(grid.m_hDispatchArgs), ctx.ResolveBuffer(grid.m_hColourList),
         ctx.ResolveBuffer(grid.m_hColourArgs), ctx.ResolveBuffer(grid.m_hNewList), ctx.ResolveBuffer(grid.m_hRequests), ctx.ResolveBuffer(grid.m_hBrickMeta),
-        ctx.ResolveBuffer(hPending), hRequestScanGAL, hRequestScratchGAL, hSlotScanGAL, hSlotScratchGAL, ctx.ResolveBuffer(hFreeList), ctx.ResolveBuffer(hStats)};
+        ctx.ResolveBuffer(hPending), hRequestScanGAL, hRequestScratchGAL, hSlotScanGAL, hSlotScratchGAL, hEvictScanGAL, hEvictScratchGAL, ctx.ResolveBuffer(hFreeList),
+        ctx.ResolveBuffer(hStats)};
 
       auto Bind = [&]()
       {
@@ -370,6 +388,7 @@ void plGpuFluidSparseGrid::AddAllocPasses(
         bindGroup.BindBuffer("GpuFluidBrickMeta", ctx.ResolveBuffer(grid.m_hBrickMeta));
         bindGroup.BindBuffer("GpuFluidEmitterBricks", ctx.ResolveBuffer(hEmitterBricks));
         bindGroup.BindBuffer("GpuFluidStats", ctx.ResolveBuffer(hStats));
+        bindGroup.BindBuffer("GpuFluidEvictScan", hEvictScanGAL);
         // Bound in every mode; without a debug readback the counters stand in (DEBUG does not run then).
         bindGroup.BindBuffer("GpuFluidGridDebug", bDebug ? ctx.ResolveBuffer(hGridDebug) : ctx.ResolveBuffer(grid.m_hCounters));
       };
@@ -377,10 +396,12 @@ void plGpuFluidSparseGrid::AddAllocPasses(
       auto Run = [&](plUInt32 uiMode, plUInt32 uiItems)
       {
         plGpuFluidGasConstants c = constants;
-        c.GpuFluidGasPass = plVec4U32(uiMode, uiWords, uiEmitterBricks, 0);
+        c.GpuFluidGasPass = plVec4U32(uiMode, uiWords, uiEmitterBricks, uiPassFlags);
         pContext->SetPushConstants("plGpuFluidGasConstants", c);
         pContext->Dispatch(plMath::Max((uiItems + s_uiAllocThreads - 1) / s_uiAllocThreads, 1u)).IgnoreResult();
         plGpuFluidScan::UavBarrier(pEncoder, barrier);
+        // INIT, FREE, EVICT and ASSIGN write the brick table, DEBUG reads it back.
+        pEncoder->TextureBarrier(hIndirectionGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::UnorderedAccessWrite);
       };
 
       Bind();
@@ -395,9 +416,16 @@ void plGpuFluidSparseGrid::AddAllocPasses(
       Run(s_uiAllocFree, uiCapacity);
       Run(s_uiAllocPending, uiWords);
 
-      // Free rank per slot and the free total; first rank per request word and the request total.
-      pScan->RecordExclusiveScan(pContext, pEncoder, slotLayout, hSlotScanGAL, 0, hSlotScanGAL, 0, hSlotScratchGAL);
+      // First rank per request word and the request total; rank of every evictable slot by class, then slot.
       pScan->RecordExclusiveScan(pContext, pEncoder, requestLayout, hRequestScanGAL, 0, hRequestScanGAL, 0, hRequestScratchGAL);
+      pScan->RecordExclusiveScan(pContext, pEncoder, evictLayout, hEvictScanGAL, 0, hEvictScanGAL, 0, hEvictScratchGAL);
+
+      // Slots for the sources' bricks the free slots cannot hold.
+      Bind();
+      Run(s_uiAllocEvict, uiCapacity);
+
+      // Free rank per slot and the free total, evicted slots included.
+      pScan->RecordExclusiveScan(pContext, pEncoder, slotLayout, hSlotScanGAL, 0, hSlotScanGAL, 0, hSlotScratchGAL);
 
       Bind();
       Run(s_uiAllocFreeList, uiCapacity);

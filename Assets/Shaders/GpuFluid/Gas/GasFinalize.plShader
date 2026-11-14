@@ -18,7 +18,7 @@ ALL
 //   adds to GPU_FLUID_STAT_OVERFLOW.
 // - Per brick: peak density, temperature and face speed, mean density.
 // - Brick table: rgb = atlas brick / 255, a = max(mean, floor) when the peak is above the allocation threshold, else 0,
-//   so the march skips the brick.
+//   so the march skips the brick (in the brick view every active brick gets max(mean, floor), so all are drawn).
 // - Stats: bounds of the bricks with content, mass, density-weighted centroid, maxima, and the largest and summed |div u|
 //   after the projection (the "after" half of the projection check), all integer atomics or float maxima as uint.
 //   Solid cells (the last tick's face codes) are left out of the divergence; the largest density left in one goes to
@@ -30,12 +30,13 @@ ALL
 //   neighbour within the lookahead (bucket 2; at most one brick away). The neighbour mask and the alive flag also go to
 //   the slot's meta (N1 checks the allocation against them).
 //
-// - Brick view (Pass.w bit 0, GpuFluid.Debug.Bricks): a copy of the scalars into GpuFluidBrickView (the free Scratch atlas)
-//   with the temperature cleared, and the brick's twelve edges drawn in as gas whose temperature says which bucket keeps
-//   the brick (source 1.0, content 0.6, flux 0.4, proximity 0.22, idle 0.1); the volume publishes this copy with a
-//   blackbody emission, so the march draws the allocation in the same picture as the gas.
+// - Brick view (Pass.w bit 0, GpuFluid.Debug.Bricks): a copy of the density into GpuFluidBrickView (the free Scratch
+//   atlas) with gba = 0, and the brick's twelve edges drawn in as gas whose gba is the colour of the bucket that keeps the
+//   brick (source orange, content green, flux cyan, proximity blue, idle grey); the volume publishes this copy with the
+//   emission channel, so the march draws the allocation in the same picture as the gas.
 //
-// Params: 0 x allocation threshold, y brick mean floor, z lookahead (s), w request words per bucket
+// Params: 0 x allocation threshold, y brick mean floor, z lookahead (s), w request words per bucket; 1 x the brick view's
+// edge density, y the gas density above which its edges fade (both atlas units).
 
 RWTexture3D<float4> GpuFluidScalarTarget;
 RWTexture3D<float4> GpuFluidVelocityTarget;
@@ -114,6 +115,22 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   const uint3 brick = GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]);
   const int3 base = GpuFluidSlotBase(slot);
 
+  // The brick view's edge colour: the bucket that keeps the brick (the colours of GpuFluid.Debug.BrickLines).
+  const bool bBrickView = (GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & 1u) != 0;
+  float3 bucketColour = float3(0.5, 0.5, 0.5); // idle: no request this step
+  if (bBrickView)
+  {
+    const uint buckets = GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_BUCKETS] & GPU_FLUID_META_BUCKET_BITS;
+    if ((buckets & 1u) != 0)
+      bucketColour = float3(1.0, 0.55, 0.1); // a source overlaps it
+    else if ((buckets & 2u) != 0)
+      bucketColour = float3(0.2, 0.9, 0.3); // content
+    else if ((buckets & 4u) != 0)
+      bucketColour = float3(0.1, 0.8, 1.0); // flux
+    else if ((buckets & 8u) != 0)
+      bucketColour = float3(0.25, 0.35, 1.0); // proximity
+  }
+
   // NaN guard over all stored texels.
   for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
   {
@@ -134,16 +151,50 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
         InterlockedAdd(gs_uiNaN, 1u);
     }
 
-    // The brick view: the gas without its heat, and the brick's edges as gas as hot as its bucket.
-    if ((GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & 1u) != 0)
+    // The brick view: the gas without emission, and the brick's edges as gas glowing in the colour of its bucket.
+    if (bBrickView)
     {
-      const uint buckets = GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_BUCKETS];
-      const float heat = (buckets & 1u) != 0 ? 1.0 : ((buckets & 2u) != 0 ? 0.6 : ((buckets & 4u) != 0 ? 0.4 : ((buckets & 8u) != 0 ? 0.22 : 0.1)));
       const int3 local = stored - GPU_FLUID_BRICK_APRON;
-      const int3 onEdge = int3(local == 0) | int3(local == GPU_FLUID_BRICK_SIZE - 1);
+      // One voxel per brick boundary: a brick draws its edges on its first cells (local 0), and on its last cells
+      // (local 7) only towards a neighbour without a slot, which would otherwise draw them. Both sides drawing their
+      // own edge made every line two voxels wide (three after filtering, 0.75 m at 25 cm voxels), and that lattice
+      // covered most of a plume a few bricks across (P2 review: the smoke all but vanished in the brick view).
+      const int3 onFirst = int3(local == 0);
+      int3 onLast = int3(local == GPU_FLUID_BRICK_SIZE - 1);
+      [unroll] for (uint axis = 0; axis < 3; ++axis)
+      {
+        int3 dir = int3(0, 0, 0);
+        dir[axis] = 1;
+        if (onLast[axis] != 0 && GpuFluidNeighbor(slot, dir) < GPU_FLUID_NEIGHBOR_OUTSIDE)
+          onLast[axis] = 0;
+      }
+      const int3 onEdge = onFirst | onLast;
       const bool bEdge = bInterior && (onEdge.x + onEdge.y + onEdge.z) >= 2;
+      // The march emits gba * density, each filtered on its own, so a glowing texel next to thick gas glows by the
+      // gas's density: the old edges (temperature up to 1 at an emission scale of 8) flared tens of times brighter
+      // inside the plume than in air, and the saturated glow and its bloom covered the gas. Here an edge is a faint
+      // density (Params1.x, an optical depth of about 1% per crossing), and its colour is divided by the largest
+      // density the filter can pair it with (its 3 cubed neighbourhood), so the glow per metre is the same in air and
+      // in thin gas. Inside thicker gas (above Params1.y, an optical depth of about 0.02 per voxel) the glow fades
+      // with the square of the density on top of that, so the gas around an edge is not lit up by it, and gas in front
+      // of an edge hides it.
       const float density = GpuFluidScalarTarget[base + stored].r;
-      GpuFluidBrickView[base + stored] = bEdge ? float4(max(density, 0.3), heat, 0.0, 0.0) : float4(density, 0.0, 0.0, 0.0);
+      float4 view = float4(density, 0.0, 0.0, 0.0);
+      if (bEdge)
+      {
+        const float edgeDensity = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1).x;
+        float neighbourhood = edgeDensity;
+        [loop] for (uint n = 0; n < 27; ++n)
+        {
+          const float d = GpuFluidScalarTarget[base + stored + int3(n % 3, (n / 3) % 3, n / 9) - 1].r;
+          if (GpuFluidIsFinite(float4(d, 0.0, 0.0, 0.0)))
+            neighbourhood = max(neighbourhood, d);
+        }
+        const float gasDensity = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams1).y;
+        const float fade = saturate(gasDensity / neighbourhood);
+        view = float4(max(density, edgeDensity), bucketColour * (edgeDensity / neighbourhood) * (fade * fade));
+      }
+      GpuFluidBrickView[base + stored] = view;
     }
   }
   GroupMemoryBarrierWithGroupSync();
@@ -250,7 +301,8 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
   const float mean = float(gs_uiDensitySum) / (GPU_FLUID_MEAN_SCALE * GPU_FLUID_BRICK_CELLS);
 
   const float3 atlasBrick = float3(GpuFluidSlotToAtlasBrick(slot, GpuFluidAtlasBricks()));
-  GpuFluidIndirectionOutput[brick] = float4(atlasBrick / 255.0, bContent ? max(mean, rules.y) : 0.0);
+  // In the brick view every active brick is marched, so bricks kept by flux, proximity or idleness show their edges too.
+  GpuFluidIndirectionOutput[brick] = float4(atlasBrick / 255.0, (bContent || bBrickView) ? max(mean, rules.y) : 0.0);
 
   GpuFluidStats.InterlockedAdd(GPU_FLUID_STAT_ACTIVE_BRICKS * 4, 1u);
 
@@ -265,9 +317,11 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     GpuFluidStats.InterlockedMax(GPU_FLUID_STAT_BOUNDS_MAX * 4 + 8, brick.z);
   }
 
-  // The global sums: a wrap counts as an overflow.
+  // The global sums: a wrap counts as an overflow. The brick's own mass goes to its meta: what freeing it deletes.
   uint overflow = gs_uiOverflow;
-  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_MASS, (uint)round(float(gs_uiDensitySum) * (GPU_FLUID_MASS_SCALE / GPU_FLUID_MEAN_SCALE)), overflow);
+  const uint brickMass = (uint)round(float(gs_uiDensitySum) * (GPU_FLUID_MASS_SCALE / GPU_FLUID_MEAN_SCALE));
+  GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_MASS] = brickMass;
+  GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_MASS, brickMass, overflow);
   GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 0, gs_uiCentroid[0], overflow);
   GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 1, gs_uiCentroid[1], overflow);
   GpuFluidStatAdd(GpuFluidStats, GPU_FLUID_STAT_CENTROID + 2, gs_uiCentroid[2], overflow);

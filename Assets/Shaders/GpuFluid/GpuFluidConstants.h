@@ -48,6 +48,8 @@
 #define GPU_FLUID_COUNTER_COLOUR1 3 // active bricks of brick colour 1
 #define GPU_FLUID_COUNTER_NEW 4     // slots assigned this frame (the new list, cleared by GasClear)
 #define GPU_FLUID_COUNTER_FREED 5   // slots freed this frame (idle for GPU_FLUID_FREE_IDLE_STEPS)
+#define GPU_FLUID_COUNTER_FREE 6    // free slots after the idle freeing (before eviction and assignment)
+#define GPU_FLUID_COUNTER_EVICTED 7 // slots evicted this frame for the sources' bricks
 #define GPU_FLUID_COUNTER_DENIED_BUCKET 8 // 4 words: denied requests per priority bucket
 #define GPU_FLUID_COUNTER_REQUESTS_BUCKET 12 // 4 words: requests for bricks without a slot per priority bucket
 
@@ -79,13 +81,21 @@
 #define GPU_FLUID_FREE_IDLE_STEPS 8  // allocation steps without any request before a slot is freed
 #define GPU_FLUID_MAX_EMITTER_BRICKS 8192
 
-// Per-slot meta (uint4, GpuFluidBrickMeta): x allocation steps without a request, y 1 when the last Finalize saw content,
-// z the 27-bit mask of neighbours the last Finalize requested (bit = neighbour index), w the buckets that requested
-// the brick in the last allocation (bit per bucket; the brick debug view's colour).
-#define GPU_FLUID_META_IDLE 0
+// Per-slot meta (uint4, GpuFluidBrickMeta): x the brick's mass at the last Finalize (interior density sum, fixed point
+// GPU_FLUID_MASS_SCALE; what freeing or evicting it deletes), y 1 when the last Finalize saw content, z the 27-bit mask
+// of neighbours the last Finalize requested (bit = neighbour index), w the buckets that requested the brick in the last
+// allocation (bits 0-3, bit per bucket; the brick view's colour) and its allocation steps without a request (bits 8-15).
+#define GPU_FLUID_META_MASS 0
 #define GPU_FLUID_META_ALIVE 1
 #define GPU_FLUID_META_MASK 2
 #define GPU_FLUID_META_BUCKETS 3
+#define GPU_FLUID_META_BUCKET_BITS 0xFu
+#define GPU_FLUID_META_IDLE_SHIFT 8
+
+// Eviction (GasAlloc): when the sources' bricks (bucket 0) want more slots than are free, slots of bricks no source
+// overlaps are taken, lowest class first and in slot order within a class: idle (no request), proximity only, flux, then
+// content. GPU_FLUID_EVICT_CLASSES classes of capacity flags are scanned together, so the rank orders by class, then slot.
+#define GPU_FLUID_EVICT_CLASSES 4
 
 // The grid debug readback (N1 and the brick view): GPU_FLUID_COUNTER_WORDS counters, then per pool slot (packed brick or
 // GPU_FLUID_INVALID_SLOT, meta x, y, z, w), then the active list (capacity words), then per virtual brick (page table,
@@ -129,6 +139,8 @@
 #define GPU_FLUID_STAT_REQUESTS_BUCKET 59 // 4 words: requests for bricks without a slot per bucket
 #define GPU_FLUID_STAT_MASS_ADVECT 64     // 4 words per tick of the frame: interior density before (low, high word) and after (low, high) the tick's advection, 64-bit fixed point GPU_FLUID_MEAN_SCALE (the closed-box mass correction)
 #define GPU_FLUID_STAT_MASS_CORRECTION 72 // asuint of the last tick's correction factor (1 without one)
+#define GPU_FLUID_STAT_MASS_DROPPED 73    // mass of the bricks freed or evicted this frame (their last Finalize), fixed point GPU_FLUID_MASS_SCALE
+#define GPU_FLUID_STAT_ALLOC_EVICTED 74   // slots taken from bricks without a source for the sources' bricks this frame
 #define GPU_FLUID_STAT_WORD_COUNT 96
 #define GPU_FLUID_STATS_BYTES (GPU_FLUID_STAT_WORD_COUNT * 4)
 

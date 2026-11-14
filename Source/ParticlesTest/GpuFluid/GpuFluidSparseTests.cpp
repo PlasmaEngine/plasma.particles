@@ -1,6 +1,7 @@
 #include <ParticlesTest/ParticlesTestPCH.h>
 
 #include <Foundation/Configuration/CVar.h>
+#include <Foundation/IO/FileSystem/FileWriter.h>
 #include <Foundation/System/EnvironmentVariableUtils.h>
 #include <Foundation/Utilities/ConversionUtils.h>
 #include <GameEngine/Effects/Wind/SimpleWindWorldModule.h>
@@ -9,6 +10,7 @@
 #include <ParticlesTest/GpuFluid/GpuFluidGalleryTest.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
 #include <Shaders/GpuFluid/GpuFluidConstants.h>
+#include <Texture/Image/ImageConversion.h>
 
 // P2 of the gas solver: the sparse allocator (design plan section 3).
 //
@@ -49,10 +51,35 @@ namespace
   constexpr plUInt32 s_uiN1CapBricks = 64;
   constexpr plInt32 s_iN1CapFrames = 90;
 
-  // N11: runs 0 and 1 the defaults (hardware filtering) with the same pool, runs 2 and 3 exact sampling with two pools.
+  // N11: runs 0 and 1 the defaults (hardware filtering) with the same pool, runs 2 and 3 exact sampling with two pools,
+  // run 4 exact sampling with run 2's pool but the free slots handed out in descending order, so every brick has another
+  // slot than in run 2 (and every slot freed and taken again is another one).
   constexpr plInt32 s_iN11Frames = 64;
-  constexpr plUInt32 s_uiN11Pools[] = {1024, 1024, 1024, 512};
-  constexpr bool s_bN11Exact[] = {false, false, true, true};
+  constexpr plUInt32 s_uiN11Pools[] = {1024, 1024, 1024, 512, 1024};
+  constexpr bool s_bN11Exact[] = {false, false, true, true, true};
+  constexpr bool s_bN11Reverse[] = {false, false, false, false, true};
+
+  // N1 Allocation Evict: the plume box with a small pool, its source travelling across the box once the pool is full.
+  constexpr plUInt32 s_uiEvictPool = 96;
+  constexpr plInt32 s_iEvictFrames = 150;      ///< 300 ticks
+  constexpr plInt32 s_iEvictMoveFrame = 45;    ///< the source starts to move
+  constexpr float s_fEvictSpeed = 2.0f;        ///< m/s along +x
+  constexpr float s_fEvictMinEmitted = 0.9f;   ///< every frame's emission after the pool filled, of the median before
+
+  // Smoke Column Sparse: the Smoke Column with the whole box allocated (phase 0) and sparse (phase 1).
+  constexpr plInt32 s_iTwinFrames = 150;
+  constexpr plInt32 s_iTwinFirstChecked = 30; ///< the mass is compared from this frame on (relative to the phase start)
+  constexpr plInt32 s_iTwinTopFrame = 110;    ///< about when the whole box's plume reaches the open top
+  // Tolerances: the measured run plus 50%. Measured on Metal: the sparse mass is within 1.6% of the whole box's until
+  // the plume reaches the top, then up to 9.3% above it at 5 s; nothing is dropped by freeing (the plume only grows).
+  // The difference is the flow, not lost gas: an unallocated neighbour is open air (p = 0, the ambient wind), so the
+  // sparse plume's boundary is a free surface a brick or two from the gas rather than simulated still air, and its
+  // centroid rises up to 0.18 m slower, so less of it reaches the open top and the edge fade there. The last frames'
+  // images differ by 0.48-0.63% of white on average.
+  constexpr float s_fTwinMassRisingTolerance = 0.024f;
+  constexpr float s_fTwinMassTolerance = 0.14f;
+  constexpr float s_fTwinImageTolerance = 0.0095f;
+  const plVec3 s_vTwinCameraTarget(0.0f, 0.0f, 3.7f);
 
   // Moving Emitter
   constexpr plInt32 s_iMovingFrames = 450; ///< 15 s at 30 fps
@@ -61,6 +88,7 @@ namespace
   const plVec3 s_vCourtyardExtents(64.0f, 48.0f, 16.0f);
   constexpr float s_fCourtyardVoxel = 0.25f;
   constexpr float s_fCourtyardWind = 1.5f;
+  constexpr plUInt32 s_uiCourtyardPool = 640;
 
   // The performance gate scene.
   const plVec3 s_vGateExtents(16.0f, 16.0f, 8.0f);
@@ -133,6 +161,7 @@ plResult plGpuFluidGalleryApplication::SetupSparsePlumeScene(plUInt32 uiMaxBrick
   pGas->m_fVoxelSize = s_fPlumeVoxel;
   pGas->m_uiMaxBricks = uiMaxBricks;
   pGas->m_bAllocateAll = false;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // N1's and N11's frame counts assume two ticks a frame
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default;
   pGas->m_fBuoyancy = 6.0f;
@@ -180,7 +209,9 @@ plResult plGpuFluidGalleryApplication::SetupCourtyardScene()
   m_pWorld->GetOrCreateComponentManager<plGpuFluidGasVolumeComponentManager>()->CreateComponent(pObject, pGas);
   pGas->m_vExtents = s_vCourtyardExtents;
   pGas->m_fVoxelSize = s_fCourtyardVoxel;
-  pGas->m_uiMaxBricks = 0; // the Medium cap, 1536
+  // Smaller than the Medium cap (1536), so the pool fills during the clip and the readout shows the sources' bricks
+  // evicting others while the source keeps emitting.
+  pGas->m_uiMaxBricks = static_cast<plUInt32>(Tune("POOL", static_cast<float>(s_uiCourtyardPool)));
   pGas->m_Quality = plGpuFluidQuality::Medium;
   pGas->m_bAllocateAll = false;
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
@@ -308,6 +339,11 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP2SubTest(plInt32 iIdentifie
   m_N11Hashes.Clear();
   m_N11MaxActive.Clear();
   m_N11Denied.Clear();
+  m_N11Freed.Clear();
+  m_TwinMass.Clear();
+  m_fTwinDropped = 0.0f;
+  m_fTwinEmitted[0] = m_fTwinEmitted[1] = 0.0f;
+  m_uiTwinMaxActive = 0;
 
   SetCVarForSubTest("Rendering.VDBVolumes.RayMarchShadowSteps", static_cast<plInt32>(Tune("SHADOWSTEPS", 12.0f)));
   SetCVarForSubTest("Rendering.VDBVolumes.SelfShadowLod", Tune("SHADOWLOD", 0.0f));
@@ -332,6 +368,26 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP2SubTest(plInt32 iIdentifie
     case SubTests::N11Determinism:
       // Each run builds its own scene and sets the sampling (RunN11Determinism); the CVar is put back afterwards.
       SetCVarForSubTest("GpuFluid.Gas.ExactSampling", false);
+      return PL_SUCCESS;
+
+    case SubTests::N1AllocationEvict:
+    {
+      PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSparsePlumeScene(s_uiEvictPool));
+      m_pOwnApplication->SetCamera(plVec3(-9.0f, -21.0f, 6.0f), plVec3(0.5f, 0.0f, 5.0f), 50.0f);
+      PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
+      plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+      if (pGas == nullptr)
+        return PL_FAILURE;
+      pGas->m_bDebugGridReadback = true;
+      // Start at the -x side, so the source has the box to cross. No noise: the emission per frame is then the same
+      // wherever the source is, as long as every brick it overlaps has a slot.
+      pGas->m_vEmitterOffset.x = -4.5f;
+      pGas->m_fEmitterNoise = 0.0f;
+      return PL_SUCCESS;
+    }
+
+    case SubTests::SmokeColumnSparse:
+      // Each phase builds its own scene (RunSmokeColumnSparse).
       return PL_SUCCESS;
 
     case SubTests::MovingEmitterVideo:
@@ -421,8 +477,9 @@ bool plGameEngineTestGpuFluidGallery::CheckAllocationInvariants(const plGpuFluid
       Fail("A > 0 does not match content", v, debug.m_SlotAlive[uiSlot]);
   }
 
-  // Content near a face (or moving into a neighbour) implies the neighbour is allocated, unless requests were denied.
-  if (uiDenied == 0)
+  // Content near a face (or moving into a neighbour) implies the neighbour is allocated, unless requests were denied or
+  // slots evicted for a source's bricks.
+  if (uiDenied == 0 && debug.m_Counters[GPU_FLUID_COUNTER_EVICTED] == 0)
   {
     for (plUInt32 uiSlot : debug.m_ActiveList)
     {
@@ -576,12 +633,16 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN11Determinism()
     {
       PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
       if (plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume())
+      {
         pGas->m_bDebugHashState = true;
+        pGas->m_bDebugReverseSlots = s_bN11Reverse[m_iPhase];
+      }
     }
     m_uiFirstRenderFrame = plRenderWorld::GetFrameCounter();
     m_N11Hashes.ExpandAndGetRef();
     m_N11MaxActive.PushBack(0);
     m_N11Denied.PushBack(0);
+    m_N11Freed.PushBack(0);
   }
 
   m_pOwnApplication->Run();
@@ -600,6 +661,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN11Determinism()
       {
         m_N11MaxActive.PeekBack() = plMath::Max(m_N11MaxActive.PeekBack(), stats.m_uiAllocActive);
         m_N11Denied.PeekBack() += stats.m_uiDeniedBricks;
+        m_N11Freed.PeekBack() += stats.m_uiFreedBricks;
       }
     }
   }
@@ -635,19 +697,23 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN11Determinism()
     }
   };
 
-  plUInt32 uiComparedSame = 0, uiEqualSame = 0, uiComparedPools = 0, uiEqualPools = 0;
-  plUInt64 uiHashSame = 0, uiHashPools = 0;
+  plUInt32 uiComparedSame = 0, uiEqualSame = 0, uiComparedPools = 0, uiEqualPools = 0, uiComparedSlots = 0, uiEqualSlots = 0;
+  plUInt64 uiHashSame = 0, uiHashPools = 0, uiHashSlots = 0;
   Compare(0, 1, uiComparedSame, uiEqualSame, uiHashSame);
   Compare(2, 3, uiComparedPools, uiEqualPools, uiHashPools);
+  Compare(2, 4, uiComparedSlots, uiEqualSlots, uiHashSlots);
 
-  plTestFramework::Output(plTestOutput::Message, "N11 determinism, hardware filtering, two runs with pools of %u: %u of %u frames equal (last hash %016llx); exact sampling, pools of %u and %u: %u of %u frames equal (last hash %016llx); active up to %u / %u / %u / %u, denied %u / %u / %u / %u",
-    s_uiN11Pools[0], uiEqualSame, uiComparedSame, uiHashSame, s_uiN11Pools[2], s_uiN11Pools[3], uiEqualPools, uiComparedPools, uiHashPools, m_N11MaxActive[0], m_N11MaxActive[1], m_N11MaxActive[2],
-    m_N11MaxActive[3], m_N11Denied[0], m_N11Denied[1], m_N11Denied[2], m_N11Denied[3]);
+  plTestFramework::Output(plTestOutput::Message, "N11 determinism, hardware filtering, two runs with pools of %u: %u of %u frames equal (last hash %016llx); exact sampling, pools of %u and %u: %u of %u frames equal (last hash %016llx); exact sampling, ascending and descending slots: %u of %u frames equal (last hash %016llx)",
+    s_uiN11Pools[0], uiEqualSame, uiComparedSame, uiHashSame, s_uiN11Pools[2], s_uiN11Pools[3], uiEqualPools, uiComparedPools, uiHashPools, uiEqualSlots, uiComparedSlots, uiHashSlots);
+  plTestFramework::Output(plTestOutput::Message, "N11 runs: active up to %u / %u / %u / %u / %u, denied %u / %u / %u / %u / %u, freed %u / %u / %u / %u / %u", m_N11MaxActive[0], m_N11MaxActive[1],
+    m_N11MaxActive[2], m_N11MaxActive[3], m_N11MaxActive[4], m_N11Denied[0], m_N11Denied[1], m_N11Denied[2], m_N11Denied[3], m_N11Denied[4], m_N11Freed[0], m_N11Freed[1], m_N11Freed[2],
+    m_N11Freed[3], m_N11Freed[4]);
 
-  PL_TEST_BOOL_MSG(uiComparedSame >= static_cast<plUInt32>(s_iN11Frames) / 2 && uiComparedPools >= static_cast<plUInt32>(s_iN11Frames) / 2, "N11: only %u / %u frames were hashed in both runs",
-    uiComparedSame, uiComparedPools);
+  PL_TEST_BOOL_MSG(uiComparedSame >= static_cast<plUInt32>(s_iN11Frames) / 2 && uiComparedPools >= static_cast<plUInt32>(s_iN11Frames) / 2 && uiComparedSlots >= static_cast<plUInt32>(s_iN11Frames) / 2,
+    "N11: only %u / %u / %u frames were hashed in both runs", uiComparedSame, uiComparedPools, uiComparedSlots);
   PL_TEST_INT(uiEqualSame, uiComparedSame);
   PL_TEST_INT(uiEqualPools, uiComparedPools);
+  PL_TEST_INT(uiEqualSlots, uiComparedSlots);
   for (plUInt32 i = 0; i < uiRuns; ++i)
   {
     PL_TEST_INT(m_N11Denied[i], 0);
@@ -692,22 +758,231 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunMovingEmitterVideo()
 
   const plInt32 iVideoFrame = m_iFrame - 1;
   if (iVideoFrame >= 0)
-    SaveVideoFrame("MovingEmitter", iVideoFrame, "P2 Moving Emitter: 64 m courtyard, sparse bricks, Medium pool 1536; 4.5-10 s brick edges");
+    SaveVideoFrame("MovingEmitter", iVideoFrame, "P2 Moving Emitter: 64 m courtyard, sparse bricks, Medium (30 Hz), pool 640; 4.5-10 s brick edges");
 
-  if (iVideoFrame + 1 < s_iMovingFrames)
+  if (iVideoFrame + 1 < static_cast<plInt32>(Tune("FRAMES", static_cast<float>(s_iMovingFrames))))
     return plTestAppRun::Continue;
 
   WriteGasCsv(m_GasSamples, ":imgout/GpuFluidGallery/MovingEmitter.csv");
-  plUInt32 uiNaN = 0, uiMaxActive = 0, uiDenied = 0;
+  plUInt32 uiNaN = 0, uiMaxActive = 0, uiDenied = 0, uiSourceDenied = 0, uiEvicted = 0;
   for (const GasSample& s : m_GasSamples)
   {
     uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
     uiMaxActive = plMath::Max(uiMaxActive, s.m_uiAllocActive);
     uiDenied += s.m_uiAllocDenied;
+    uiSourceDenied += s.m_uiDeniedBucket[0];
+    uiEvicted += s.m_uiAllocEvicted;
   }
-  plTestFramework::Output(plTestOutput::Message, "Moving emitter video: %d frames, %u readbacks, active bricks up to %u of 1536, %u denied in all, NaN %u", s_iMovingFrames, m_GasSamples.GetCount(),
-    uiMaxActive, uiDenied, uiNaN);
+  plTestFramework::Output(plTestOutput::Message, "Moving emitter video: %d frames, %u readbacks, active bricks up to %u of %u, %u denied in all (%u of a source's), %u evicted, NaN %u",
+    s_iMovingFrames, m_GasSamples.GetCount(), uiMaxActive, s_uiCourtyardPool, uiDenied, uiSourceDenied, uiEvicted, uiNaN);
   PL_TEST_INT(uiNaN, 0);
+  PL_TEST_INT(uiSourceDenied, 0);
   PL_TEST_BOOL(uiMaxActive > 0);
+  return plTestAppRun::Quit;
+}
+
+plTestAppRun plGameEngineTestGpuFluidGallery::RunN1AllocationEvict()
+{
+  // The source travels along +x once the pool has filled, into bricks that have no slot: the allocator must evict
+  // bricks no source overlaps for them, so the source never stops emitting.
+  if (m_iFrame >= s_iEvictMoveFrame)
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
+    if (plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume())
+      pGas->m_vEmitterOffset.x = plMath::Min(-4.5f + s_fEvictSpeed * static_cast<float>(m_iFrame - s_iEvictMoveFrame) / 30.0f, 4.5f);
+  }
+
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetReadMarker());
+    CollectGasSample();
+
+    plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+    plGpuFluidGridDebug debug;
+    if (pGas != nullptr && pGas->GetGridDebug(debug) && debug.m_uiFrame != m_uiN1LastDebugFrame && !debug.m_PageTable.IsEmpty())
+    {
+      m_uiN1LastDebugFrame = debug.m_uiFrame;
+      ++m_uiN1Checked;
+      if (!CheckAllocationInvariants(debug, debug.m_Counters[GPU_FLUID_COUNTER_DENIED]))
+        ++m_uiN1Failures;
+    }
+  }
+
+  if (m_iFrame + 1 < s_iEvictFrames)
+    return plTestAppRun::Continue;
+
+  WriteGasCsv(m_GasSamples, ":imgout/GpuFluidGallery/N1_AllocationEvict.csv");
+
+  // Emission per frame before the pool first filled, and after.
+  plDynamicArray<float> before;
+  plUInt64 uiFullFrame = 0;
+  plUInt32 uiNaN = 0, uiOverflow = 0, uiMaxActive = 0, uiEvicted = 0, uiSourceDenied = 0, uiDenied = 0;
+  float fDropped = 0.0f, fEmitted = 0.0f;
+  for (const GasSample& s : m_GasSamples)
+  {
+    uiNaN = plMath::Max(uiNaN, s.m_uiNaN);
+    uiOverflow = plMath::Max(uiOverflow, s.m_uiOverflow);
+    uiMaxActive = plMath::Max(uiMaxActive, s.m_uiAllocActive);
+    uiEvicted += s.m_uiAllocEvicted;
+    uiSourceDenied += s.m_uiDeniedBucket[0];
+    uiDenied += s.m_uiAllocDenied;
+    fDropped += s.m_fMassDropped;
+    fEmitted += s.m_fEmitted;
+    if (uiFullFrame == 0 && s.m_uiAllocActive >= s_uiEvictPool)
+      uiFullFrame = s.m_uiFrame;
+    if (uiFullFrame == 0 && s.m_fEmitted > 0.0f)
+      before.PushBack(s.m_fEmitted);
+  }
+  before.Sort();
+  const float fMedianBefore = before.IsEmpty() ? 0.0f : before[before.GetCount() / 2];
+
+  // Once full, the source keeps emitting on every frame that ran its ticks (stats readbacks with ticks).
+  plUInt32 uiAfter = 0, uiLow = 0;
+  float fLowest = -1.0f;
+  for (const GasSample& s : m_GasSamples)
+  {
+    if (uiFullFrame == 0 || s.m_uiFrame <= uiFullFrame)
+      continue;
+    ++uiAfter;
+    if (s.m_fEmitted < s_fEvictMinEmitted * fMedianBefore)
+      ++uiLow;
+    fLowest = fLowest < 0.0f ? s.m_fEmitted : plMath::Min(fLowest, s.m_fEmitted);
+  }
+
+  plTestFramework::Output(plTestOutput::Message,
+    "N1 evict: pool of %u full from render frame %llu; %u readbacks after, %u of them emitting less than %.0f%% of the median before (%.3f), lowest %.3f; evicted %u, denied %u (sources %u), dropped mass %.2f of %.2f emitted; %u grid readbacks checked, %u failed; NaN %u, overflow %u",
+    s_uiEvictPool, uiFullFrame, uiAfter, uiLow, 100.0f * s_fEvictMinEmitted, fMedianBefore, fLowest, uiEvicted, uiDenied, uiSourceDenied, fDropped, fEmitted, m_uiN1Checked, m_uiN1Failures, uiNaN,
+    uiOverflow);
+
+  PL_TEST_BOOL_MSG(uiFullFrame > 0, "N1 evict: the pool of %u never filled (largest %u)", s_uiEvictPool, uiMaxActive);
+  PL_TEST_BOOL_MSG(uiAfter >= 30, "N1 evict: only %u readbacks after the pool filled", uiAfter);
+  PL_TEST_BOOL_MSG(uiEvicted > 0, "N1 evict: nothing was evicted");
+  PL_TEST_INT(uiSourceDenied, 0);
+  PL_TEST_INT(uiLow, 0);
+  PL_TEST_INT(m_uiN1Failures, 0);
+  PL_TEST_INT(uiNaN, 0);
+  PL_TEST_INT(uiOverflow, 0);
+  return plTestAppRun::Quit;
+}
+
+namespace
+{
+  /// Mean absolute difference of two images as a fraction of white (0..1), over the RGB channels.
+  float MeanImageDifference(const plImage& a, const plImage& b)
+  {
+    plImage ca, cb;
+    if (plImageConversion::Convert(a, ca, plImageFormat::R8G8B8A8_UNORM).Failed() || plImageConversion::Convert(b, cb, plImageFormat::R8G8B8A8_UNORM).Failed())
+      return 1.0f;
+    if (ca.GetWidth() != cb.GetWidth() || ca.GetHeight() != cb.GetHeight() || ca.GetWidth() == 0)
+      return 1.0f;
+
+    plUInt64 uiSum = 0;
+    for (plUInt32 y = 0; y < ca.GetHeight(); ++y)
+    {
+      for (plUInt32 x = 0; x < ca.GetWidth(); ++x)
+      {
+        const plUInt8* pa = ca.GetPixelPointer<plUInt8>(0, 0, 0, x, y);
+        const plUInt8* pb = cb.GetPixelPointer<plUInt8>(0, 0, 0, x, y);
+        for (plUInt32 c = 0; c < 3; ++c)
+          uiSum += static_cast<plUInt64>(plMath::Abs(static_cast<plInt32>(pa[c]) - static_cast<plInt32>(pb[c])));
+      }
+    }
+    return static_cast<float>(static_cast<double>(uiSum) / (static_cast<double>(ca.GetWidth()) * ca.GetHeight() * 3.0 * 255.0));
+  }
+} // namespace
+
+plTestAppRun plGameEngineTestGpuFluidGallery::RunSmokeColumnSparse()
+{
+  // Phase 0 the Smoke Column with the whole box allocated, phase 1 the same scene sparse. Same source, seed and ticks:
+  // the sparse grid may only lose what leaves the allocated bricks.
+  if (m_iPhaseFrame == 0)
+  {
+    if (m_pOwnApplication->SetupSmokeColumnScene(m_iPhase == 0).Failed())
+      return plTestAppRun::Quit;
+    const plAngle angle = plAngle::MakeFromDegree(-90.0f);
+    m_pOwnApplication->SetCamera(s_vTwinCameraTarget + plVec3(12.5f * plMath::Cos(angle), 12.5f * plMath::Sin(angle), -1.5f), s_vTwinCameraTarget, 50.0f);
+    m_uiFirstRenderFrame = plRenderWorld::GetFrameCounter();
+    m_TwinMass.ExpandAndGetRef();
+  }
+
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  {
+    PL_LOCK(m_pOwnApplication->GetWorld()->GetReadMarker());
+    plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume();
+    plGpuFluidGasStats stats;
+    if (pGas != nullptr && pGas->GetStats(stats) && stats.m_uiTicks > 0 && stats.m_uiFrame >= m_uiFirstRenderFrame && !m_TwinMass.PeekBack().Contains(stats.m_uiFrame - m_uiFirstRenderFrame))
+    {
+      m_TwinMass.PeekBack().Insert(stats.m_uiFrame - m_uiFirstRenderFrame, plVec2(stats.m_fMass, stats.m_vCentroid.z * pGas->GetGridExtents().z));
+      m_fTwinEmitted[m_iPhase] += stats.m_fEmitted;
+      if (m_iPhase == 1)
+      {
+        m_fTwinDropped += stats.m_fMassDropped;
+        m_uiTwinMaxActive = plMath::Max(m_uiTwinMaxActive, stats.m_uiAllocActive);
+      }
+    }
+  }
+
+  ++m_iPhaseFrame;
+  if (m_iPhaseFrame < s_iTwinFrames)
+    return plTestAppRun::Continue;
+
+  m_TwinImages[m_iPhase].ResetAndCopy(m_pOwnApplication->GetLastScreenshot());
+  PL_TEST_BOOL(m_pOwnApplication->SaveShot(m_iPhase == 0 ? "SmokeColumnTwin_Whole" : "SmokeColumnTwin_Sparse").Succeeded());
+
+  m_iPhaseFrame = 0;
+  ++m_iPhase;
+  if (m_iPhase < 2)
+    return plTestAppRun::Continue;
+
+  // The mass curves and the centroids' heights, on every frame both phases have a readback for: before the plume reaches
+  // the open top (s_iTwinTopFrame), and over the whole run.
+  plStringBuilder sCsv("frame,mass_whole,mass_sparse,centroid_z_whole,centroid_z_sparse\n");
+  plUInt32 uiCompared = 0;
+  float fLargest = 0.0f, fLargestRising = 0.0f, fLargestCentroid = 0.0f, fSum = 0.0f;
+  plUInt64 uiLargestFrame = 0;
+  for (auto it : m_TwinMass[0])
+  {
+    const plVec2* pSparse = m_TwinMass[1].GetValue(it.Key());
+    if (pSparse == nullptr)
+      continue;
+    sCsv.AppendFormat("{},{},{},{},{}\n", it.Key(), it.Value().x, pSparse->x, it.Value().y, pSparse->y);
+    if (it.Key() < static_cast<plUInt64>(s_iTwinFirstChecked) || it.Value().x <= 0.0f)
+      continue;
+    const float fRelative = plMath::Abs(pSparse->x - it.Value().x) / it.Value().x;
+    ++uiCompared;
+    fSum += fRelative;
+    fLargestCentroid = plMath::Max(fLargestCentroid, plMath::Abs(pSparse->y - it.Value().y));
+    if (it.Key() < static_cast<plUInt64>(s_iTwinTopFrame))
+      fLargestRising = plMath::Max(fLargestRising, fRelative);
+    if (fRelative > fLargest)
+    {
+      fLargest = fRelative;
+      uiLargestFrame = it.Key();
+    }
+  }
+  {
+    plFileWriter csv;
+    if (csv.Open(":imgout/GpuFluidGallery/SmokeColumnSparse.csv").Succeeded())
+      csv.WriteBytes(sCsv.GetData(), sCsv.GetElementCount()).IgnoreResult();
+  }
+
+  const float fImage = MeanImageDifference(m_TwinImages[0], m_TwinImages[1]);
+  plTestFramework::Output(plTestOutput::Message,
+    "Smoke Column Sparse: %u frames compared, mass difference sparse vs whole box before frame %d largest %.5f, over the run largest %.5f (frame %llu), mean %.5f; centroid heights differ by up to %.3f m; emitted %.2f / %.2f, dropped by freeing %.3f, active up to %u of 1024; last image mean difference %.5f",
+    uiCompared, s_iTwinTopFrame, fLargestRising, fLargest, uiLargestFrame, uiCompared > 0 ? fSum / uiCompared : 0.0f, fLargestCentroid, m_fTwinEmitted[0], m_fTwinEmitted[1], m_fTwinDropped,
+    m_uiTwinMaxActive, fImage);
+
+  PL_TEST_BOOL_MSG(uiCompared >= static_cast<plUInt32>(s_iTwinFrames - s_iTwinFirstChecked) / 2, "Smoke Column Sparse: only %u frames compared", uiCompared);
+  PL_TEST_BOOL_MSG(fLargestRising <= s_fTwinMassRisingTolerance, "Smoke Column Sparse: mass differs by %.5f before frame %d (tolerance %.5f)", fLargestRising, s_iTwinTopFrame,
+    s_fTwinMassRisingTolerance);
+  PL_TEST_BOOL_MSG(fLargest <= s_fTwinMassTolerance, "Smoke Column Sparse: mass differs by %.5f (tolerance %.5f)", fLargest, s_fTwinMassTolerance);
+  PL_TEST_BOOL_MSG(fImage <= s_fTwinImageTolerance, "Smoke Column Sparse: image differs by %.5f (tolerance %.5f)", fImage, s_fTwinImageTolerance);
+  PL_TEST_BOOL_MSG(m_uiTwinMaxActive < 1024, "Smoke Column Sparse: the sparse run allocated the whole box (%u)", m_uiTwinMaxActive);
   return plTestAppRun::Quit;
 }

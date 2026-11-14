@@ -1,6 +1,7 @@
 #include <ParticlesTest/ParticlesTestPCH.h>
 
 #include <Core/Graphics/Geometry.h>
+#include <RendererFoundation/Device/Device.h>
 #include <Core/ResourceManager/ResourceManager.h>
 #include <Foundation/Configuration/CVar.h>
 #include <Foundation/IO/FileSystem/FileWriter.h>
@@ -319,6 +320,7 @@ plResult plGpuFluidGalleryApplication::SetupPoissonScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 512;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_EmitterShape = plGpuFluidEmitterShape::None;
   pGas->m_OpenFaces = AllFaces();
@@ -348,6 +350,7 @@ plResult plGpuFluidGalleryApplication::SetupClosedBoxScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 64;
   pGas->m_bAllocateAll = true; // the closed-box mode
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // 300 ticks in 150 frames, as measured in P3
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = NoFaces(); // every face a wall
   pGas->m_fBuoyancy = Tune("N4BUOYANCY", 6.0f);
@@ -389,6 +392,7 @@ plResult plGpuFluidGalleryApplication::SetupObstacleScene(bool bNoise, bool bMov
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 1536;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = plGpuFluidFaces::Default;
   pGas->m_fBuoyancy = Tune("BUOYANCY", 6.0f);
@@ -451,6 +455,7 @@ plResult plGpuFluidGalleryApplication::SetupCorridorScene()
   pGas->m_fVoxelSize = s_fVoxel;
   pGas->m_uiMaxBricks = 1536;
   pGas->m_bAllocateAll = true;
+  pGas->m_TickRate = plGpuFluidGasTickRate::Hz60; // the P3 numbers were measured at 60 Hz
   pGas->m_DebugSource = plGpuFluidDebugSource::None;
   pGas->m_OpenFaces = NoFaces();
   // A hot layer that stays hot (little cooling) and stirred only gently (half the confinement), so it stratifies under
@@ -891,7 +896,9 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunN3Poisson()
   }
 
   // The CSV, and multigrid against SOR at about the same time.
-  plStringBuilder sCsv("# GpuFluid N3 Poisson, 64 cubed (8 x 8 x 8 bricks), every face open, cold start each frame; Metal, Development build; ms = median GPU time of Gas/Pressure\n");
+  plStringBuilder sCsv;
+  sCsv.SetFormat("# GpuFluid N3 Poisson, 64 cubed (8 x 8 x 8 bricks), every face open, cold start each frame; {}, {}; ms = median GPU time of Gas/Pressure\n",
+    plGALDevice::GetDefaultDevice()->GetRenderer(), plGALDevice::GetDefaultDevice()->GetCapabilities().m_sAdapterName);
   sCsv.Append("solver,count,median_ms,residual_relative,error_relative\n");
   for (const PoissonRun& run : m_PoissonRuns)
   {

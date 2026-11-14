@@ -48,6 +48,7 @@ public:
   plUInt32 m_uiMaxBricks = 0;                                         // [ property ] atlas pool, 0: the quality's cap (GetTierBrickCap)
   bool m_bAllocateAll = false;                                        // [ property ] closed-box mode: the whole box stays allocated (up to the pool)
   plEnum<plGpuFluidQuality> m_Quality;                                // [ property ]
+  plEnum<plGpuFluidGasTickRate> m_TickRate;                           // [ property ] the quality's tick rate (plGpuFluidGasTier), or a fixed one
   plBitflags<plGpuFluidFaces> m_OpenFaces;                            // [ property ] the rest are walls
 
   // Simulation
@@ -128,7 +129,7 @@ public:
   /// Multigrid V-cycles a tick runs at this quality when PressureCycles is 0.
   static plUInt32 GetDefaultPressureCycles(plGpuFluidQuality::Enum quality);
 
-  /// Pool slots of a quality tier (design plan section 9): Low 512, Medium 1536, High 3072, Ultra 6144. The pool is
+  /// Pool slots of a quality tier (plGpuFluidGetGasTier): Low 512, Medium 1536, High 3072, Ultra 6144. The pool is
   /// created at this size when the volume activates and never resized.
   static plUInt32 GetTierBrickCap(plGpuFluidQuality::Enum quality);
 
@@ -140,6 +141,9 @@ public:
 
   /// Test hook (N11): hash the gas state in virtual brick order every frame (plGpuFluidGasStats::m_uiStateHash).
   bool m_bDebugHashState = false;
+
+  /// Test hook (N11): the allocator hands out free slots in descending order, so every brick lands in other slots.
+  bool m_bDebugReverseSlots = false;
 
   /// Test hook (the performance gate, until P4's emitter component): more sources besides the volume's own, in the
   /// same terms (offset in metres from the box centre, sizes in metres, velocity in m/s), at most 3.
