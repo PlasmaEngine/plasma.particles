@@ -23,7 +23,7 @@
 
 // Above the two type bits a liquid cell of the fine level holds, per neighbour n (0..5: -x, +x, -y, +y, -z, +z), five
 // bits of the ghost-fluid fraction theta of the free surface towards that neighbour, when it is air (LiquidClassify,
-// from the level set: theta = phi_i / (phi_i - phi_j), clamped below by the classify dispatch). Code 1 <= q <= 30:
+// from the level set: theta = (phi_i - tau) / (phi_i - phi_j), clamped below by the classify dispatch). Code 1 <= q <= 30:
 // theta = q / 30; code 31: the constant theta of the push constants (no level set, or an open domain side).
 #define GPU_FLUID_LIQUID_THETA_SHIFT 2u
 #define GPU_FLUID_LIQUID_THETA_BITS 5u
@@ -76,6 +76,8 @@
 
 // Speeds summed into the stats in mm/s.
 #define GPU_FLUID_LIQUID_SPEED_SUM_SCALE 1000.0
+// Squared speeds summed in (cm/s)^2: a group of 256 at the 32 m/s clamp stays below 2^32.
+#define GPU_FLUID_LIQUID_SPEED_SQ_SCALE 10000.0
 
 #define GPU_FLUID_LIQUID_MAX_SHAPES 8
 #define GPU_FLUID_LIQUID_SHAPE_BOX 0u
@@ -93,6 +95,12 @@
 
 // Indirect dispatch arguments: {groupsX, groupsY, 1, count} (plGpuFluidScan's args writer).
 #define GPU_FLUID_LIQUID_ARGS_BYTES 16
+
+// Indirect draw arguments (debug points, surface): two records, {vertices, 1, 0, 0} for a mono view at byte 0 and
+// {vertices, 2, 0, 0} for a stereo view at byte GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET (the eye is SV_InstanceID % 2;
+// the engine doubles the instance count of direct draws only).
+#define GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET 16
+#define GPU_FLUID_LIQUID_DRAW_ARGS_BYTES 32
 
 // Counters: persistent and per-substep words the kernels share on the GPU (never read back directly).
 #define GPU_FLUID_LIQUID_CTR_SEEDED 0         // particles seeded so far
@@ -154,6 +162,8 @@
 #define GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES 33  // surface vertices written this frame (Liquid/Surface)
 #define GPU_FLUID_LIQUID_STAT_SURFACE_QUADS 34     // surface quads written this frame
 #define GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW 35  // vertices and quads that did not fit
+#define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM 36      // sum of squared speeds, GPU_FLUID_LIQUID_SPEED_SQ_SCALE per (m/s)^2, low 32 bits
+#define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM_HI 37   // and the carries out of it (high 32 bits)
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024
 #define GPU_FLUID_LIQUID_STAT_WORD_COUNT (GPU_FLUID_LIQUID_STAT_HIST + GPU_FLUID_LIQUID_HIST_BINS)
@@ -161,7 +171,9 @@
 
 // A shader has one push-constant block (one root-constant register on D3D12, one push-constant block on Vulkan): the
 // seeding kernel defines GPU_FLUID_LIQUID_SEED_KERNEL and gets the seed block, every other liquid kernel the main one.
-#if !PL_ENABLED(PLATFORM_SHADER) || !defined(GPU_FLUID_LIQUID_SEED_KERNEL)
+// A draw shader that has its own block and only needs the layouts here defines GPU_FLUID_LIQUID_DRAW_SHADER and gets
+// neither (Vulkan rejects a second push-constant block even when it is unused).
+#if !PL_ENABLED(PLATFORM_SHADER) || (!defined(GPU_FLUID_LIQUID_SEED_KERNEL) && !defined(GPU_FLUID_LIQUID_DRAW_SHADER))
 
 /// Per dispatch data of every liquid kernel. Push constants, because render-graph passes are recorded before they
 /// execute and a shared constant buffer would be last-write-wins.

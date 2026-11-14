@@ -7,6 +7,7 @@
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidVolumeComponent.h>
 #include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidDebugRenderer.h>
+#include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidPass.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidSurfaceRenderer.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
@@ -87,8 +88,8 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 3, plComponentMode::Sta
     PL_MEMBER_PROPERTY("SurfaceRoughness", m_fSurfaceRoughness)->AddAttributes(new plDefaultValueAttribute(0.04f), new plClampValueAttribute(0.02f, 1.0f)),
     PL_MEMBER_PROPERTY("RefractionStrength", m_fRefractionStrength)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 2.0f)),
     PL_MEMBER_PROPERTY("FlipBlend", m_fFlipBlend)->AddAttributes(new plGroupAttribute("Solver"), new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.0f, 1.0f)),
-    PL_MEMBER_PROPERTY("MaxSubsteps", m_uiMaxSubsteps)->AddAttributes(new plDefaultValueAttribute(4), new plClampValueAttribute(1, 16)),
-    PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(8), new plClampValueAttribute(0, 32)),
+    PL_MEMBER_PROPERTY("MaxSubsteps", m_uiMaxSubsteps)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 16)),
+    PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(0), new plClampValueAttribute(0, 32)),
     PL_MEMBER_PROPERTY("WallFriction", m_fWallFriction)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("AlwaysSimulate", m_bAlwaysSimulate)->AddAttributes(new plDefaultValueAttribute(true)),
     PL_MEMBER_PROPERTY("DebugPointRadius", m_fDebugPointRadius)->AddAttributes(new plGroupAttribute("Debug"), new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
@@ -282,6 +283,38 @@ bool plGpuFluidLiquidVolumeComponent::GetStats(plGpuFluidLiquidStats& out_stats)
   return m_pManager != nullptr && m_VolumeId != 0 && m_pManager->GetLiquidStats(m_VolumeId, out_stats);
 }
 
+plUInt32 plGpuFluidLiquidVolumeComponent::GetTierMaxSubsteps(plGpuFluidQuality::Enum quality)
+{
+  // Plan amendment A2: Medium at most 3 substeps; beyond that the tick simulates less time (slow motion) instead of
+  // breaking the CFL number. Low keeps the plan's single substep, High and Ultra the plan's 3.
+  switch (quality)
+  {
+    case plGpuFluidQuality::Low:
+      return 1;
+    default:
+      return 3;
+  }
+}
+
+plUInt32 plGpuFluidLiquidVolumeComponent::GetTierPressureIterations(plGpuFluidQuality::Enum quality)
+{
+  // MGPCG iterations per substep, one multigrid V-cycle each (plan amendment A2: a small fixed count, measured in P8;
+  // see plGpuFluidLiquidFrameInput::m_bPcg). Medium 4: median relative residual 2e-4 at the Medium room, 95th
+  // percentile 7e-4. High 6: the first count that kept every tick below 1e-3 in both the room and the dam break.
+  // Low 3 and Ultra 8 are not measured on their own tiers.
+  switch (quality)
+  {
+    case plGpuFluidQuality::Low:
+      return 3;
+    case plGpuFluidQuality::High:
+      return 6;
+    case plGpuFluidQuality::Ultra:
+      return 8;
+    default:
+      return 4;
+  }
+}
+
 plGpuFluidLiquidSettings plGpuFluidLiquidVolumeComponent::ComputeSettings() const
 {
   plGpuFluidLiquidSettings settings;
@@ -361,8 +394,8 @@ void plGpuFluidLiquidVolumeComponent::Update()
 
   input.m_vDomainOrigin = GetDomainOrigin();
   input.m_fFlipBlend = m_fFlipBlend;
-  input.m_uiMaxSubsteps = m_uiMaxSubsteps;
-  input.m_uiPressureCycles = m_uiPressureCycles;
+  input.m_uiMaxSubsteps = m_uiMaxSubsteps > 0 ? m_uiMaxSubsteps : GetTierMaxSubsteps(m_Quality);
+  input.m_uiPressureCycles = m_uiPressureCycles > 0 ? m_uiPressureCycles : GetTierPressureIterations(m_Quality);
   input.m_fWallFriction = m_fWallFriction;
   input.m_uiOpenFaces = m_OpenFaces.GetValue();
 
@@ -479,6 +512,7 @@ void plGpuFluidLiquidVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderD
     pSurface->m_uiDebugView = static_cast<plUInt32>(plMath::Max(0, cvar_GpuFluidLiquidSurfaceDebug.GetValue()));
 
     msg.AddRenderData(pSurface, category, plRenderData::Caching::Never);
+    msg.AddContentFlags(PL_GPUFLUID_CONTENT_FLAG_LIQUID);
     msg.AddDependency(publish.m_hSurfaceVertices, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
     msg.AddDependency(publish.m_hSurfaceQuads, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
     msg.AddDependency(publish.m_hSurfaceDrawArgs, category, plGALResourceState::IndirectArgument);

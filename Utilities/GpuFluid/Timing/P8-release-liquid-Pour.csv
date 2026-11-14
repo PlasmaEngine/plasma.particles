@@ -1,0 +1,28 @@
+phase,mean_ms_per_frame
+GpuFluid Liquid/Begin,0.043227
+GpuFluid Liquid/Seed,0.067958
+GpuFluid Liquid/Source,0.08391
+GpuFluid Liquid/Sort,0.179137
+GpuFluid Liquid/P2G,1.350669
+GpuFluid Liquid/P2G LevelSet,0
+GpuFluid Liquid/Solve Setup,0
+GpuFluid Liquid/Solve,7.881375
+GpuFluid Liquid/Solve Project,0
+GpuFluid Liquid/G2P,0.099644
+GpuFluid Liquid/Render,0.086885
+GpuFluid Liquid/Surface Sort,0
+GpuFluid Liquid/Surface,1.463075
+GpuFluid Liquid/Readback,0.00856
+GpuFluid Liquid Copy Scene Color,0.159156
+GpuFluid Liquid Copy Depth,0.045816
+GpuFluid Liquid Back Faces,0.070122
+GpuFluid Liquid Surface,0.114708
+total,11.196481
+draw_total,0.389802
+substep_phases_ms,9.510825
+surface_ms,1.463075
+particles,136847
+substeps_per_frame,14
+active_bricks,264.04
+ns_per_particle_substep,4.964264
+solve_us_per_brick_substep,2.132083

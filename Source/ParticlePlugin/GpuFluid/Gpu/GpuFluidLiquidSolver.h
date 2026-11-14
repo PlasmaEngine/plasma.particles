@@ -66,27 +66,40 @@ struct plGpuFluidLiquidFrameInput
   float m_fSubstepDownMargin = 0.8f;
 
   /// Pressure solve: MGPCG (conjugate gradients, one multigrid V-cycle as the preconditioner per iteration) or, when
-  /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep.
+  /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep, a fixed count (no readback). Measured
+  /// in P8 (relative residual max|r| / max|rhs| of a tick's last substep, median / 95th percentile / max over the ticks):
+  /// - Medium room (128 x 96 x 64, 393K particles): 3 iterations 9.7e-4 / 2.8e-3 / 6.1e-3, 4: 1.9e-4 / 6.9e-4 /
+  ///   1.8e-3, 6: 9e-6 / 2.9e-5 / 5.9e-5;
+  /// - dam break (2 cm, 230K particles): 3: 2.1e-3 / 9.3e-3 / 4.5e-2, 4: 3.8e-4 / 1.9e-3 / 1.3e-2, 6: 2e-5 / 7.7e-5 /
+  ///   5.3e-4.
+  /// The volume component takes the tier's count (Medium 4) unless PressureCycles is set.
   bool m_bPcg = true;
-  plUInt32 m_uiPressureCycles = 8;
+  plUInt32 m_uiPressureCycles = 4;
 
-  plUInt32 m_uiPreSmooth = 2;        ///< red-black Gauss-Seidel sweeps before restriction
+  plUInt32 m_uiPreSmooth = 2;        ///< red-black Gauss-Seidel sweeps before restriction (1: the residual is 25x worse)
   plUInt32 m_uiPostSmooth = 2;       ///< and after prolongation
-  plUInt32 m_uiCoarsestSweeps = 48;  ///< sweeps on the coarsest level, in one dispatch
+  /// Sweeps on the coarsest level, in one dispatch of one group. 48 (P7) gave the same residuals at the Medium room
+  /// as 16, which saves about 0.5 ms there.
+  plUInt32 m_uiCoarsestSweeps = 16;
   /// Coarse right-hand side = this * sum of the 8 fine residuals. 0.5 (four times the mean) matches the unit-spacing
   /// stencil rediscretised on the coarse level.
   float m_fCoarseScale = 0.5f;
 
   float m_fTheta = 0.5f;          ///< ghost-fluid fraction of the free surface between a liquid and an air cell centre
-  /// k of the local density correction: target divergence k * max(n/n0 - 1, 0) in 1/s, at most 0.5 / dt. A rate,
-  /// so the packing it holds does not depend on the substep count.
-  float m_fDensityGain = 25.0f;
-  /// The density correction acts on n/n0 - 1 - this: the Poisson spread of particles scattered at random (about 0.1 for
-  /// the 3x3x3 mean at n0 = 4) is left alone, so a settled pool comes to rest.
-  float m_fDensityDeadZone = 0.3f;
+  /// k of the local density correction: target divergence k * e in 1/s (at most 0.5 / dt), e = rho/rho0 - 1 from a
+  /// smooth (quadratic B-spline) particle density over the liquid cells around (LiquidRhs). A rate, and its
+  /// equilibrium is e = 0, so the packing it holds does not depend on dt or the substep count.
+  float m_fDensityGain = 4.0f;
+  /// Deep cells (no air in the 3x3x3 block around) correct both ways: sparse ones pull particles in. Near the surface
+  /// only crowding is corrected (a partly filled cell reads sparse). False: one-sided everywhere.
+  bool m_bDensityTwoSided = true;
+  float m_fDensityMaxError = 0.5f;  ///< |e| is clamped to this
+  /// The density correction acts on |e| - this (0: none).
+  float m_fDensityDeadZone = 0.0f;
   /// c of the global volume control: target divergence c * (V_target - V) / V_target, in 1/s (the share of the
-  /// volume error corrected per second, independent of the substep count).
-  float m_fVolumeGain = 8.0f;
+  /// volume error corrected per second, independent of the substep count). 20: the air an overturning wave traps
+  /// (the dam break's surge at the far wall) is pushed out within about a second, so the measure stays within 2%.
+  float m_fVolumeGain = 20.0f;
 
   /// After a reset the first ticks run the most substeps: a column released from rest accelerates at up to g * H / dx
   /// near its foot before the read-back speed can see it.
@@ -96,16 +109,35 @@ struct plGpuFluidLiquidFrameInput
 
   plUInt8 m_uiOpenFaces = 0; ///< GPU_FLUID_LIQUID_OPEN_* bits; closed faces are walls
 
-  /// Level set (Zhu & Bridson) from the particles every substep: a cell is liquid when it holds particles or phi < 0
-  /// at its centre, and the free surface's ghost-fluid theta is phi_i / (phi_i - phi_j) per face. False: liquid cells
+  /// Level set (Zhu & Bridson) from the particles every substep: a cell is liquid when phi < m_fLiquidPhi at its
+  /// centre, and the free surface's ghost-fluid theta is (phi_i - tau) / (phi_i - phi_j) per face. False: liquid cells
   /// are the cells with particles and theta is m_fTheta (P6).
   bool m_bLevelSet = true;
   float m_fLevelSetRadius = 1.5f;    ///< kernel radius R in cells (at most 1.5: the gather covers 3x3x3 cells)
-  /// r in cells. 0.25 R would put the zero of a flat, full surface where it belongs; a little less keeps the pool's
-  /// packing (the dam break's rest depth) at the seeded volume, because the cells with particles count as liquid too.
+  /// r in cells. 0.25 R would put the zero of a flat, full surface where it belongs; a little less keeps the surface
+  /// mesh on the particles of a settled pool.
   float m_fParticleRadius = 0.28f;
   bool m_bLevelSetTheta = true;      ///< theta from the level set; false: m_fTheta with the level-set liquid cells
-  bool m_bLevelSetOnly = false;      ///< liquid cells are phi < 0 alone, not also every cell holding particles
+  /// Liquid cells are phi < m_fLiquidPhi alone (P8), not also every cell holding particles (P7's union). The cells with
+  /// particles follow the particles' noise at the surface: a cell holding one stray particle beside an empty one at the
+  /// same height is a one-cell bump whose pressure pushes sideways into the air next to it, and a half-filled top layer
+  /// is a mix of liquid cells and holes, so a resting surface never comes to rest (a randomly seeded pool "boils"). The
+  /// level set is a smooth function of the particle positions, so the surface it gives the pressure is too; a particle
+  /// outside it is spray and flies ballistically until it lands.
+  bool m_bLevelSetOnly = true;
+  /// tau (cells): the pressure's free surface is phi = tau, a little outside the level set's zero, whose particle radius
+  /// is set for the surface mesh. As the level set is phi = |x - xbar| - r, this is the level set of r + tau (0.65
+  /// cells). It has to reach about 0.6 cells: the centre of a half-filled top cell lies about 0.3 cells outside the
+  /// mesh's level set, and with a smaller tau some of those cells are liquid and some air (0.2: the random pool still
+  /// moves at 2 cm/s; 0.1 and below with the level set alone: the liquid falls apart).
+  float m_fLiquidPhi = 0.37f;
+  /// Without m_bLevelSetOnly (P7's union): a cell holding particles is also liquid while phi at its centre is below
+  /// this (cells).
+  float m_fSprayPhi = 1.0e3f;
+  /// Without m_bLevelSetOnly: a cell outside phi < m_fLiquidPhi needs this many particles to be liquid.
+  plUInt32 m_uiLiquidMinCount = 1;
+  /// Particles in air cells fly ballistically (gravity only). False: they take the extrapolated grid velocity.
+  bool m_bBallisticAir = true;
   float m_fThetaMin = 0.25f;         ///< smallest theta from the level set
   /// Clamped Laplacian steps on the substep's level set before it classifies (pairs; 0: none). They take the particles'
   /// noise out of theta, which otherwise keeps a resting surface jittering.
@@ -114,6 +146,10 @@ struct plGpuFluidLiquidFrameInput
   /// Surface mesh (Liquid/Surface, once per frame that steps): the level set again from the final particles, blended
   /// with the last frame's surface carried along the flow, smoothed, then surface nets.
   bool m_bSurface = true;
+  /// The surface sorts the final particles again and computes its own level set from them (P7). False: it takes the
+  /// last substep's level set, computed from the particles at that substep's start, so the mesh lags the particles by
+  /// one substep (1/90 s at 3 substeps) and the frame saves a sort and a level-set gather (about 0.7 ms at Medium).
+  bool m_bSurfaceOwnLevelSet = false;
   float m_fSurfaceBlend = 0.3f;          ///< share of the advected last frame (0: no temporal blend)
   plUInt32 m_uiSurfaceSmoothSteps = 4;   ///< clamped Laplacian steps
   float m_fSurfaceSmoothGain = 0.5f;     ///< k of a step
@@ -122,6 +158,11 @@ struct plGpuFluidLiquidFrameInput
   plHybridArray<plGpuFluidLiquidFill, 4> m_Fills;
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_Shapes;
   plHybridArray<plGpuFluidLiquidSource, 4> m_Sources; ///< at most s_uiMaxSources are used
+
+  /// Splits Liquid/P2G (level set apart: "P2G LevelSet") and Liquid/Solve ("Solve Setup": classify, forces, right-hand
+  /// side; "Solve": the pressure; "Solve Project": residual, projection, extrapolation) into passes of their own, so
+  /// each is timed. Costs a few barriers more.
+  bool m_bProfileKernels = false;
 
   /// Front histogram along +x of particles below this height (domain metres), in bins of this size. 0 bins: off.
   float m_fFrontHeight = 0.0f;
@@ -153,6 +194,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
 
   float m_fMaxSpeed = 0.0f;        ///< m/s
   float m_fMeanSpeed = 0.0f;       ///< m/s
+  float m_fMeanSquaredSpeed = 0.0f; ///< (m/s)^2: twice the kinetic energy per unit mass
   plUInt32 m_uiAbove1cm = 0;       ///< particles faster than 1 cm/s
   plUInt32 m_uiAbove1mm = 0;       ///< particles faster than 1 mm/s
   plVec3 m_vCentroid = plVec3::MakeZero(); ///< domain metres
@@ -178,7 +220,7 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
 struct plGpuFluidLiquidPublish
 {
   plGALBufferHandle m_hPoints;   ///< float4 per particle: world position, speed
-  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}
+  plGALBufferHandle m_hDrawArgs; ///< {6 * alive, 1, 0, 0}, then {6 * alive, 2, 0, 0} for stereo
   plUInt32 m_uiMaxParticles = 0;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
   plVec3 m_vDomainSize = plVec3::MakeZero();
@@ -285,7 +327,7 @@ public:
   plUInt32 GetSubstepsOfLastRecord() const { return m_uiLastSubsteps; }
 
 private:
-  plGALBufferHandle CreateRawBuffer(plUInt64 uiBytes, const char* szName, bool bIndirect = false);
+  plGALBufferHandle CreateRawBuffer(plUInt64 uiBytes, const char* szName, bool bIndirect = false, bool bZero = true);
 
   bool m_bCreated = false;
   bool m_bRecorded = false;

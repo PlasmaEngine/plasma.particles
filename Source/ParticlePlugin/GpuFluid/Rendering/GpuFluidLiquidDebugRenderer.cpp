@@ -4,6 +4,8 @@
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidDebugRenderer.h>
 #include <RendererCore/Pipeline/RenderDataBatch.h>
 #include <RendererCore/RenderContext/RenderContext.h>
+#include <Core/Graphics/Camera.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidConstants.h>
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDebugConstants.h>
 
 // clang-format off
@@ -43,16 +45,18 @@ void plGpuFluidLiquidDebugRenderer::RenderBatch(const plRenderViewContext& rende
 
     pContext->BindShader(m_hShader);
 
-    plGpuFluidLiquidDebugConstants constants = {};
+    plGpuFluidLiquidDebugConstants constants = {}; // the one member is set: "= {}" does not zero pl vectors
     constants.GpuFluidDebugParams = plVec4(pRenderData->m_fRadius, pRenderData->m_fTopSpeed, 0.0f, 0.0f);
     pContext->SetPushConstants("plGpuFluidLiquidDebugConstants", constants);
 
     plBindGroupBuilder& bindGroup = pContext->GetBindGroup(PL_GAL_BIND_GROUP_DRAW_CALL);
     bindGroup.BindBuffer("GpuFluidLiqPoints", pRenderData->m_hPoints);
 
-    // The indirect arguments carry the alive count; the primitive count only sizes the null mesh.
+    // The indirect arguments carry the alive count; the primitive count only sizes the null mesh. A stereo view takes
+    // the record with two instances (the vertex shader picks the eye with SV_InstanceID % 2).
+    const bool bStereo = renderViewContext.m_pCamera != nullptr && renderViewContext.m_pCamera->IsStereoscopic();
     pContext->BindNullMeshBuffer(plGALPrimitiveTopology::Triangles, pRenderData->m_uiMaxParticles * 2);
-    pContext->DrawMeshBufferIndirect(pRenderData->m_hDrawArgs, 0).IgnoreResult();
+    pContext->DrawMeshBufferIndirect(pRenderData->m_hDrawArgs, bStereo ? GPU_FLUID_LIQUID_DRAW_ARGS_STEREO_OFFSET : 0).IgnoreResult();
   }
 }
 

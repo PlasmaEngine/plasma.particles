@@ -19,7 +19,7 @@ public:
 
   plGALBufferHandle m_hVertices; ///< per vertex float4 (domain-relative position, 1), float4 (normal, 0)
   plGALBufferHandle m_hQuads;    ///< per quad 4 vertex indices
-  plGALBufferHandle m_hDrawArgs; ///< {6 * quads, 1, 0, 0}
+  plGALBufferHandle m_hDrawArgs; ///< {6 * quads, 1, 0, 0}, then {6 * quads, 2, 0, 0} for stereo
   plUInt32 m_uiMaxQuads = 0;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
 

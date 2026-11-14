@@ -4,6 +4,11 @@
 #include <RendererCore/Pipeline/Passes/ForwardRenderPass.h>
 #include <RendererCore/Shader/ShaderResource.h>
 
+/// \brief Reported by every liquid volume that extracts a surface (plRenderPipeline::GetContentFlags), so
+/// plGpuFluidLiquidPass only creates and clears its targets while a view has liquid in it. plasma.water uses bit 25,
+/// the particle distortion pass bit 24.
+constexpr plUInt32 PL_GPUFLUID_CONTENT_FLAG_LIQUID = PL_BIT(26);
+
 /// \brief Draws the GpuFluid liquid surfaces in front of the transparent pass.
 ///
 /// Injected at BeforeTransparent behind plasma.water (Startup.cpp). Per frame with a liquid surface in view:
