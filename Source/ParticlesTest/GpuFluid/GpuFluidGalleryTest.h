@@ -1,5 +1,6 @@
 #pragma once
 
+#include <Core/Graphics/Camera.h>
 #include <GameEngineTest/TestClass/TestClass.h>
 #include <RendererCore/Meshes/MeshResource.h>
 #include <RendererCore/Volumes/VDBVolumeResource.h>
@@ -23,6 +24,13 @@ public:
   /// Sun, sky and a ground slab; the GPU-written sphere and its baked twin, side by side at +-fSeparation/2.
   plResult SetupHandoffScene(float fSeparation, bool bPulse);
 
+  /// The smoke column of P1: a simulated 4 x 4 x 8 m box standing on the stage's floor, open on every side but the
+  /// bottom, fed by a warm sphere source near the floor.
+  plResult SetupSmokeColumnScene();
+
+  /// The simulated volume of the smoke scenes.
+  plGpuFluidGasVolumeComponent* GetSmokeVolume();
+
   /// The analytic sphere both volumes share. Matches GasAnalyticSphere.plShader.
   struct SphereShape
   {
@@ -43,7 +51,8 @@ public:
   plGameObject* GetBakedObject();
   plGpuFluidGasVolumeComponent* GetGpuVolume();
 
-  void SetCamera(const plVec3& vPosition, const plVec3& vTarget);
+  /// fFovY > 0: a perspective lens with that vertical field of view in degrees; otherwise the game state's own lens.
+  void SetCamera(const plVec3& vPosition, const plVec3& vTarget, float fFovY = 0.0f);
 
   /// Both volumes glow by temperature, or neither does. World write lock held.
   void SetEmissive(bool bEmissive);
@@ -60,6 +69,10 @@ private:
   plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color);
   void AddSunAndSky(const plVec3& vToSun, float fLux);
 
+  /// Clears the world and builds the shared stage: a grey floor, the sun and the sky; with bProps also a 1 m checker
+  /// around the origin and a few boxes for scale and depth.
+  void SetupStage(plUInt32 uiSeed, const plVec3& vToSun, bool bProps);
+
   /// What the VDB importer would make of the sphere: a dense RGBA8 grid split into bricks with a one voxel apron and an
   /// RGBA8 brick table, created as a runtime plVDBVolumeResource.
   plVDBVolumeResourceHandle CreateBakedSphere();
@@ -71,6 +84,11 @@ private:
   plVDBVolumeResourceHandle m_hBakedSphere;
   plGameObjectHandle m_hGpuObject;
   plGameObjectHandle m_hBakedObject;
+  plGameObjectHandle m_hSmokeObject;
+
+  bool m_bCameraDefaultsKnown = false;
+  plCameraMode::Enum m_DefaultCameraMode = plCameraMode::PerspectiveFixedFovY;
+  float m_fDefaultFov = 90.0f;
 };
 
 class plGameEngineTestGpuFluidGallery : public plGameEngineTest
@@ -86,6 +104,27 @@ protected:
   {
     Handoff,
     HandoffSphereVideo,
+    SmokeColumn,
+    SmokeColumnVideo,
+    GasTiming,
+  };
+
+  /// One stats readback of a simulated volume, with the simulation time it was recorded at.
+  struct GasSample
+  {
+    float m_fSeconds = 0.0f;
+    plUInt64 m_uiFrame = 0;
+    float m_fMass = 0.0f;
+    float m_fCentroidZ = 0.0f; ///< metres above the volume's floor
+    float m_fMaxDensity = 0.0f;
+    float m_fMaxSpeed = 0.0f;
+    float m_fDivBefore = 0.0f;
+    float m_fDivAfter = 0.0f;
+    float m_fMeanDivBefore = 0.0f;
+    float m_fMeanDivAfter = 0.0f;
+    plUInt32 m_uiNaN = 0;
+    plUInt32 m_uiContentBricks = 0;
+    plUInt32 m_uiActiveBricks = 0;
   };
 
   virtual void SetupSubTests() override;
@@ -96,6 +135,17 @@ protected:
 private:
   plTestAppRun RunHandoff();
   plTestAppRun RunHandoffSphereVideo();
+  plTestAppRun RunSmokeColumn(bool bVideo);
+  plTestAppRun RunGasTiming();
+
+  /// Takes the smoke volume's latest readback into m_GasSamples when it is new. World read lock held.
+  void CollectGasSample();
+
+  /// The Smoke Column checks over m_GasSamples.
+  void EvaluateSmokeColumn();
+
+  /// Sets a bool, int or float CVar for the running sub-test; DeInitializeSubTest puts the old value back.
+  void SetCVarForSubTest(const char* szName, const plVariant& value);
 
   /// The N0 image checks, once every capture is in.
   void EvaluateHandoffImages();
@@ -106,6 +156,13 @@ private:
   plInt32 m_iPhaseFrame = 0;
   bool m_bDepthOfFieldWasEnabled = true;
   bool m_bRestoreDepthOfField = false;
+  /// CVars changed for the running sub-test and their values before, restored by DeInitializeSubTest.
+  plDynamicArray<plString> m_RestoreCVarNames;
+  plDynamicArray<plVariant> m_RestoreCVarValues;
+  plUInt64 m_uiFirstRenderFrame = 0;
+  plDynamicArray<GasSample> m_GasSamples;
+  plDynamicArray<plString> m_TimingNames;
+  plDynamicArray<plDynamicArray<double>> m_TimingValues;
   plImage m_GpuAlone;
   plImage m_GpuAgain;
   plImage m_GpuEmissive;
