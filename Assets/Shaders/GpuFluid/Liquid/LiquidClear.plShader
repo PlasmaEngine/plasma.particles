@@ -11,6 +11,8 @@ ALL
 
 RWByteAddressBuffer GpuFluidLiqCellCount;
 RWByteAddressBuffer GpuFluidLiqBrickOccupied;
+RWByteAddressBuffer GpuFluidLiqBrickSpeed;
+RWByteAddressBuffer GpuFluidLiqBrickCalm;
 RWByteAddressBuffer GpuFluidLiqCounters;
 
 [numthreads(256, 1, 1)]
@@ -24,7 +26,14 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     GpuFluidLiqCellCount.Store(i * 4, 0u);
 
   if (i < bricks.x * bricks.y * bricks.z)
+  {
     GpuFluidLiqBrickOccupied.Store(i * 4, 0u);
+    // The fastest particle of each brick this substep (LiquidG2P), and on a wake (GpuFluidLiqPass.y = 1) the calm
+    // counts, so every brick starts awake.
+    GpuFluidLiqBrickSpeed.Store(i * 4, 0u);
+    if (LIQ_CONST(GpuFluidLiqPass).y == 1)
+      GpuFluidLiqBrickCalm.Store(i * 4, 0u);
+  }
 
   // GpuFluidLiqPass.x = 1: the sort that Liquid/Surface runs after the last substep. It keeps the solver's counters of
   // that substep (volume, residual, ...) and only starts the brick counts over.
@@ -34,7 +43,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     if (i == GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS || i == GPU_FLUID_LIQUID_CTR_OCCUPIED)
       GpuFluidLiqCounters.Store(i * 4, 0u);
   }
-  else if (i >= GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP && i <= GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP)
+  else if ((i >= GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP && i <= GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP) || i == GPU_FLUID_LIQUID_CTR_AWAKE || i == GPU_FLUID_LIQUID_CTR_SLEEPING)
   {
     GpuFluidLiqCounters.Store(i * 4, 0u);
   }

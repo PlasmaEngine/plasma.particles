@@ -31,8 +31,37 @@
 #define GPU_FLUID_LIQUID_THETA_STEPS 30.0
 
 // GpuFluidLiqCells.w: bits 0..5 open faces, 8..15 shape count, bit 16: liquid cells and the free surface's theta come
-// from the level set (phi < 0 is liquid as well as a cell holding particles).
+// from the level set (phi < 0 is liquid as well as a cell holding particles), bit 17: the baked static solids
+// (GpuFluidLiqSolidSdf) hold solids, bits 18..20: drain count.
 #define GPU_FLUID_LIQUID_FLAG_LEVEL_SET (1u << 16)
+#define GPU_FLUID_LIQUID_FLAG_SOLID_SDF (1u << 17)
+#define GPU_FLUID_LIQUID_DRAIN_SHIFT 18u
+#define GPU_FLUID_LIQUID_MAX_DRAINS 4
+
+// Static solids baked from the world's collision meshes (LiquidSolidsBake): one float per cell, the signed distance
+// (m, negative inside) of the cell centre, exact within GPU_FLUID_LIQUID_SDF_BAND_CELLS of a triangle and +-band beyond.
+// Every surface is at least GPU_FLUID_LIQUID_SDF_MIN_THICKNESS_CELLS thick (half of it on each side), so a single-sided
+// wall (an open plane) still blocks the liquid.
+#define GPU_FLUID_LIQUID_SDF_BAND_CELLS 3.0
+#define GPU_FLUID_LIQUID_SDF_MIN_THICKNESS_CELLS 0.5
+#define GPU_FLUID_LIQUID_SDF_UNKNOWN 3.0e38
+#define GPU_FLUID_LIQUID_SOLID_TRIANGLE_FLOATS 32
+
+// Sleep: a brick whose particles stay below GPU_FLUID_LIQUID_SLEEP_SPEED (m/s, and its neighbours' too) for
+// GPU_FLUID_LIQUID_SLEEP_STEPS substeps, with no wake box (inflow, open drain) over it, freezes its particles.
+#define GPU_FLUID_LIQUID_SLEEP_SPEED 0.02
+#define GPU_FLUID_LIQUID_SLEEP_STEPS 60u
+#define GPU_FLUID_LIQUID_MAX_WAKE_BOXES 8
+
+// Regions (GpuFluidLiqRegions, boxes as plGpuFluidLiquidShape, domain metres): the open drains first, then from
+// GPU_FLUID_LIQUID_REGION_WAKE_FIRST the wake boxes. A particle inside a drain is removed and counted as drained, and a
+// cell whose centre is inside one is air (the free surface's zero pressure draws the liquid in).
+#define GPU_FLUID_LIQUID_REGION_WAKE_FIRST GPU_FLUID_LIQUID_MAX_DRAINS
+#define GPU_FLUID_LIQUID_MAX_REGIONS (GPU_FLUID_LIQUID_MAX_DRAINS + GPU_FLUID_LIQUID_MAX_WAKE_BOXES)
+
+// Level probes (the flood-level check): up to four columns whose water level the stats report.
+#define GPU_FLUID_LIQUID_MAX_PROBES 4
+#define GPU_FLUID_LIQUID_NO_PROBE 0xFFFFFFFFu
 
 // Surface extraction (Liquid/Surface): per vertex two float4 (world position, 1; normal, 0), per quad four vertex
 // indices. The counters buffer: vertices, quads, and how many of each did not fit.
@@ -117,7 +146,11 @@
 #define GPU_FLUID_LIQUID_CTR_RESIDUAL_MAX 13  // per substep: asuint of max |residual| after the solve
 #define GPU_FLUID_LIQUID_CTR_NAN 14           // per frame: NaN or infinite values met (and repaired)
 #define GPU_FLUID_LIQUID_CTR_OVERFLOW 15      // per frame: fixed-point or speed clamps
-#define GPU_FLUID_LIQUID_CTR_WORDS 16
+#define GPU_FLUID_LIQUID_CTR_AWAKE 16         // per substep: occupied bricks that are not asleep (LiquidSleep)
+#define GPU_FLUID_LIQUID_CTR_SLEEPING 17      // per substep: occupied bricks that are asleep (LiquidSleep)
+#define GPU_FLUID_LIQUID_CTR_IN_SOLID 18      // per frame: particles left deeper than half a cell inside a solid after G2P (N9)
+#define GPU_FLUID_LIQUID_CTR_SOLID_CELLS 19   // per bake: cells the static solids bake made solid (kept through resets)
+#define GPU_FLUID_LIQUID_CTR_WORDS 20
 #define GPU_FLUID_LIQUID_CTR_FIRST_PER_SUBSTEP 8
 #define GPU_FLUID_LIQUID_CTR_LAST_PER_SUBSTEP 13
 
@@ -164,6 +197,12 @@
 #define GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW 35  // vertices and quads that did not fit
 #define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM 36      // sum of squared speeds, GPU_FLUID_LIQUID_SPEED_SQ_SCALE per (m/s)^2, low 32 bits
 #define GPU_FLUID_LIQUID_STAT_SPEED_SQ_SUM_HI 37   // and the carries out of it (high 32 bits)
+#define GPU_FLUID_LIQUID_STAT_AWAKE 38             // occupied bricks awake after the last substep
+#define GPU_FLUID_LIQUID_STAT_SLEEPING 39          // occupied bricks asleep after the last substep
+#define GPU_FLUID_LIQUID_STAT_PROBES 40            // 4 words: asuint water depth (m) per probe from the particles of its 3 x 3 column
+#define GPU_FLUID_LIQUID_STAT_IN_SOLID 44          // particle-substeps that ended deeper than half a cell inside a solid this frame
+#define GPU_FLUID_LIQUID_STAT_SOLID_CELLS 45       // cells the last static solids bake made solid
+#define GPU_FLUID_LIQUID_STAT_PROBES_PHI 48        // 4 words: asuint water depth (m) per probe from the level set's lowest zero crossing
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024
 #define GPU_FLUID_LIQUID_STAT_WORD_COUNT (GPU_FLUID_LIQUID_STAT_HIST + GPU_FLUID_LIQUID_HIST_BINS)

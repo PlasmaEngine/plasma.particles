@@ -52,6 +52,10 @@ bool LiqIsFinite3(float3 v) { return !any(isnan(v)) && !any(isinf(v)); }
 uint3 LiqCells() { return LIQ_CONST(GpuFluidLiqCells).xyz; }
 uint LiqOpenMask() { return LIQ_CONST(GpuFluidLiqCells).w & 0xFFu; }
 uint LiqShapeCount() { return (LIQ_CONST(GpuFluidLiqCells).w >> 8) & 0xFFu; }
+bool LiqSolidSdfEnabled() { return (LIQ_CONST(GpuFluidLiqCells).w & GPU_FLUID_LIQUID_FLAG_SOLID_SDF) != 0; }
+uint LiqDrainCount() { return min((LIQ_CONST(GpuFluidLiqCells).w >> GPU_FLUID_LIQUID_DRAIN_SHIFT) & 7u, (uint)GPU_FLUID_LIQUID_MAX_DRAINS); }
+/// Any solid inside the domain: an analytic shape or the baked static solids.
+bool LiqHasSolids() { return LiqShapeCount() > 0 || LiqSolidSdfEnabled(); }
 bool LiqLevelSetEnabled() { return (LIQ_CONST(GpuFluidLiqCells).w & GPU_FLUID_LIQUID_FLAG_LEVEL_SET) != 0; }
 uint3 LiqBricks() { return LIQ_CONST(GpuFluidLiqBricks).xyz; }
 uint LiqCapacity() { return LIQ_CONST(GpuFluidLiqBricks).w; }
@@ -142,8 +146,33 @@ int3 LiqParticleCell(float3 position)
 
 StructuredBuffer<plGpuFluidLiquidShape> GpuFluidLiqShapes;
 
-/// Signed distance (m) to the nearest analytic solid, negative inside. 1e6 when there is none.
-float LiqShapeDistance(float3 position)
+// The baked static solids (LiquidSolidsBake): the signed distance of every cell centre, metres.
+ByteAddressBuffer GpuFluidLiqSolidSdf;
+
+float LiqSolidSdfAtCell(int3 c)
+{
+  const int3 cc = clamp(c, int3(0, 0, 0), int3(LiqCells()) - 1);
+  return asfloat(GpuFluidLiqSolidSdf.Load(LiqCellIndex(cc) * 4));
+}
+
+/// The baked solids' distance at a position (m), trilinear between the cell centres.
+float LiqSolidSdfSample(float3 position)
+{
+  const float3 g = clamp(position * LiqInvDx() - 0.5, 0.0, float3(LiqCells()) - 1.0);
+  const int3 base = min(int3(floor(g)), int3(LiqCells()) - 2);
+  const float3 f = g - float3(base);
+  float value = 0.0;
+  [unroll] for (uint i = 0; i < 8; ++i)
+  {
+    const int3 o = int3(i & 1u, (i >> 1) & 1u, (i >> 2) & 1u);
+    const float3 w = lerp(1.0 - f, f, float3(o));
+    value += w.x * w.y * w.z * LiqSolidSdfAtCell(base + o);
+  }
+  return value;
+}
+
+/// Signed distance (m) to the nearest analytic solid only, negative inside. 1e6 when there is none.
+float LiqAnalyticDistance(float3 position)
 {
   float distance = 1e6;
   const uint count = min(LiqShapeCount(), (uint)GPU_FLUID_LIQUID_MAX_SHAPES);
@@ -166,6 +195,24 @@ float LiqShapeDistance(float3 position)
   return distance;
 }
 
+/// Signed distance (m) to the nearest solid, analytic or baked, negative inside. 1e6 when there is none.
+float LiqShapeDistance(float3 position)
+{
+  float distance = LiqAnalyticDistance(position);
+  if (LiqSolidSdfEnabled())
+    distance = min(distance, LiqSolidSdfSample(position));
+  return distance;
+}
+
+/// The same at the centre of cell c: the baked value directly.
+float LiqSolidDistanceAtCell(int3 c)
+{
+  float distance = LiqShapeCount() > 0 ? LiqAnalyticDistance((float3(c) + 0.5) * LiqDx()) : 1e6;
+  if (LiqSolidSdfEnabled())
+    distance = min(distance, LiqSolidSdfAtCell(c));
+  return distance;
+}
+
 float3 LiqShapeNormal(float3 position)
 {
   const float h = 0.25 * LiqDx();
@@ -174,6 +221,29 @@ float3 LiqShapeNormal(float3 position)
     LiqShapeDistance(position + float3(0, 0, h)) - LiqShapeDistance(position - float3(0, 0, h)));
   const float len = length(n);
   return len > 1e-12 ? n / len : float3(0, 0, 1);
+}
+
+#endif
+
+#if defined(GPU_FLUID_LIQUID_USE_REGIONS)
+
+StructuredBuffer<plGpuFluidLiquidShape> GpuFluidLiqRegions;
+
+bool LiqInsideBox(plGpuFluidLiquidShape box, float3 position)
+{
+  return all(abs(position - box.CenterType.xyz) <= box.Size.xyz);
+}
+
+/// Whether a position (domain metres) is inside an open drain.
+bool LiqInsideDrain(float3 position)
+{
+  const uint count = LiqDrainCount();
+  for (uint i = 0; i < count; ++i)
+  {
+    if (LiqInsideBox(GpuFluidLiqRegions[i], position))
+      return true;
+  }
+  return false;
 }
 
 #endif

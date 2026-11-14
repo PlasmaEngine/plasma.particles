@@ -57,6 +57,14 @@ protected:
     PourIntoGlassVideo,
     MediumRoom,
     NoLiquid,
+    HydrostaticTankRandomQuarter,
+    HydrostaticTankRandomThreeQuarter,
+    MediumRoomSubstepCost,
+    FloodingRoom,
+    FloodingRoomVideo,
+    SleepAndWake,
+    OpenSideOutflow,
+    StaticSolids,
   };
 
   virtual void SetupSubTests() override;
@@ -87,10 +95,89 @@ private:
     plUInt32 m_uiSurfaceVertices = 0;   ///< surface-nets mesh of the frame
     plUInt32 m_uiSurfaceQuads = 0;
     plUInt32 m_uiSurfaceOverflow = 0;
+    plUInt32 m_uiAwakeBricks = 0;
+    plUInt32 m_uiSleepingBricks = 0;
+    plUInt32 m_uiInSolid = 0;
+    plUInt32 m_uiSolidCells = 0;
+    float m_fProbes[4] = {};   ///< water depth from the particles of each probe's 3 x 3 column (m)
+    float m_fProbePhi[4] = {}; ///< the same from the level set's zero crossing
   };
 
+  /// A static solid of the scenes with baked solids: a box (world centre, full size, rotation), drawn and handed to the
+  /// liquid's bake through plGpuFluidTestSolidComponent (the plMsgExtractGeometry contract of a Jolt static actor).
+  struct BakedBox
+  {
+    plVec3 m_vCenter = plVec3::MakeZero();
+    plVec3 m_vSize = plVec3(1.0f);
+    plQuat m_qRotation = plQuat::MakeIdentity();
+  };
+
+  /// Signed distance (m) from a world point to a baked box, negative inside.
+  static float BoxDistance(const BakedBox& box, const plVec3& vPoint);
+
+  /// Cells of the liquid domain (world origin of its min corner, cells, cell size) whose centre the bake must make
+  /// solid: inside a box or closer to its surface than the minimum thickness's half (the union of the boxes).
+  static plUInt32 CountExpectedSolidCells(const plDynamicArray<BakedBox>& boxes, const plVec3& vDomainMin, const plVec3U32& vCells, float fCellSize);
+
+  /// Free water volume below height fHeight over the domain's floor (world z fFloor), the boxes taken out (grown by the
+  /// minimum thickness's half), by sampling the floor on a fine grid.
+  static float FreeVolumeBelow(const plDynamicArray<BakedBox>& boxes, const plVec3& vDomainMin, const plVec2& vFloorSize, float fGrow, float fHeight);
+
+  /// Adds a box to the bake (and draws it when color.a > 0).
+  void AddBakedBox(const BakedBox& box, const plColor& color);
+
+  plResult SetupStaticSolids();
+  plResult SetupFloodingRoom(bool bVideo);
+  plResult SetupSleepAndWake();
+  plResult SetupOpenSideOutflow();
+  plTestAppRun RunStaticSolids();
+  plTestAppRun RunFloodingRoom(bool bVideo);
+  plTestAppRun RunSleepAndWake();
+  plTestAppRun RunOpenSideOutflow();
+  void EvaluateFloodingRoom();
+
+  /// Flood level the inflow's volume gives at the given simulated pouring time, from FreeVolumeBelow.
+  float ExpectedFloodLevel(float fVolume) const;
+
+  // Scenes with baked solids: the boxes, the component that hands them to the bake, the expected solid cells.
+  plDynamicArray<BakedBox> m_BakedBoxes;
+  plGameObjectHandle m_hSolidsObject;
+  plUInt32 m_uiExpectedSolidCells = 0;
+  plVec3 m_vDomainMin = plVec3::MakeZero(); ///< world position of the liquid domain's min corner
+  plVec3U32 m_vDomainCells = plVec3U32::MakeZero();
+  float m_fDomainCellSize = 0.0f;
+
+  // Static Solids: the single-sided wall's cell (x) and the frame of the rebake.
+  plUInt32 m_uiWallCell = 0;
+  plUInt32 m_uiMaxParticleCellX = 0;
+  plUInt32 m_uiMaxInSolid = 0;
+  plInt32 m_iRebakeFrame = -1;
+
+  // Flooding Room: the inflow's flow (m^3/s), when it ran (ticks), when the drain opened, the peak particle count.
+  float m_fFloodFlow = 0.0f;
+  plUInt32 m_uiFloodStartTick = 0;
+  plUInt32 m_uiFloodStopTick = 0;
+  plUInt32 m_uiDrainTick = 0;
+  plUInt32 m_uiFloodEndTick = 0;
+  bool m_bFloodStarted = false;
+  bool m_bFloodStopped = false;
+  bool m_bDrainOpened = false;
+  float m_fFloodStartSim = -1.0f;
+  float m_fFloodStopSim = -1.0f;
+  plUInt32 m_uiPeakAlive = 0;
+  plUInt32 m_uiFloodProbeCount = 0;
+
+  // Sleep And Wake: the frame the volume was first seen asleep, and the inflow's start.
+  plInt32 m_iAsleepFrame = -1;
+  plInt32 m_iWakeFrame = -1;
+  plUInt64 m_uiTicksAsleepAtWake = 0;
+  plUInt32 m_uiSleepingBricksSeen = 0;
+  plUInt32 m_uiAliveAtSleep = 0;
+  bool m_bWokeUp = false;
+
   plResult SetupDamBreak();
-  plResult SetupHydrostatic(bool bRandomSeed);
+  /// fDepthCells: the fill height in cells; its fraction is how full the top layer is.
+  plResult SetupHydrostatic(bool bRandomSeed, float fDepthCells = 16.5f);
   plResult SetupPour();
   plResult SetupMediumRoom();
   plResult SetupNoLiquid();
@@ -104,6 +191,7 @@ private:
   plTestAppRun RunHydrostatic(bool bRandomSeed);
   plTestAppRun RunPour(bool bVideo);
   plTestAppRun RunMediumRoom();
+  plTestAppRun RunMediumRoomCost();
   plTestAppRun RunNoLiquid();
 
   /// Saves frame m_iFrame - 1 of a video sub-test (the screenshot of this Run()) and its caption.
@@ -164,4 +252,19 @@ private:
   plVec3 m_vGlassMax = plVec3::MakeZero();
   bool m_bPourStopped = false; ///< the nozzle was switched off for the settling ticks
   plGpuFluidLiquidStats m_LastStats;
+  plString m_sHydroName; ///< shot and CSV name of the running hydrostatic sub-test
+
+  // Medium Room Substep Cost: per segment of a forced substep count, the wall time of each frame (V-sync off), the
+  // GPU time of the whole frame ("RENDER FRAME") and the sum of the substep phases' pass timings.
+  struct CostSegment
+  {
+    plUInt32 m_uiSubsteps = 0;
+    plDynamicArray<double> m_WallMs;
+    plDynamicArray<double> m_FrameGpuMs;
+    plDynamicArray<double> m_PhaseMs;
+  };
+  plHybridArray<CostSegment, 4> m_CostSegments;
+  plTime m_LastFrameTime;
+  bool m_bVSyncWas = false;
+  bool m_bRestoreVSync = false;
 };

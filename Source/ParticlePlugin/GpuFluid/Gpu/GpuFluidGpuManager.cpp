@@ -424,9 +424,15 @@ void plGpuFluidGpuManager::RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt6
     {
       const plGpuFluidLiquidStats* pStats = volume.m_bStatsValid ? &volume.m_Stats : nullptr;
       const plUInt64 uiAge = pStats != nullptr && uiFrame > pStats->m_uiFrame ? uiFrame - pStats->m_uiFrame : 1;
-      volume.m_Solver.Record(ref_graph, m_LiquidShaders, volume.m_LastInput, pStats, uiAge);
+      const bool bRecorded = volume.m_Solver.Record(ref_graph, m_LiquidShaders, volume.m_LastInput, pStats, uiAge, uiFrame);
 
-      const plUInt32 uiReadbackSlot = volume.m_Readback.ReserveSlot(uiFrame);
+      // The CPU's own numbers, current: whether the volume sleeps, and the static solids on the GPU.
+      volume.m_Stats.m_bVolumeAsleep = volume.m_Solver.IsAsleep();
+      volume.m_Stats.m_uiTicksAsleep = volume.m_Solver.GetTicksAsleep();
+      volume.m_Stats.m_uiSolidTriangles = volume.m_Solver.GetSolidTriangles();
+      volume.m_Stats.m_uiSolidBakes = volume.m_Solver.GetSolidBakes();
+
+      const plUInt32 uiReadbackSlot = bRecorded ? volume.m_Readback.ReserveSlot(uiFrame) : plInvalidIndex;
       if (uiReadbackSlot != plInvalidIndex)
       {
         plGpuFluidReadbackRing* pRing = &volume.m_Readback;
@@ -439,7 +445,7 @@ void plGpuFluidGpuManager::RecordLiquidVolumes(plRenderGraph& ref_graph, plUInt6
           { pRing->Submit(uiReadbackSlot, *ctx.GetCommandEncoder(), hStatsGAL); });
       }
 
-      inout_bAnyPass = true;
+      inout_bAnyPass = inout_bAnyPass || bRecorded;
     }
 
     // Drawn from the next extraction on: the points it names are written by this frame's graph, before the views.

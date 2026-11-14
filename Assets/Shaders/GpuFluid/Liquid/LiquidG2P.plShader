@@ -22,6 +22,8 @@ RWByteAddressBuffer GpuFluidLiqPositions;
 RWByteAddressBuffer GpuFluidLiqVelocities;
 RWByteAddressBuffer GpuFluidLiqAffine;
 RWByteAddressBuffer GpuFluidLiqCounters;
+ByteAddressBuffer GpuFluidLiqBrickCalm;
+RWByteAddressBuffer GpuFluidLiqBrickSpeed;
 
 /// Component comp of a face velocity set at grid position g (cell units); gradient in cell units.
 float SampleComponent(ByteAddressBuffer set, uint comp, float3 g, out float3 grad)
@@ -82,8 +84,20 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   // A particle in an air cell (outside the level set's surface: spray, a stray above a resting surface) has no pressure
   // holding it up, and the grid velocity there is extrapolated from the liquid, without gravity: it flies ballistic.
-  // GpuFluidLiqPass.x = 0 turns this off (the particle takes the extrapolated velocity).
-  const bool bBallistic = LIQ_CONST(GpuFluidLiqPass).x != 0 && (GpuFluidLiqCellType.Load(LiqCellIndex(LiqParticleCell(x)) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_AIR;
+  // GpuFluidLiqPass.x bit 0 clear turns this off (the particle takes the extrapolated velocity). Bit 1: only clear of
+  // the surface, so not in an air cell right above a liquid one along gravity: a part-full top layer the level set
+  // reads as air would otherwise fall, bounce off the liquid below and fall again.
+  const int3 ownCell = LiqParticleCell(x);
+  bool bBallistic = (LIQ_CONST(GpuFluidLiqPass).x & 1u) != 0 && (GpuFluidLiqCellType.Load(LiqCellIndex(ownCell) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_AIR;
+  if (bBallistic && (LIQ_CONST(GpuFluidLiqPass).x & 2u) != 0)
+  {
+    const float3 gravity = LiqGravity();
+    const float3 ag = abs(gravity);
+    const uint axis = ag.x >= ag.y && ag.x >= ag.z ? 0u : (ag.y >= ag.z ? 1u : 2u);
+    const int3 below = ownCell + LiqAxis(axis) * (gravity[axis] > 0.0 ? 1 : -1);
+    if (LiqInside(below) && (GpuFluidLiqCellType.Load(LiqCellIndex(below) * 4) & 3u) == GPU_FLUID_LIQUID_CELL_LIQUID)
+      bBallistic = false;
+  }
   if (bBallistic)
   {
     v = vOld + LiqGravity() * dt;
@@ -108,7 +122,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   // Analytic solids first: a solid that ends on a domain wall (a glass standing on the floor) has a face in that wall,
   // and the push out through it would leave the domain. The walls below have the last word.
-  if (LiqShapeCount() > 0)
+  if (LiqHasSolids())
   {
     const float d = LiqShapeDistance(xNew);
     if (d < margin)
@@ -119,6 +133,9 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
       if (vn < 0.0)
         v -= vn * n;
       v = lerp(v, dot(v, n) * n, friction);
+      // N9: one push along the gradient should leave no particle deeper than half a cell inside.
+      if (LiqShapeDistance(xNew) < -0.5 * dx)
+        GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_IN_SOLID * 4, 1u);
     }
   }
 
@@ -163,6 +180,22 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
     cx = cy = cz = float3(0, 0, 0);
     nanCount = 1;
   }
+
+  // Sleep: in a brick that has been calm for GPU_FLUID_LIQUID_SLEEP_STEPS substeps (LiquidSleep) the particle stays
+  // where it is, at rest. Whether the brick is still calm is judged from the grid velocity there, so liquid that starts
+  // to move wakes it; an awake particle judges by its own new speed. Either way only "faster than the threshold" is
+  // recorded, a plain store of 1 per brick.
+  const uint brick = LiqBrickIndex(LiqParticleCell(x));
+  const bool bAsleep = GpuFluidLiqBrickCalm.Load(brick * 4) >= GPU_FLUID_LIQUID_SLEEP_STEPS;
+  const float sleepSpeed = bAsleep ? length(uNew) : length(v);
+  if (bAsleep)
+  {
+    xNew = x;
+    v = float3(0, 0, 0);
+    cx = cy = cz = float3(0, 0, 0);
+  }
+  if (sleepSpeed >= GPU_FLUID_LIQUID_SLEEP_SPEED)
+    GpuFluidLiqBrickSpeed.Store(brick * 4, 1u);
 
   GpuFluidLiqPositions.Store3(index * GPU_FLUID_LIQUID_POSITION_BYTES, asuint(xNew));
   GpuFluidLiqVelocities.Store3(index * GPU_FLUID_LIQUID_VELOCITY_BYTES, asuint(v));

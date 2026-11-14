@@ -169,6 +169,7 @@ PL_STATICLINK_LIBRARY(ParticlePlugin)
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_GpuFluidDeclarations);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Components_GpuFluidLiquidVolumeComponent);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidLiquidSolver);
+  PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidLiquidSolids);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Gpu_GpuFluidScan);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Rendering_GpuFluidLiquidDebugRenderer);
   PL_STATICLINK_REFERENCE(ParticlePlugin_GpuFluid_Rendering_GpuFluidLiquidPass);

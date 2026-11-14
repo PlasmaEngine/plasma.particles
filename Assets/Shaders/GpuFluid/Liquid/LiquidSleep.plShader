@@ -1,0 +1,67 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_USE_REGIONS
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// Brick sleep, one thread per brick after G2P (plan section 5, L12). A brick holding particles counts the substeps in a
+// row in which neither it nor any of its 26 neighbours had a particle faster than GPU_FLUID_LIQUID_SLEEP_SPEED (a
+// sleeping brick judges by the grid velocity at its particles, LiquidG2P) and no wake box (an inflow, an open drain)
+// overlapped it; after GPU_FLUID_LIQUID_SLEEP_STEPS it is asleep and G2P freezes its particles. An empty brick starts
+// over at zero. Counts the occupied bricks awake and asleep (the volume sleeps when none is awake).
+//
+// GpuFluidLiqPass.x: wake boxes (regions from GPU_FLUID_LIQUID_REGION_WAKE_FIRST), y: 1 sleep allowed.
+
+ByteAddressBuffer GpuFluidLiqBrickOccupied;
+ByteAddressBuffer GpuFluidLiqBrickSpeed;
+RWByteAddressBuffer GpuFluidLiqBrickCalm;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(256, 1, 1)]
+void main(uint3 dispatchThreadId : SV_DispatchThreadID)
+{
+  const uint3 bricks = LiqBricks();
+  const uint brick = dispatchThreadId.x;
+  if (brick >= bricks.x * bricks.y * bricks.z)
+    return;
+
+  if (GpuFluidLiqBrickOccupied.Load(brick * 4) == 0)
+  {
+    GpuFluidLiqBrickCalm.Store(brick * 4, 0u);
+    return;
+  }
+
+  const int3 b = int3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y));
+  bool bWake = false;
+  for (int z = -1; z <= 1; ++z)
+  {
+    for (int y = -1; y <= 1; ++y)
+    {
+      for (int x = -1; x <= 1; ++x)
+      {
+        const int3 nb = b + int3(x, y, z);
+        if (LiqInsideDims(nb, bricks))
+          bWake = bWake || GpuFluidLiqBrickSpeed.Load(LiqCellIndexIn(nb, bricks) * 4) != 0;
+      }
+    }
+  }
+
+  const float brickSize = GPU_FLUID_LIQUID_BRICK * LiqDx();
+  const float3 centre = (float3(b) + 0.5) * brickSize;
+  const uint wakeBoxes = min(LIQ_CONST(GpuFluidLiqPass).x, (uint)GPU_FLUID_LIQUID_MAX_WAKE_BOXES);
+  for (uint i = 0; i < wakeBoxes; ++i)
+  {
+    const plGpuFluidLiquidShape box = GpuFluidLiqRegions[GPU_FLUID_LIQUID_REGION_WAKE_FIRST + i];
+    bWake = bWake || all(abs(centre - box.CenterType.xyz) <= box.Size.xyz + 0.5 * brickSize);
+  }
+
+  // GpuFluidLiqPass.y = 0: sleep is off, every brick stays awake.
+  bWake = bWake || LIQ_CONST(GpuFluidLiqPass).y == 0;
+  const uint calm = bWake ? 0u : min(GpuFluidLiqBrickCalm.Load(brick * 4) + 1u, 0xFFFFu);
+  GpuFluidLiqBrickCalm.Store(brick * 4, calm);
+  GpuFluidLiqCounters.InterlockedAdd((calm >= GPU_FLUID_LIQUID_SLEEP_STEPS ? GPU_FLUID_LIQUID_CTR_SLEEPING : GPU_FLUID_LIQUID_CTR_AWAKE) * 4, 1u);
+}
