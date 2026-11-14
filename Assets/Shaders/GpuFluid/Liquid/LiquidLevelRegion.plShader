@@ -90,5 +90,6 @@ void main(uint groupIndex : SV_GroupIndex)
     GpuFluidLiqLevelRegion.Store4(offset, uint4(groups, 0));
     GpuFluidLiqLevelRegion.Store4(offset + 16, uint4(uint3(regionMin), 0));
     GpuFluidLiqLevelRegion.Store4(offset + 32, uint4(bEmpty ? uint3(0, 0, 0) : uint3(regionMax), bEmpty ? 1u : 0u));
+    GpuFluidLiqLevelRegion.Store4(offset + GPU_FLUID_LIQUID_REGION_BLOCK_ARGS, uint4((size + GPU_FLUID_LIQUID_BRICK - 1) / GPU_FLUID_LIQUID_BRICK, 0));
   }
 }

@@ -72,6 +72,14 @@ struct plGpuFluidLiquidFrameInput
   /// Launches per fine-level smoothing call with m_bBlockSmooth, each of m_uiFineSweeps sweeps: the halos between
   /// bricks are refreshed between launches (one launch left the N2 residual about 1.6 times higher).
   plUInt32 m_uiFinePasses = 2;
+  /// P2G as a scatter into groupshared memory per brick (LiquidP2GScatter) instead of the gather (LiquidP2G): each
+  /// particle is read about 1.7 times instead of about 24. Same integer sums, so the same result.
+  bool m_bP2GScatter = true;
+  /// Coarse-level smoothing as block Gauss-Seidel too (LiquidSmoothDenseBlock): m_uiCoarsePasses launches of
+  /// m_uiCoarseSweeps sweeps per smoothing call instead of two launches per sweep.
+  bool m_bBlockSmoothCoarse = true;
+  plUInt32 m_uiCoarsePasses = 1;
+  plUInt32 m_uiCoarseSweeps = 2;
   plUInt32 m_uiSpeedHistory = 8;
   plUInt32 m_uiSubstepHoldTicks = 15;
   float m_fSubstepDownMargin = 0.8f;
@@ -296,6 +304,8 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hBricks;
   plShaderResourceHandle m_hLevelRegion;
   plShaderResourceHandle m_hSmoothBricksBlock;
+  plShaderResourceHandle m_hP2GScatter;
+  plShaderResourceHandle m_hSmoothDenseBlock;
   plShaderResourceHandle m_hP2G;
   plShaderResourceHandle m_hExtrapolate;
   plShaderResourceHandle m_hClassify;

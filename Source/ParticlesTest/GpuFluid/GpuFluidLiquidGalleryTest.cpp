@@ -216,6 +216,10 @@ namespace
     pLiquid->m_Tuning.m_bBlockSmooth = TuningFloat("BLOCK_SMOOTH", pLiquid->m_Tuning.m_bBlockSmooth ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_uiFineSweeps = static_cast<plUInt32>(TuningFloat("FINE_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiFineSweeps)));
     pLiquid->m_Tuning.m_uiFinePasses = static_cast<plUInt32>(TuningFloat("FINE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiFinePasses)));
+    pLiquid->m_Tuning.m_bP2GScatter = TuningFloat("P2G_SCATTER", pLiquid->m_Tuning.m_bP2GScatter ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bBlockSmoothCoarse = TuningFloat("BLOCK_COARSE", pLiquid->m_Tuning.m_bBlockSmoothCoarse ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_uiCoarsePasses = static_cast<plUInt32>(TuningFloat("COARSE_PASSES", static_cast<float>(pLiquid->m_Tuning.m_uiCoarsePasses)));
+    pLiquid->m_Tuning.m_uiCoarseSweeps = static_cast<plUInt32>(TuningFloat("COARSE_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiCoarseSweeps)));
 
     // A fixed substep count (min = max), for checking that the rest packing does not follow it.
     const plUInt32 uiForced = static_cast<plUInt32>(TuningFloat("FORCE_SUBSTEPS", 0.0f));

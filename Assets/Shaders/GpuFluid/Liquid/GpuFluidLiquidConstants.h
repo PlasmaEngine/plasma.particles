@@ -16,9 +16,11 @@
 // the stencil kept there, LiquidCoarsest).
 #define GPU_FLUID_LIQUID_COARSEST_MAX_CELLS 2048
 #define GPU_FLUID_LIQUID_MAX_LEVELS 6
-// Per multigrid level, the region a V-cycle works on (LiquidLevelRegion): dispatch arguments (3 words, 1 unused), the
-// smallest cell (3 words, 1 unused), the largest cell (3 words, then 1 when the region is empty).
-#define GPU_FLUID_LIQUID_REGION_STRIDE 48
+// Per multigrid level, the region a V-cycle works on (LiquidLevelRegion): dispatch arguments for 4^3 groups (3 words, 1
+// unused), the smallest cell (3 words, 1 unused), the largest cell (3 words, then 1 when the region is empty), dispatch
+// arguments for 8^3 blocks (3 words, 1 unused; LiquidSmoothDenseBlock).
+#define GPU_FLUID_LIQUID_REGION_STRIDE 64
+#define GPU_FLUID_LIQUID_REGION_BLOCK_ARGS 48
 
 // Cell types (the low two bits of a cell's type word).
 #define GPU_FLUID_LIQUID_CELL_AIR 0u

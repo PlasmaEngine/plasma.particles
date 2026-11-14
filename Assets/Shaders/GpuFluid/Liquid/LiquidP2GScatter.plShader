@@ -1,0 +1,170 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#define GPU_FLUID_LIQUID_BRICK_DISPATCH
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// P2G as a scatter into groupshared memory, one group per active brick. The group reads every particle of its brick's
+// cells and of the one-cell halo around them once, and adds each one's APIC momentum and weight to the faces of the
+// brick it reaches (integer InterlockedAdd: the sums are integers, so the result does not depend on particle order,
+// as with LiquidP2G's gather). Then each thread normalises its cell's faces exactly as the gather does.
+//
+// The gather read every particle about 24 times (once per face slot of each of the 27 cells around it); this reads it
+// about 1.7 times (its brick and the halos of the bricks next to it).
+//
+// The atomics cannot saturate like the gather's sums, so a cell gives at most GPU_FLUID_LIQUID_P2G_MAX_PER_CELL
+// particles (the rest are counted as overflow): a face then sums at most 8 cells of them, which stays inside int32 at
+// the weight and momentum scales. A cell holds 4 to 8 particles normally.
+
+ByteAddressBuffer GpuFluidLiqCellCount;
+ByteAddressBuffer GpuFluidLiqCellStart;
+ByteAddressBuffer GpuFluidLiqPositions;
+ByteAddressBuffer GpuFluidLiqVelocities;
+ByteAddressBuffer GpuFluidLiqAffine;
+RWByteAddressBuffer GpuFluidLiqVelOut;
+RWByteAddressBuffer GpuFluidLiqValidOut;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+#define GPU_FLUID_LIQUID_P2G_MAX_PER_CELL 64
+#define LIQ_TILE 9                               // the brick's 8 low faces per axis, and the domain's last high face
+#define LIQ_TILE_FACES (LIQ_TILE * LIQ_TILE * LIQ_TILE)
+#define LIQ_HALO 10                              // cells read: the brick and one around
+#define LIQ_HALO_CELLS (LIQ_HALO * LIQ_HALO * LIQ_HALO)
+#define LIQ_SLOTS 6
+
+groupshared int gs_iMomentum[3 * LIQ_TILE_FACES];
+groupshared int gs_iWeight[3 * LIQ_TILE_FACES];
+groupshared uint gs_uiOverflow;
+
+uint TileFace(uint comp, int3 local)
+{
+  return comp * LIQ_TILE_FACES + (uint)local.x + LIQ_TILE * ((uint)local.y + LIQ_TILE * (uint)local.z);
+}
+
+/// Whether face f of component comp belongs to the brick at origin (LiqOwnedFace from the brick's side): a low face of
+/// one of its cells, or the domain's last high face along comp's axis.
+bool BrickOwnsFace(uint comp, int3 f, int3 origin, out int3 out_local)
+{
+  out_local = f - origin;
+  if (any(out_local < 0) || !LiqFaceExists(comp, f))
+    return false;
+  const int3 axis = LiqAxis(comp);
+  const int3 limit = int3(GPU_FLUID_LIQUID_BRICK - 1, GPU_FLUID_LIQUID_BRICK - 1, GPU_FLUID_LIQUID_BRICK - 1) + axis;
+  if (any(out_local > limit))
+    return false;
+  // Along the axis the ninth layer is a high face: only the domain's last one.
+  const int normal = dot(out_local, axis);
+  return normal < GPU_FLUID_LIQUID_BRICK || dot(f, axis) == (int)dot(int3(LiqCells()), axis);
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  GPU_FLUID_KERNEL_MODES
+
+  // The whole group takes the same branch: past the end of the brick list it leaves before any barrier.
+  const uint4 args = GpuFluidLiqBrickArgs.Load4(0);
+  const uint listIndex = GpuFluidLinearGroup(groupId, args.x);
+  if (listIndex >= args.w)
+    return;
+
+  const uint brick = GpuFluidLiqBrickList.Load(listIndex * 4);
+  const uint3 bricks = LiqBricks();
+  const int3 origin = int3(uint3(brick % bricks.x, (brick / bricks.x) % bricks.y, brick / (bricks.x * bricks.y)) * GPU_FLUID_LIQUID_BRICK);
+  const uint threads = GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK * GPU_FLUID_LIQUID_BRICK;
+
+  for (uint i = groupIndex; i < 3 * LIQ_TILE_FACES; i += threads)
+  {
+    gs_iMomentum[i] = 0;
+    gs_iWeight[i] = 0;
+  }
+  if (groupIndex == 0)
+    gs_uiOverflow = 0;
+  GroupMemoryBarrierWithGroupSync();
+
+  const float dx = LiqDx();
+  const float invDx = LiqInvDx();
+  for (uint h = groupIndex; h < LIQ_HALO_CELLS; h += threads)
+  {
+    const int3 c = origin + int3(h % LIQ_HALO, (h / LIQ_HALO) % LIQ_HALO, h / (LIQ_HALO * LIQ_HALO)) - 1;
+    if (!LiqInside(c))
+      continue;
+    const uint index = LiqCellIndex(c);
+    const uint count = GpuFluidLiqCellCount.Load(index * 4);
+    const uint start = GpuFluidLiqCellStart.Load(index * 4);
+    const uint used = min(count, (uint)GPU_FLUID_LIQUID_P2G_MAX_PER_CELL);
+    // Counted once, by the brick that owns the cell.
+    if (count > used && all(c >= origin) && all(c < origin + GPU_FLUID_LIQUID_BRICK))
+      InterlockedAdd(gs_uiOverflow, count - used);
+
+    for (uint k = 0; k < used; ++k)
+    {
+      const uint p = start + k;
+      const float3 gp = asfloat(GpuFluidLiqPositions.Load3(p * GPU_FLUID_LIQUID_POSITION_BYTES)) * invDx;
+      const float3 v = asfloat(GpuFluidLiqVelocities.Load3(p * GPU_FLUID_LIQUID_VELOCITY_BYTES));
+      float3 cAffine[3];
+      LiqUnpackAffine(GpuFluidLiqAffine.Load4(p * GPU_FLUID_LIQUID_AFFINE_BYTES), GpuFluidLiqAffine.Load(p * GPU_FLUID_LIQUID_AFFINE_BYTES + 16), cAffine[0], cAffine[1], cAffine[2]);
+
+      [unroll] for (uint comp = 0; comp < 3; ++comp)
+      {
+        const float3 axis = float3(LiqAxis(comp));
+        // Faces of this component sit at f + 0.5 - 0.5 * axis: the two on each side of the particle along every axis.
+        const int3 base = int3(floor(gp - 0.5 + 0.5 * axis));
+        const float vc = comp == 0 ? v.x : (comp == 1 ? v.y : v.z);
+        [unroll] for (uint o = 0; o < 8; ++o)
+        {
+          const int3 f = base + int3(o & 1u, (o >> 1) & 1u, (o >> 2) & 1u);
+          int3 local;
+          if (!BrickOwnsFace(comp, f, origin, local))
+            continue;
+          const float3 d = LiqFacePosition(comp, f) - gp;
+          const float3 a = abs(d);
+          if (any(a >= 1.0))
+            continue;
+          const float w = (1.0 - a.x) * (1.0 - a.y) * (1.0 - a.z);
+          const float affine = clamp(dot(cAffine[comp], d * dx), -GPU_FLUID_LIQUID_MAX_AFFINE, GPU_FLUID_LIQUID_MAX_AFFINE);
+          const float value = clamp(vc + affine, -GPU_FLUID_LIQUID_MAX_SPEED, GPU_FLUID_LIQUID_MAX_SPEED);
+          const uint tile = TileFace(comp, local);
+          InterlockedAdd(gs_iWeight[tile], (int)round(w * GPU_FLUID_LIQUID_WEIGHT_SCALE));
+          InterlockedAdd(gs_iMomentum[tile], (int)round(w * value * GPU_FLUID_LIQUID_MOMENTUM_SCALE));
+        }
+      }
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  // This thread's cell: its faces as LiquidP2G writes them.
+  const int3 cell = origin + int3(groupThreadId);
+  if (LiqInside(cell))
+  {
+    uint lowValid = 0;
+    [unroll] for (uint s = 0; s < LIQ_SLOTS; ++s)
+    {
+      uint comp;
+      int3 face;
+      if (!LiqOwnedFace(cell, s, comp, face))
+        continue;
+      const uint tile = TileFace(comp, face - origin);
+      const int weight = gs_iWeight[tile];
+      const int momentum = gs_iMomentum[tile];
+      const bool bValid = weight >= (int)(GPU_FLUID_LIQUID_MIN_FACE_WEIGHT * GPU_FLUID_LIQUID_WEIGHT_SCALE);
+      const float velocity = bValid ? (float(momentum) / GPU_FLUID_LIQUID_MOMENTUM_SCALE) / (float(weight) / GPU_FLUID_LIQUID_WEIGHT_SCALE) : 0.0;
+      GpuFluidLiqVelOut.Store(LiqFaceAddress(comp, face), asuint(velocity));
+      const uint bit = bValid ? (1u << comp) : 0u;
+      if (s < 3)
+        lowValid |= bit;
+      else
+        GpuFluidLiqValidOut.Store(LiqFaceIndex(face) * 4, bit);
+    }
+    GpuFluidLiqValidOut.Store(LiqFaceIndex(cell) * 4, lowValid);
+  }
+
+  if (groupIndex == 0 && gs_uiOverflow > 0)
+    GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_OVERFLOW * 4, gs_uiOverflow);
+}

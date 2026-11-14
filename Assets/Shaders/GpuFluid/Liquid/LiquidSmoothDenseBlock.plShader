@@ -1,0 +1,106 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/GpuFluidFloatMode.hlsli>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidMultigrid.hlsli>
+
+// LiquidSmoothBricksBlock for a coarse (dense) level: every sweep of one smoothing call in one launch, one group per
+// 8^3 block of the level's region (LiquidLevelRegion), the block and a one-cell halo of the solution in groupshared
+// memory, red-black Gauss-Seidel inside the block with the halo held. Coarse levels take theta as the constant.
+//
+// GpuFluidLiqPass: x level, y 1 runs black before red in every sweep, z the sweeps.
+
+#define LIQ_BLOCK GPU_FLUID_LIQUID_BRICK
+#define LIQ_TILE (LIQ_BLOCK + 2)
+#define LIQ_TILE_CELLS (LIQ_TILE * LIQ_TILE * LIQ_TILE)
+
+groupshared float gs_fX[LIQ_TILE_CELLS];
+
+uint TileIndex(int3 local)
+{
+  const uint3 t = uint3(local + 1);
+  return t.x + LIQ_TILE * (t.y + LIQ_TILE * t.z);
+}
+
+GPU_FLUID_KERNEL_CAPS
+[numthreads(LIQ_BLOCK, LIQ_BLOCK, LIQ_BLOCK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
+{
+  GPU_FLUID_KERNEL_MODES
+  const uint level = MgLevel();
+  const uint3 dims = LiqLevelDims(level);
+  const int3 origin = int3(GpuFluidLiqLevelRegion.Load3(level * GPU_FLUID_LIQUID_REGION_STRIDE + 16) + groupId * LIQ_BLOCK);
+
+  for (uint i = groupIndex; i < LIQ_TILE_CELLS; i += LIQ_BLOCK * LIQ_BLOCK * LIQ_BLOCK)
+  {
+    const int3 c = origin + int3(i % LIQ_TILE, (i / LIQ_TILE) % LIQ_TILE, i / (LIQ_TILE * LIQ_TILE)) - 1;
+    gs_fX[i] = LiqInsideDims(c, dims) ? asfloat(GpuFluidLiqMgX.Load(LiqCellIndexIn(c, dims) * 4)) : 0.0;
+  }
+
+  const int3 local = int3(groupThreadId);
+  const int3 cell = origin + local;
+  bool bLiquid = false;
+  float diag = 0.0;
+  uint liquidMask = 0;
+  float b = 0.0;
+  if (LiqInsideDims(cell, dims) && MgInRegion(level, cell))
+  {
+    const uint index = LiqCellIndexIn(cell, dims);
+    if ((GpuFluidLiqMgType.Load(index * 4) & 3u) == GPU_FLUID_LIQUID_CELL_LIQUID)
+    {
+      const float air = LiqInvTheta();
+      [unroll] for (uint n = 0; n < 6; ++n)
+      {
+        const uint t = LiqTypeAt(GpuFluidLiqMgType, cell + LiqNeighbourOffset(n), dims, false);
+        if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
+        {
+          if (LiqNeighbourSideOpen(n))
+            diag += air;
+        }
+        else if (t == GPU_FLUID_LIQUID_CELL_LIQUID)
+        {
+          diag += 1.0;
+          liquidMask |= 1u << n;
+        }
+        else if (t == GPU_FLUID_LIQUID_CELL_AIR)
+        {
+          diag += air;
+        }
+      }
+      bLiquid = diag > 0.0;
+      b = asfloat(GpuFluidLiqMgB.Load(index * 4));
+    }
+  }
+  GroupMemoryBarrierWithGroupSync();
+
+  const uint own = TileIndex(local);
+  const uint parity = ((uint)(cell.x + cell.y + cell.z)) & 1u;
+  const bool bReverse = LIQ_CONST(GpuFluidLiqPass).y != 0;
+  const uint sweeps = LIQ_CONST(GpuFluidLiqPass).z;
+  const float omega = MgOmega();
+  for (uint sweep = 0; sweep < sweeps; ++sweep)
+  {
+    for (uint step = 0; step < 2; ++step)
+    {
+      const uint colour = bReverse ? 1u - step : step;
+      if (bLiquid && parity == colour)
+      {
+        float sum = 0.0;
+        [unroll] for (uint n = 0; n < 6; ++n)
+        {
+          if ((liquidMask & (1u << n)) != 0)
+            sum += gs_fX[TileIndex(local + LiqNeighbourOffset(n))];
+        }
+        gs_fX[own] = lerp(gs_fX[own], (b + sum) / diag, omega);
+      }
+      GroupMemoryBarrierWithGroupSync();
+    }
+  }
+
+  if (bLiquid)
+    GpuFluidLiqMgX.Store(LiqCellIndexIn(cell, dims) * 4, asuint(gs_fX[own]));
+}
