@@ -35,6 +35,11 @@ namespace
   constexpr float s_fCentroidStepTolerance = 0.02f;
   constexpr plUInt32 s_uiCentroidStepTicks = 150;
 
+  // N5 rest depth: the depth over the last s_uiRestEnergyTicks with the slosh's energy taken out must match the seeded
+  // volume within s_fVolumeTolerance; the raw depth (the centroid as it stands) within this.
+  constexpr plUInt32 s_uiRestEnergyTicks = 150;
+  constexpr float s_fRestRawTolerance = 0.05f;
+
   // N2: max |residual| / max |rhs| of the last solve of every tick.
   constexpr float s_fResidualTolerance = 1e-3f;
 
@@ -120,6 +125,16 @@ namespace
   // depth (twice the particle centroid's height over the mean of the last s_uiPourFillTicks) must match the poured
   // volume over the glass's inner area within s_fPourFillTolerance. The volume measure counts an interior liquid cell
   // as full whatever its particle count, so it cannot see a jet packing the pool; the depth does.
+  // Medium Room: the plan's Medium reference load (8 x 6 m filled to 0.5 m at 6.25 cm, 128 x 96 x 64 cells, ~400K
+  // particles), 300 ticks; the 95th percentile of the relative residual (N2) with the tier's pressure iterations.
+  const plVec3 s_vRoomDomain(8.0f, 6.0f, 4.0f);
+  constexpr float s_fRoomCellSize = 0.0625f;
+  constexpr plUInt32 s_uiRoomTicks = 300;
+  constexpr float s_fRoomResidualTolerance = 1e-3f;
+
+  // No Liquid: wall time for the content flag of the earlier sub-tests to expire (Rendering.Memory.ContentHoldTime).
+  constexpr float s_fNoLiquidSettleSeconds = 3.0f;
+
   constexpr plUInt32 s_uiPourSettleTicks = 60;
   constexpr plUInt32 s_uiPourFillTicks = 15;
   constexpr float s_fPourFillTolerance = 0.05f;
@@ -171,12 +186,30 @@ namespace
     pLiquid->m_Tuning.m_bLevelSetTheta = TuningFloat("LEVEL_SET_THETA", pLiquid->m_Tuning.m_bLevelSetTheta ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_fThetaMin = TuningFloat("THETA_MIN", pLiquid->m_Tuning.m_fThetaMin);
     pLiquid->m_Tuning.m_fSprayPhi = TuningFloat("SPRAY_PHI", pLiquid->m_Tuning.m_fSprayPhi);
+    pLiquid->m_Tuning.m_fLiquidPhi = TuningFloat("LIQUID_PHI", pLiquid->m_Tuning.m_fLiquidPhi);
+    pLiquid->m_Tuning.m_uiLiquidMinCount = static_cast<plUInt32>(TuningFloat("MIN_COUNT", static_cast<float>(pLiquid->m_Tuning.m_uiLiquidMinCount)));
+    pLiquid->m_Tuning.m_bBallisticAir =TuningFloat("BALLISTIC", pLiquid->m_Tuning.m_bBallisticAir ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bDensityTwoSided = TuningFloat("TWO_SIDED", pLiquid->m_Tuning.m_bDensityTwoSided ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_fDensityMaxError = TuningFloat("DENSITY_MAX_ERROR", pLiquid->m_Tuning.m_fDensityMaxError);
     pLiquid->m_Tuning.m_fParticleRadius = TuningFloat("PARTICLE_RADIUS", pLiquid->m_Tuning.m_fParticleRadius);
     pLiquid->m_Tuning.m_fLevelSetRadius = TuningFloat("LEVEL_SET_RADIUS", pLiquid->m_Tuning.m_fLevelSetRadius);
     pLiquid->m_Tuning.m_fSurfaceBlend = TuningFloat("SURFACE_BLEND", pLiquid->m_Tuning.m_fSurfaceBlend);
     pLiquid->m_Tuning.m_uiSurfaceSmoothSteps = static_cast<plUInt32>(TuningFloat("SURFACE_SMOOTH", static_cast<float>(pLiquid->m_Tuning.m_uiSurfaceSmoothSteps)));
     pLiquid->m_Tuning.m_uiSubstepHoldTicks = static_cast<plUInt32>(TuningFloat("HOLD", static_cast<float>(pLiquid->m_Tuning.m_uiSubstepHoldTicks)));
     pLiquid->m_Tuning.m_fSubstepDownMargin = TuningFloat("DOWN_MARGIN", pLiquid->m_Tuning.m_fSubstepDownMargin);
+
+    // A fixed substep count (min = max), for checking that the rest packing does not follow it.
+    const plUInt32 uiForced = static_cast<plUInt32>(TuningFloat("FORCE_SUBSTEPS", 0.0f));
+    if (uiForced > 0)
+    {
+      pLiquid->m_uiMaxSubsteps = uiForced;
+      pLiquid->m_Tuning.m_uiMinSubsteps = uiForced;
+    }
+  }
+
+  plUInt32 ForcedSubsteps()
+  {
+    return static_cast<plUInt32>(plMath::Max(0, plEnvironmentVariableUtils::GetValueInt("PL_GPUFLUID_LIQ_FORCE_SUBSTEPS", 0)));
   }
 
   void WriteText(plStringView sPath, const plStringBuilder& sText)
@@ -206,6 +239,8 @@ void plGameEngineTestGpuFluidLiquidGallery::SetupSubTests()
   AddSubTest("Hydrostatic Tank Random Seed", SubTests::HydrostaticTankRandom);
   AddSubTest("Pour Into Glass", SubTests::PourIntoGlass);
   AddSubTest("Pour Into Glass Video", SubTests::PourIntoGlassVideo);
+  AddSubTest("Medium Room", SubTests::MediumRoom);
+  AddSubTest("No Liquid", SubTests::NoLiquid);
 }
 
 plResult plGameEngineTestGpuFluidLiquidGallery::InitializeSubTest(plInt32 iIdentifier)
@@ -241,6 +276,7 @@ plResult plGameEngineTestGpuFluidLiquidGallery::InitializeSubTest(plInt32 iIdent
   m_uiTimedParticles = 0;
   m_uiTimedSubsteps = 0;
   m_uiTimedQuads = 0;
+  m_uiTimedActiveBricks = 0;
   m_LastStats = plGpuFluidLiquidStats();
   m_bPourStopped = false;
 
@@ -262,6 +298,12 @@ plResult plGameEngineTestGpuFluidLiquidGallery::InitializeSubTest(plInt32 iIdent
     case SubTests::PourIntoGlass:
     case SubTests::PourIntoGlassVideo:
       return SetupPour();
+
+    case SubTests::MediumRoom:
+      return SetupMediumRoom();
+
+    case SubTests::NoLiquid:
+      return SetupNoLiquid();
   }
 
   return PL_FAILURE;
@@ -299,6 +341,10 @@ plTestAppRun plGameEngineTestGpuFluidLiquidGallery::RunSubTest(plInt32 iIdentifi
       return RunPour(false);
     case SubTests::PourIntoGlassVideo:
       return RunPour(true);
+    case SubTests::MediumRoom:
+      return RunMediumRoom();
+    case SubTests::NoLiquid:
+      return RunNoLiquid();
   }
 
   return plTestAppRun::Quit;
@@ -609,6 +655,7 @@ bool plGameEngineTestGpuFluidLiquidGallery::CollectStats()
   sample.m_fFront = ComputeFront(stats);
   sample.m_fMaxSpeed = stats.m_fMaxSpeed;
   sample.m_fMeanSpeed = stats.m_fMeanSpeed;
+  sample.m_fMeanSquaredSpeed = stats.m_fMeanSquaredSpeed;
   sample.m_fResidualRatio = stats.m_fRhsMax > 0.0f ? stats.m_fResidualMax / stats.m_fRhsMax : 0.0f;
   sample.m_fCentroidZ = stats.m_vCentroid.z;
   sample.m_fSimTime = static_cast<float>(stats.m_fSimulatedTime);
@@ -646,6 +693,7 @@ void plGameEngineTestGpuFluidLiquidGallery::AccumulateTimings()
     {
       m_uiTimedSubsteps += pSample->m_uiSubsteps;
       m_uiTimedQuads += pSample->m_uiSurfaceQuads;
+      m_uiTimedActiveBricks += pSample->m_uiActiveBricks;
     }
   }
 }
@@ -674,6 +722,27 @@ void plGameEngineTestGpuFluidLiquidGallery::ReportTimings(plStringBuilder& ref_s
   }
   ref_sCsv.AppendFormat("total,{}\n", fTotal);
   ref_sCsv.AppendFormat("draw_total,{}\n", fDraw);
+
+  // Per particle-substep: the substep phases (Sort, P2G, Solve, G2P) over particles times substeps; the solve per
+  // active brick and substep; the once-per-frame surface (Surface Sort, Surface) apart.
+  const double fFrames = m_uiTimedFrames;
+  const double fSubsteps = static_cast<double>(m_uiTimedSubsteps) / fFrames;
+  const double fBricks = static_cast<double>(m_uiTimedActiveBricks) / fFrames;
+  auto Mean = [&](const char* szPhase) { return m_PhaseMs.GetValueOrDefault(szPhase, 0.0) / fFrames; };
+  const double fSubstepMs = Mean("GpuFluid Liquid/Sort") + Mean("GpuFluid Liquid/P2G") + Mean("GpuFluid Liquid/Solve") + Mean("GpuFluid Liquid/G2P");
+  const double fSurfaceMs = Mean("GpuFluid Liquid/Surface Sort") + Mean("GpuFluid Liquid/Surface");
+  const double fNsPerParticleSubstep = m_uiTimedParticles > 0 && fSubsteps > 0.0 ? fSubstepMs * 1.0e6 / (static_cast<double>(m_uiTimedParticles) * fSubsteps) : 0.0;
+  const double fUsPerBrickSubstep = fBricks > 0.0 && fSubsteps > 0.0 ? Mean("GpuFluid Liquid/Solve") * 1.0e3 / (fBricks * fSubsteps) : 0.0;
+  ref_sCsv.AppendFormat("substep_phases_ms,{}\n", fSubstepMs);
+  ref_sCsv.AppendFormat("surface_ms,{}\n", fSurfaceMs);
+  ref_sCsv.AppendFormat("particles,{}\n", m_uiTimedParticles);
+  ref_sCsv.AppendFormat("substeps_per_frame,{}\n", fSubsteps);
+  ref_sCsv.AppendFormat("active_bricks,{}\n", fBricks);
+  ref_sCsv.AppendFormat("ns_per_particle_substep,{}\n", fNsPerParticleSubstep);
+  ref_sCsv.AppendFormat("solve_us_per_brick_substep,{}\n", fUsPerBrickSubstep);
+  plTestFramework::Output(plTestOutput::Message,
+    "GPU liquid per frame: substep phases %.3f ms (%.2f ns per particle-substep, solve %.2f us per active brick-substep over %.0f bricks), surface %.3f ms, total %.3f ms", fSubstepMs,
+    fNsPerParticleSubstep, fUsPerBrickSubstep, fBricks, fSurfaceMs, fTotal);
   plTestFramework::Output(plTestOutput::Message, "GPU liquid total %.3f ms per frame (simulation and surface extraction) plus %.3f ms drawing the surface, over %u frames, %u particles, %.2f substeps and %.0f surface quads per frame on average",
     fTotal, fDraw, m_uiTimedFrames, m_uiTimedParticles, static_cast<double>(m_uiTimedSubsteps) / m_uiTimedFrames, static_cast<double>(m_uiTimedQuads) / m_uiTimedFrames);
 }
@@ -776,7 +845,7 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateDamBreak()
   PL_TEST_BOOL_MSG(m_uiLastTick >= s_uiDamTicks, "Only %u ticks were read back", m_uiLastTick);
   PL_TEST_BOOL_MSG(m_uiReadbacks > s_uiDamTicks / 2, "Only %u readbacks arrived", m_uiReadbacks);
 
-  plStringBuilder sCsv("tick,alive,seeded,drained,lost,substeps,active_bricks,volume_ratio,front_m,max_speed,mean_speed,residual_ratio,centroid_z,nan,overflow,sim_time\n");
+  plStringBuilder sCsv("tick,alive,seeded,drained,lost,substeps,active_bricks,volume_ratio,front_m,max_speed,mean_speed,residual_ratio,centroid_z,nan,overflow,sim_time,mean_sq_speed\n");
   float fMinVolume = 1e9f, fMaxVolume = -1e9f;
   plUInt32 uiMaxNaN = 0, uiMaxOverflow = 0, uiMaxLost = 0;
   float fMaxResidualRatio = 0.0f;
@@ -784,7 +853,7 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateDamBreak()
   {
     const TickSample& s = it.Value();
     sCsv.AppendFormat("{},{},{},{},{},{},{},{},", it.Key(), s.m_uiAlive, s.m_uiSeeded, s.m_uiDrained, s.m_uiLost, s.m_uiSubsteps, s.m_uiActiveBricks, s.m_fVolumeRatio);
-    sCsv.AppendFormat("{},{},{},{},{},{},{},{}\n", s.m_fFront, s.m_fMaxSpeed, s.m_fMeanSpeed, s.m_fResidualRatio, s.m_fCentroidZ, s.m_uiNaN, s.m_uiOverflow, s.m_fSimTime);
+    sCsv.AppendFormat("{},{},{},{},{},{},{},{},{}\n", s.m_fFront, s.m_fMaxSpeed, s.m_fMeanSpeed, s.m_fResidualRatio, s.m_fCentroidZ, s.m_uiNaN, s.m_uiOverflow, s.m_fSimTime, s.m_fMeanSquaredSpeed);
     if (it.Key() >= 1 && it.Key() <= s_uiDamTicks)
     {
       fMinVolume = plMath::Min(fMinVolume, s.m_fVolumeRatio);
@@ -839,6 +908,26 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateDamBreak()
   const float fSeededVolume = m_fColumnWidth * 2.0f * m_fColumnWidth * s_vDamTank.y;
   const float fRestVolume = uiCentroidCount > 0 ? 2.0f * (fCentroidSum / uiCentroidCount) * s_vDamTank.x * s_vDamTank.y / fSeededVolume : 0.0f;
 
+  // The same depth with the slosh's potential energy taken out. A pool still sloshing at 20 s holds its centroid higher
+  // than at rest by its wave potential energy over g, and averaged over whole periods that equals the kinetic energy
+  // (equipartition of linear waves): z_rest = <z_c> - <|v|^2> / (2 g). Averaged over the last 5 s, a little more than
+  // one period of the tank's first mode (2 L / sqrt(g h) = 4.3 s). What is left is the packing the volume control and
+  // the density correction hold; checked against +-3%. The raw value above is reported and held to s_fRestRawTolerance.
+  double fRestCentroidSum = 0.0, fRestSquaredSpeedSum = 0.0;
+  plUInt32 uiRestCount = 0;
+  for (auto it : m_Ticks)
+  {
+    if (it.Key() + s_uiRestEnergyTicks > m_uiLastTick && it.Key() <= m_uiLastTick)
+    {
+      fRestCentroidSum += it.Value().m_fCentroidZ;
+      fRestSquaredSpeedSum += it.Value().m_fMeanSquaredSpeed;
+      ++uiRestCount;
+    }
+  }
+  const double fRestZ = uiRestCount > 0 ? (fRestCentroidSum - fRestSquaredSpeedSum / (2.0 * s_fGravity)) / uiRestCount : 0.0;
+  const float fRestVolumeEnergy = static_cast<float>(2.0 * fRestZ * s_vDamTank.x * s_vDamTank.y / fSeededVolume);
+  const float fSloshRms = uiRestCount > 0 ? static_cast<float>(plMath::Sqrt(fRestSquaredSpeedSum / uiRestCount)) : 0.0f;
+
   // Largest tick-to-tick change of the centroid height over the last 5 s, relative.
   float fMaxCentroidStep = 0.0f;
   plUInt32 uiMaxCentroidStepTick = 0;
@@ -861,11 +950,15 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateDamBreak()
     "N5: %u readbacks, %u with alive != seeded - drained, lost %u, NaN %u, overflow %u; cell volume measure per tick %.4f .. %.4f (limit +-%.0f%%), 30-tick mean %.4f .. %.4f; depth volume over the 60 ticks up to %u %.4f; largest centroid step over the last %u ticks %.2f%% at tick %u (limit %.0f%%)",
     m_uiReadbacks, m_uiN5Mismatches, uiMaxLost, uiMaxNaN, uiMaxOverflow, fMinVolume, fMaxVolume, s_fVolumeTolerance * 100.0f, fMinMean, fMaxMean, m_uiLastTick, fRestVolume, s_uiCentroidStepTicks,
     fMaxCentroidStep * 100.0f, uiMaxCentroidStepTick, s_fCentroidStepTolerance * 100.0f);
+  plTestFramework::Output(plTestOutput::Message,
+    "N5 rest depth: raw %.4f of the seeded volume (limit +-%.0f%%), with the slosh's energy taken out over the last %u ticks %.4f (limit +-%.0f%%); slosh rms speed %.3f m/s", fRestVolume,
+    s_fRestRawTolerance * 100.0f, s_uiRestEnergyTicks, fRestVolumeEnergy, s_fVolumeTolerance * 100.0f, fSloshRms);
   PL_TEST_INT(m_uiN5Mismatches, 0);
   PL_TEST_INT(uiMaxLost, 0);
   PL_TEST_INT(uiMaxNaN, 0);
   PL_TEST_BOOL_MSG(fMinVolume >= 1.0f - s_fVolumeTolerance && fMaxVolume <= 1.0f + s_fVolumeTolerance, "N5: the volume measure ran %.4f .. %.4f over the ticks", fMinVolume, fMaxVolume);
-  PL_TEST_BOOL_MSG(plMath::Abs(fRestVolume - 1.0f) <= s_fVolumeTolerance, "N5: the pool at rest holds %.4f of the seeded volume", fRestVolume);
+  PL_TEST_BOOL_MSG(plMath::Abs(fRestVolumeEnergy - 1.0f) <= s_fVolumeTolerance, "N5: the pool, its slosh energy taken out, holds %.4f of the seeded volume", fRestVolumeEnergy);
+  PL_TEST_BOOL_MSG(plMath::Abs(fRestVolume - 1.0f) <= s_fRestRawTolerance, "N5: the pool at 20 s holds %.4f of the seeded volume", fRestVolume);
   PL_TEST_BOOL_MSG(fMaxCentroidStep <= s_fCentroidStepTolerance, "N5: the centroid height changed by %.2f%% from tick %u to %u", fMaxCentroidStep * 100.0f, uiMaxCentroidStepTick - 1, uiMaxCentroidStepTick);
 
   // N2: the pressure solve converges on every tick.
@@ -946,7 +1039,9 @@ plTestAppRun plGameEngineTestGpuFluidLiquidGallery::RunHydrostatic(bool bRandomS
 
   CollectStats();
 
-  // Substeps: forced to at least 5 for the first half of each period, free (down to 2) for the second.
+  // Substeps: forced to at least 5 for the first half of each period, free (down to 2) for the second (unless
+  // PL_GPUFLUID_LIQ_FORCE_SUBSTEPS fixes the count).
+  if (ForcedSubsteps() == 0)
   {
     PL_LOCK(m_pOwnApplication->GetWorld()->GetWriteMarker());
     if (plGpuFluidLiquidVolumeComponent* pVolume = GetVolume())
@@ -1032,7 +1127,8 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluateHydrostatic(bool bRandomSeed
   PL_TEST_BOOL_MSG(fMinVolume >= 1.0f - s_fVolumeTolerance && fMaxVolume <= 1.0f + s_fVolumeTolerance, "N6: the volume measure ran %.4f .. %.4f", fMinVolume, fMaxVolume);
   PL_TEST_BOOL_MSG(fMaxDrift <= s_fHydroCentroidTolerance, "N6: the centroid height drifted by %.2f%%", fMaxDrift * 100.0f);
   PL_TEST_BOOL_MSG(fMaxResidual <= s_fResidualTolerance, "N2: relative residual %.2e", fMaxResidual);
-  PL_TEST_BOOL_MSG(uiMinSubsteps <= 2 && uiMaxSubsteps >= 5, "N6: the substep count only ran %u .. %u", uiMinSubsteps, uiMaxSubsteps);
+  if (ForcedSubsteps() == 0)
+    PL_TEST_BOOL_MSG(uiMinSubsteps <= 2 && uiMaxSubsteps >= 5, "N6: the substep count only ran %u .. %u", uiMinSubsteps, uiMaxSubsteps);
 
   plStringBuilder sTimes;
   ReportTimings(sTimes);
@@ -1155,4 +1251,212 @@ void plGameEngineTestGpuFluidLiquidGallery::EvaluatePour()
   plStringBuilder sTimes;
   ReportTimings(sTimes);
   WriteText(":imgout/GpuFluidGallery/Liquid/Pour_timings.csv", sTimes);
+}
+
+void plGameEngineTestGpuFluidLiquidGallery::ReportResiduals(plStringView sName, plUInt32 uiFirstTick, float& out_fMedian, float& out_fP95, float& out_fMax) const
+{
+  plDynamicArray<float> residuals;
+  for (auto it : m_Ticks)
+  {
+    if (it.Key() >= uiFirstTick)
+      residuals.PushBack(it.Value().m_fResidualRatio);
+  }
+
+  out_fMedian = out_fP95 = out_fMax = 0.0f;
+  if (residuals.IsEmpty())
+    return;
+
+  residuals.Sort();
+  const plUInt32 n = residuals.GetCount();
+  out_fMedian = residuals[n / 2];
+  out_fP95 = residuals[plMath::Min(n - 1, (n * 95) / 100)];
+  out_fMax = residuals[n - 1];
+
+  plStringBuilder sText(sName);
+  plTestFramework::Output(plTestOutput::Message, "%s N2 relative residual over %u ticks: median %.2e, p95 %.2e, max %.2e", sText.GetData(), n, out_fMedian, out_fP95, out_fMax);
+}
+
+plResult plGameEngineTestGpuFluidLiquidGallery::SetupMediumRoom()
+{
+  plWorld* pWorld = m_pOwnApplication->GetWorld();
+  PL_LOCK(pWorld->GetWriteMarker());
+  pWorld->Clear();
+  pWorld->GetRandomNumberGenerator().Initialize(0x47465039u);
+  pWorld->GetClock().Reset(false);
+
+  SetCVarBool(s_szDepthOfFieldCVar, false);
+  AddLiquidStage(plVec2(0.0f, 0.0f), plVec2(4.0f, 3.0f), 0.5f, plVec3(-0.3f, 0.45f, 0.85f));
+
+  // The plan's Medium reference load: a room of 8 x 6 m filled to 0.5 m at 6.25 cm, 128 x 96 x 64 cells, 4 particles
+  // per cell. The water starts at 0.75 m over the left half and 0.25 m over the right (0.5 m on average, 393,216
+  // particles), so it sloshes across the room and the solver has work on every tick.
+  plGameObjectDesc desc;
+  desc.m_sName.Assign("MediumRoom");
+  desc.m_LocalPosition = plVec3(0.0f, 0.0f, 0.5f * s_vRoomDomain.z);
+  plGameObject* pObject = nullptr;
+  m_hVolumeObject = pWorld->CreateObject(desc, pObject);
+
+  plGpuFluidLiquidVolumeComponent* pLiquid = nullptr;
+  pWorld->GetOrCreateComponentManager<plGpuFluidLiquidVolumeComponentManager>()->CreateComponent(pObject, pLiquid);
+  pLiquid->m_vExtents = s_vRoomDomain;
+  pLiquid->m_fCellSize = s_fRoomCellSize;
+  pLiquid->m_uiParticlesPerCell = 4;
+  pLiquid->m_uiMaxParticles = 512 * 1024;
+  pLiquid->m_Quality = plGpuFluidQuality::Medium; // the tier's substep cap and pressure iterations
+  pLiquid->m_fDebugTopSpeed = 2.0f;
+  ApplyTuningOverrides(pLiquid);
+  PL_TEST_BOOL(pLiquid->GetCells() == plVec3U32(128, 96, 64));
+
+  const float fFloor = -0.5f * s_vRoomDomain.z;
+  for (plUInt32 i = 0; i < 2; ++i)
+  {
+    const float fDepth = i == 0 ? 0.75f : 0.25f;
+    plGpuFluidLiquidFillBox& fill = pLiquid->m_FillBoxes.ExpandAndGetRef();
+    fill.m_vCenter = plVec3((i == 0 ? -0.25f : 0.25f) * s_vRoomDomain.x, 0.0f, fFloor + 0.5f * fDepth);
+    fill.m_vHalfExtents = plVec3(0.25f * s_vRoomDomain.x, 0.5f * s_vRoomDomain.y, 0.5f * fDepth);
+  }
+
+  m_pOwnApplication->SetCamera(plVec3(0.0f, 9.0f, 6.0f), plVec3(0.0f, 0.0f, 0.3f), 55.0f);
+  return PL_SUCCESS;
+}
+
+plTestAppRun plGameEngineTestGpuFluidLiquidGallery::RunMediumRoom()
+{
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  CollectStats();
+
+  // The plan's timing rule: 60 warm-up frames, then 180 measured.
+  if (m_iFrame >= 60 && m_iFrame < 240)
+    AccumulateTimings();
+
+  for (plInt32 iShot : {30, 120, 240})
+  {
+    if (m_iFrame == iShot)
+    {
+      plStringBuilder sName;
+      sName.SetFormat("MediumRoom_{}", plArgI(iShot, 4, true));
+      PL_TEST_BOOL(SaveShot(sName).Succeeded());
+    }
+  }
+
+  if (m_uiLastTick >= s_uiRoomTicks || m_iFrame >= static_cast<plInt32>(s_uiRoomTicks) + 100)
+  {
+    EvaluateMediumRoom();
+    return plTestAppRun::Quit;
+  }
+  return plTestAppRun::Continue;
+}
+
+void plGameEngineTestGpuFluidLiquidGallery::EvaluateMediumRoom()
+{
+  PL_TEST_BOOL_MSG(m_uiLastTick >= s_uiRoomTicks, "Only %u ticks were read back", m_uiLastTick);
+
+  plStringBuilder sCsv("tick,alive,substeps,active_bricks,volume_ratio,max_speed,mean_speed,residual_ratio,sim_time,nan\n");
+  plUInt32 uiMaxNaN = 0, uiSubstepHist[17] = {};
+  float fMinVolume = 1e9f, fMaxVolume = -1e9f;
+  for (auto it : m_Ticks)
+  {
+    const TickSample& s = it.Value();
+    sCsv.AppendFormat("{},{},{},{},{},{},{},{},{},{}\n", it.Key(), s.m_uiAlive, s.m_uiSubsteps, s.m_uiActiveBricks, s.m_fVolumeRatio, s.m_fMaxSpeed, s.m_fMeanSpeed, s.m_fResidualRatio, s.m_fSimTime, s.m_uiNaN);
+    uiMaxNaN = plMath::Max(uiMaxNaN, s.m_uiNaN);
+    ++uiSubstepHist[plMath::Min<plUInt32>(s.m_uiSubsteps, 16)];
+    if (it.Key() >= 1)
+    {
+      fMinVolume = plMath::Min(fMinVolume, s.m_fVolumeRatio);
+      fMaxVolume = plMath::Max(fMaxVolume, s.m_fVolumeRatio);
+    }
+  }
+  WriteText(":imgout/GpuFluidGallery/Liquid/MediumRoom_ticks.csv", sCsv);
+
+  const TickSample* pLast = m_Ticks.GetValue(m_uiLastTick);
+  if (!PL_TEST_BOOL(pLast != nullptr))
+    return;
+
+  float fMedian, fP95, fMax;
+  ReportResiduals("Medium Room", 2, fMedian, fP95, fMax);
+
+  plStringBuilder sSubsteps;
+  for (plUInt32 i = 1; i <= 16; ++i)
+  {
+    if (uiSubstepHist[i] > 0)
+      sSubsteps.AppendFormat(" {}:{}", i, uiSubstepHist[i]);
+  }
+  plTestFramework::Output(plTestOutput::Message,
+    "Medium Room: %u particles, %u ticks, %.3f s simulated of %.3f s (slow motion %.1f%%), substeps per tick (count:ticks)%s; volume measure %.4f .. %.4f; N5 mismatches %u, lost %u, NaN %u",
+    pLast->m_uiAlive, m_uiLastTick, pLast->m_fSimTime, m_uiLastTick * s_fTickSeconds, 100.0f * (1.0f - pLast->m_fSimTime / plMath::Max(m_uiLastTick * s_fTickSeconds, 1e-6f)), sSubsteps.GetData(),
+    fMinVolume, fMaxVolume, m_uiN5Mismatches, pLast->m_uiLost, uiMaxNaN);
+
+  PL_TEST_INT(m_uiN5Mismatches, 0);
+  PL_TEST_INT(pLast->m_uiLost, 0);
+  PL_TEST_INT(uiMaxNaN, 0);
+  PL_TEST_BOOL_MSG(fMinVolume >= 1.0f - s_fVolumeTolerance && fMaxVolume <= 1.0f + s_fVolumeTolerance, "Medium Room: the volume measure ran %.4f .. %.4f", fMinVolume, fMaxVolume);
+  // The Medium tier's substep cap (plan amendment A2), with slow motion beyond it.
+  PL_TEST_BOOL_MSG(ForcedSubsteps() > 0 || uiSubstepHist[4] + uiSubstepHist[5] + uiSubstepHist[6] + uiSubstepHist[7] + uiSubstepHist[8] == 0, "Medium Room: a tick ran more than 3 substeps");
+  PL_TEST_BOOL_MSG(fP95 <= s_fRoomResidualTolerance, "N2 Medium Room: 95th percentile of the relative residual %.2e (limit %.0e)", fP95, s_fRoomResidualTolerance);
+
+  plStringBuilder sTimes;
+  ReportTimings(sTimes);
+  WriteText(":imgout/GpuFluidGallery/Liquid/MediumRoom_timings.csv", sTimes);
+}
+
+plResult plGameEngineTestGpuFluidLiquidGallery::SetupNoLiquid()
+{
+  plWorld* pWorld = m_pOwnApplication->GetWorld();
+  PL_LOCK(pWorld->GetWriteMarker());
+  pWorld->Clear();
+  pWorld->GetClock().Reset(false);
+  SetCVarBool(s_szDepthOfFieldCVar, false);
+
+  // The dam break's stage without the liquid volume.
+  AddLiquidStage(plVec2(0.0f, 0.0f), plVec2(0.5f * s_vDamTank.x, 0.5f * s_vDamTank.y), 0.08f, plVec3(-0.3f, 0.45f, 0.85f));
+  m_pOwnApplication->SetCamera(plVec3(0.25f, 3.05f, 1.75f), plVec3(0.1f, -0.1f, 0.3f), 50.0f);
+  m_hVolumeObject.Invalidate();
+  return PL_SUCCESS;
+}
+
+plTestAppRun plGameEngineTestGpuFluidLiquidGallery::RunNoLiquid()
+{
+  // The liquid pass's own GPU passes must not run in a view without liquid: their stats are removed once the content
+  // flag the earlier sub-tests set has expired (Rendering.Memory.ContentHoldTime, 2 s of wall time), and must not come
+  // back over the next 30 frames.
+  if (m_iFrame == 0)
+  {
+    m_NoLiquidStart = plTime::Now();
+    m_iNoLiquidClearedFrame = -1;
+  }
+  if (m_iNoLiquidClearedFrame < 0 && plTime::Now() - m_NoLiquidStart > plTime::MakeFromSeconds(s_fNoLiquidSettleSeconds))
+  {
+    m_iNoLiquidClearedFrame = m_iFrame;
+    for (const char* szPhase : s_szPhases)
+    {
+      if (!plStringUtils::StartsWith(szPhase, "GpuFluid Liquid/"))
+        plStats::RemoveStat(plStringBuilder("Renderer/GPU/", szPhase, "[ms]"));
+    }
+  }
+
+  m_pOwnApplication->Run();
+  if (m_pOwnApplication->WasQuitRequested())
+    return plTestAppRun::Quit;
+
+  if (m_iNoLiquidClearedFrame < 0 || m_iFrame < m_iNoLiquidClearedFrame + 30)
+    return m_iFrame < 3000 ? plTestAppRun::Continue : plTestAppRun::Quit;
+
+  plUInt32 uiRan = 0;
+  for (const char* szPhase : s_szPhases)
+  {
+    if (plStringUtils::StartsWith(szPhase, "GpuFluid Liquid/"))
+      continue;
+    const plVariant value = plStats::GetStatValue(plStringBuilder("Renderer/GPU/", szPhase, "[ms]"));
+    if (value.IsValid())
+    {
+      plTestFramework::Output(plTestOutput::Error, "No Liquid: the pass '%s' ran (%s)", szPhase, value.ConvertTo<plString>().GetData());
+      ++uiRan;
+    }
+  }
+  plTestFramework::Output(plTestOutput::Message, "No Liquid: %u of the liquid pass's GPU passes ran over 30 frames without a liquid volume", uiRan);
+  PL_TEST_INT(uiRan, 0);
+  return plTestAppRun::Quit;
 }
