@@ -38,5 +38,10 @@ public class ParticlesTestModule : ModuleRules
 
         // The package's Assets folder (the GpuFluid shaders), mounted by the GpuFluid gallery as "plasma.particles".
         PrivateDefinitions.Add($"PL_PARTICLESTEST_ASSETS_DIR={Path.Combine(context.ProjectRoot, "Assets").Replace('\\', '/')}");
+
+        // The GpuFluid headers the tests include share layouts with the shaders: <Shaders/GpuFluid/...> from Assets/,
+        // and the engine macros those include from the SDK's Data/Base.
+        PrivateIncludePaths.Add(Path.Combine(context.ProjectRoot, "Assets"));
+        PrivateIncludePaths.Add(Path.Combine(PlasmaPackageSdk.Root, "Data", "Base"));
     }
 }

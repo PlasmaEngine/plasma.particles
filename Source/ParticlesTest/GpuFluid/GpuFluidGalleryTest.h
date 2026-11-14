@@ -56,9 +56,12 @@ protected:
   virtual void Init_FileSystem_ConfigureDataDirs() override;
   virtual void BeforeHighLevelSystemsShutdown() override;
 
-private:
+public:
+  /// Scene helpers, shared with the liquid gallery (GpuFluidLiquidGalleryTest.cpp). World write lock held.
   plGameObject* AddBox(const char* szName, const plVec3& vCenter, const plVec3& vSize, const plColor& color);
   void AddSunAndSky(const plVec3& vToSun, float fLux);
+
+private:
 
   /// What the VDB importer would make of the sphere: a dense RGBA8 grid split into bricks with a one voxel apron and an
   /// RGBA8 brick table, created as a runtime plVDBVolumeResource.
