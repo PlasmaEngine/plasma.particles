@@ -82,9 +82,11 @@ struct plGpuFluidMultigridSettings
   /// The brick colour that pre-smooths the fine level first (GpuFluid.Gas.MGDownColour).
   plUInt32 m_uiDownColour = 0;
 
-  /// Every V-cycle after a tick's first stops at M (a two-level F/M cycle, no C or dense levels): the first cycle has
-  /// removed the smooth part of the error, the later ones mostly smooth what is left along the brick faces.
-  bool m_bShortLaterCycles = true;
+  /// Every V-cycle after a tick's first stops at M (a two-level F/M cycle, no C or dense levels): cheaper, but it only
+  /// smooths what the first cycle left along the brick faces. Off by default: under a wind through open faces the
+  /// smooth part of the error changes every tick, and the short second cycle left L_inf(div) at 0.0124 of its value before
+  /// the projection (Gas Wind), over N2's 1e-2; two full V-cycles reach 0.006.
+  bool m_bShortLaterCycles = false;
 
   /// Each step of Gas/Pressure in a pass of its own (Gas/Pressure Operator, Solve 1..n, Project), so each is timed
   /// (GpuFluid.Gas.ProfilePressure).

@@ -23,7 +23,7 @@ plCVarInt cvar_GpuFluidGasMGCoarseSweeps("GpuFluid.Gas.MGCoarseSweeps", 4, plCVa
 plCVarInt cvar_GpuFluidGasMGFinalSweeps("GpuFluid.Gas.MGFinalSweeps", 0, plCVarFlags::Default, "Multigrid: red-black sweeps over the whole fine level after each V-cycle, every neighbour current.");
 plCVarFloat cvar_GpuFluidGasMGProlongScale("GpuFluid.Gas.MGProlongScale", 1.0f, plCVarFlags::Default, "Multigrid: scale of every coarse-grid correction.");
 plCVarInt cvar_GpuFluidGasMGDownColour("GpuFluid.Gas.MGDownColour", 0, plCVarFlags::Default, "Multigrid: the brick colour that pre-smooths the fine level first (0 or 1).");
-plCVarBool cvar_GpuFluidGasMGShortCycles("GpuFluid.Gas.MGShortCycles", true, plCVarFlags::Default, "Multigrid: every V-cycle after a tick's first stops at the 4 cubed level.");
+plCVarBool cvar_GpuFluidGasMGShortCycles("GpuFluid.Gas.MGShortCycles", false, plCVarFlags::Default, "Multigrid: every V-cycle after a tick's first stops at the 4 cubed level (cheaper; misses N2's 1e-2 under wind).");
 plCVarBool cvar_GpuFluidGasProfilePressure("GpuFluid.Gas.ProfilePressure", false, plCVarFlags::Default, "Each step of the gas pressure phase in a render-graph pass of its own, so each is timed.");
 plCVarFloat cvar_GpuFluidGasMGOmega("GpuFluid.Gas.MGOmega", 1.0f, plCVarFlags::Default, "Multigrid: over-relaxation of the smoother.");
 plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 4096, plCVarFlags::Default, "Multigrid: dense levels up to this many cells run in one dispatch of one group; larger ones one thread per cell.");
@@ -580,7 +580,8 @@ void plGpuFluidGasVolumeComponent::GatherSolids(plTime timeDiff, plGpuFluidGasSi
 
   plHashTable<plUInt64, plTransform> seen;
 
-  auto Track = [&](plUInt64 uiKey, const plTransform& cur, bool bStatic, SolidPose pose)
+  // bWorldAligned: the pose is a box of world bounds (a physics body), not a shape attached to the transform.
+  auto Track = [&](plUInt64 uiKey, const plTransform& cur, bool bStatic, bool bWorldAligned, SolidPose pose)
   {
     plTransform prev = cur;
     if (!bStatic)
@@ -593,9 +594,21 @@ void plGpuFluidGasVolumeComponent::GatherSolids(plTime timeDiff, plGpuFluidGasSi
     Moving& m = solids.ExpandAndGetRef();
     m.m_Cur = pose;
     m.m_Prev = pose;
-    m.m_Prev.m_vCenter = pose.m_vCenter + (prev.m_vPosition - cur.m_vPosition);
-    m.m_Prev.m_qRotation = (prev.m_qRotation * cur.m_qRotation.GetInverse()) * pose.m_qRotation;
     TransformVelocity(prev, cur, fSeconds, m.m_vLinear, m.m_vAngular);
+
+    if (bWorldAligned)
+    {
+      // The box does not turn with the body: it stays world aligned on every tick and only its centre moves. Its faces
+      // still move with the body's material, v + w x (p - origin) about the body's origin, not about the box centre:
+      // ShapeVelocity takes r from the centre, so the centre's own velocity goes into the linear part.
+      m.m_vLinear += m.m_vAngular.CrossRH(pose.m_vCenter - cur.m_vPosition);
+      m.m_Prev.m_vCenter = pose.m_vCenter - m.m_vLinear * fSeconds;
+    }
+    else
+    {
+      m.m_Prev.m_vCenter = pose.m_vCenter + (prev.m_vPosition - cur.m_vPosition);
+      m.m_Prev.m_qRotation = (prev.m_qRotation * cur.m_qRotation.GetInverse()) * pose.m_qRotation;
+    }
   };
 
   // Authored colliders.
@@ -617,7 +630,7 @@ void plGpuFluidGasVolumeComponent::GatherSolids(plTime timeDiff, plGpuFluidGasSi
       pose.m_vHalfExtents = collider.m_vHalfExtents.CompMul(vScale);
       pose.m_fRadius = collider.m_fRadius * (collider.m_Shape == plGpuFluidColliderShape::Capsule ? plMath::Max(vScale.x, vScale.y) : plMath::Max(vScale.x, vScale.y, vScale.z));
       pose.m_fHalfHeight = collider.m_fHalfHeight * vScale.z;
-      Track(collider.GetHandle().GetInternalID().m_Data, cur, collider.m_bStatic, pose);
+      Track(collider.GetHandle().GetInternalID().m_Data, cur, collider.m_bStatic, false, pose);
     }
   }
 
@@ -659,7 +672,7 @@ void plGpuFluidGasVolumeComponent::GatherSolids(plTime timeDiff, plGpuFluidGasSi
       pose.m_vCenter = box.GetCenter();
       pose.m_qRotation = plQuat::MakeIdentity(); // world axis aligned bounds
       pose.m_vHalfExtents = box.GetHalfExtents();
-      Track(hActor.GetInternalID().m_Data | (plUInt64(1) << 63), cur, false, pose);
+      Track(hActor.GetInternalID().m_Data | (plUInt64(1) << 63), cur, false, true, pose);
     }
   }
 
