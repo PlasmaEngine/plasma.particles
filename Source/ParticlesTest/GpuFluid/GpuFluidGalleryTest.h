@@ -90,6 +90,7 @@ protected:
 
   virtual void SetupSubTests() override;
   virtual plResult InitializeSubTest(plInt32 iIdentifier) override;
+  virtual plResult DeInitializeSubTest(plInt32 iIdentifier) override;
   virtual plTestAppRun RunSubTest(plInt32 iIdentifier, plUInt32 uiInvocationCount) override;
 
 private:
@@ -103,6 +104,8 @@ private:
   plInt32 m_iFrame = -1;
   plInt32 m_iPhase = 0;
   plInt32 m_iPhaseFrame = 0;
+  bool m_bDepthOfFieldWasEnabled = true;
+  bool m_bRestoreDepthOfField = false;
   plImage m_GpuAlone;
   plImage m_GpuAgain;
   plImage m_GpuEmissive;

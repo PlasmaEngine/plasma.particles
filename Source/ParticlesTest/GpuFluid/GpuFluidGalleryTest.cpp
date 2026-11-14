@@ -104,6 +104,17 @@ namespace
       PL_TEST_FAILURE("CVar not found", "%s", szName);
   }
 
+  bool GetCVarBool(const char* szName, bool bDefault)
+  {
+    if (auto* pCVar = static_cast<plCVarBool*>(plCVar::FindCVarByName(szName)))
+      return pCVar->GetValue();
+    return bDefault;
+  }
+
+  /// Switched off by the gallery scenes and restored after every sub-test: the CVar is process wide, and the image tests
+  /// that run after this one in the same process were captured with depth of field on.
+  constexpr const char* s_szDepthOfFieldCVar = "Rendering.DepthOfField.Enable";
+
   /// The sphere of GasAnalyticSphere.plShader, at the centre of a voxel of the virtual grid. Density in x, temperature in y.
   plVec2 EvaluateSphere(const plVec3& vVoxelCenter, const plVec3& vCenter, float fRadius, float fSoftness, float fPeakDensity, float fPeakTemperature)
   {
@@ -395,7 +406,7 @@ plResult plGpuFluidGalleryApplication::SetupHandoffScene(float fSeparation, bool
   m_pWorld->GetClock().Reset(false);
 
   // The camera's default lens is wide open, which blurs everything but the focus point.
-  SetCVarBool("Rendering.DepthOfField.Enable", false);
+  SetCVarBool(s_szDepthOfFieldCVar, false);
 
   AddSunAndSky(plVec3(-0.45f, -0.6f, 0.65f), 10.0f);
   AddBox("Ground", plVec3(0.0f, 0.0f, -0.1f), plVec3(2000.0f, 2000.0f, 0.2f), plColor(0.32f, 0.30f, 0.28f));
@@ -520,6 +531,9 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
 {
   PL_SUCCEED_OR_RETURN(SUPER::InitializeSubTest(iIdentifier));
 
+  m_bDepthOfFieldWasEnabled = GetCVarBool(s_szDepthOfFieldCVar, true);
+  m_bRestoreDepthOfField = true;
+
   m_iFrame = -1;
   m_iPhase = 0;
   m_iPhaseFrame = 0;
@@ -544,6 +558,18 @@ plResult plGameEngineTestGpuFluidGallery::InitializeSubTest(plInt32 iIdentifier)
   }
 
   return PL_FAILURE;
+}
+
+plResult plGameEngineTestGpuFluidGallery::DeInitializeSubTest(plInt32 iIdentifier)
+{
+  if (m_bRestoreDepthOfField)
+  {
+    SetCVarBool(s_szDepthOfFieldCVar, m_bDepthOfFieldWasEnabled);
+    PL_TEST_BOOL_MSG(GetCVarBool(s_szDepthOfFieldCVar, !m_bDepthOfFieldWasEnabled) == m_bDepthOfFieldWasEnabled, "Depth of field was not restored");
+    m_bRestoreDepthOfField = false;
+  }
+
+  return SUPER::DeInitializeSubTest(iIdentifier);
 }
 
 plTestAppRun plGameEngineTestGpuFluidGallery::RunSubTest(plInt32 iIdentifier, plUInt32 uiInvocationCount)
@@ -813,7 +839,8 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunHandoffSphereVideo()
   if (m_pOwnApplication->WasQuitRequested())
     return plTestAppRun::Quit;
 
-  // Camera: a slow arc of 60 degrees in front of the pair, so the GPU sphere stays on the left.
+  // Camera: a slow arc of 60 degrees in front of the pair (from -y, looking +y), so the GPU sphere at -x stays on the
+  // right of the picture: screen right is -x here.
   const plVec3 vTarget(0.0f, 0.0f, s_fSphereHeight - 0.2f);
   auto Orbit = [&](float t)
   {
@@ -845,7 +872,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunHandoffSphereVideo()
       plFileWriter title;
       if (title.Open(":imgout/GpuFluidGallery/HandoffSphere/title.txt").Succeeded())
       {
-        const char* szTitle = "P0 Handoff: GPU-written pulsing sphere (left), the same sphere baked like an import (right), one VDB march\n";
+        const char* szTitle = "P0 Handoff: GPU-written pulsing sphere (right), the same sphere baked like an import (left), one VDB march\n";
         title.WriteBytes(szTitle, plStringUtils::GetStringElementCount(szTitle)).IgnoreResult();
       }
     }
