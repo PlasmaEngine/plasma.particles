@@ -68,6 +68,34 @@ Keep each mp4 under 15 MB, and delete the frames once encoded: disk is tight.
   frames 45 to 47 `GpuFluid.Debug.InjectNaN` writes a NaN into the density at the source: the NaN count must go above
   0 for those frames and back to 0 from ten frames later. Every readback in `GasSafety.csv`.
 
+## Sub-tests (P3)
+
+- **N2 Divergence**: the Smoke Column with the Medium multigrid (a full V-cycle and a short F/M one per tick):
+  L_inf(div after) / L_inf(div before) must stay below 1e-2 on every readback after the first half second. A second
+  phase with 12 V-cycles prints the half-precision floor of the stored velocity. `N2_Divergence.csv`.
+- **N3 Poisson**: a manufactured problem with a known solution on 64 cubed (8 x 8 x 8 bricks), every face open, from a
+  cold start each frame (`plGpuFluidGasVolumeComponent::m_DebugPoissonTest`). The residual must fall at least 5x per
+  V-cycle after the first while above the float floor (`N3_Poisson_Cycles.csv`); then multigrid V-cycles and red-black
+  SOR iterations are swept against the GPU time of Gas/Pressure (`N3_Poisson.csv`), and each stage of a V-cycle is timed
+  on its own (the "N3 profile" line).
+- **N4 Gas Mass**: a closed 2 m box, no dissipation, a source for 0.5 s, 300 ticks; the largest mass drift after 0.7 s
+  must stay within the tolerance stored in the test (the first measured run plus 50%). `N4_GasMass.csv`.
+- **N9 Colliders**: a plume centred under a sphere collider, no source noise: the centroid stays within a voxel of the
+  middle in x and y, no density is left inside the solid, the solid has the sphere's cell count, and gas reaches it.
+- **Gas Wind**: the Smoke Column under a 2 m/s `plSimpleWindWorldModule` wind: the ambient velocity matches and the
+  plume bends over.
+- **Corridor Smoke Video**, **Smoke Around Obstacles Video**: with `PL_GPUFLUID_VIDEO=1`, 300 and 240 frames into
+  `GpuFluidGallery/CorridorSmoke/` and `GpuFluidGallery/SmokeObstacles/`. Look values: `PL_GPUFLUID_TUNE_*` (see the
+  scene setups in `GpuFluidGasSolverTests.cpp`).
+
+Gas solver CVars for comparisons (all read every frame): `GpuFluid.Gas.PressureSolver` (0 red-black SOR, 1 multigrid),
+`GpuFluid.Gas.PressureCycles`, `GpuFluid.Gas.MGShortCycles`, `GpuFluid.Gas.MGPreSmooth`, `GpuFluid.Gas.MGPostSmooth`,
+`GpuFluid.Gas.MGCoarseSweeps`, `GpuFluid.Gas.MGFinalSweeps`, `GpuFluid.Gas.MGDenseGroupCells`,
+`GpuFluid.Gas.VelocityMacCormack`, `GpuFluid.Gas.Vorticity`, `GpuFluid.Gas.VorticityRate`,
+`GpuFluid.Gas.ProfilePressure` (each step of Gas/Pressure in a pass of its own). They can be given on the command line
+after the filter, e.g. `run_gallery.sh out "^N2 Divergence$" -GpuFluid.Gas.PressureCycles 1` (in zsh, split a variable
+holding several with `${=args}`).
+
 ## Timing (`GpuFluid Tier Timing`)
 
 ```
@@ -75,7 +103,8 @@ Utilities/GpuFluid/run_gallery.sh ~/FluidLab/runs/P1/timing "GpuFluid Tier Timin
 CONFIG=Release Utilities/GpuFluid/run_gallery.sh ~/FluidLab/runs/P1/timing-release "GpuFluid Tier Timing"   # the comparable numbers
 ```
 
-One sub-test per manually picked tier (P1: `Gas Low`, `Gas Medium`) on the smoke column, with
+One sub-test per manually picked tier (`Gas Low`, `Gas Medium`, and since P3 `Gas Medium SOR`, Medium with the P1
+red-black SOR pressure solver for comparison; the "pressure" lines give Gas/Pressure per tick) on the smoke column, with
 `Rendering.Pipeline.Injections` off as the baseline and `Rendering.Profiling.GPUStats` on. 60 warm-up and 180 measured
 frames; the median and p90 of every `Gas/*` phase per frame and per run (a tick phase runs once per tick, Finalize once
 per frame), µs per brick and run, the tick phases together per tick, and the whole gas frame. The CSV

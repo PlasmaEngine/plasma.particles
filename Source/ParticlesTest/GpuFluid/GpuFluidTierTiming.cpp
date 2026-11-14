@@ -26,17 +26,49 @@ namespace
   const plVec3 s_vCameraPosition(-5.3f, -11.3f, 1.8f);
   const plVec3 s_vCameraTarget(0.0f, 0.0f, 3.7f);
 
-  /// The tier of each sub-test. Only the tiers P1 has (manual selection); P5 adds High and the automatic scaler.
+  /// The tier of each sub-test (manual selection; P5 adds High and the automatic scaler). The SOR case runs Medium with
+  /// the P1 red-black SOR pressure solver (40 iterations), the reference the multigrid's cost is measured against.
   struct TierCase
   {
     const char* m_szName;
     plGpuFluidQuality::Enum m_Quality;
+    bool m_bSOR;
+    const char* m_szFile;
   };
 
   constexpr TierCase s_Tiers[] = {
-    {"Gas Low", plGpuFluidQuality::Low},
-    {"Gas Medium", plGpuFluidQuality::Medium},
+    {"Gas Low", plGpuFluidQuality::Low, false, "tier-timing-low.csv"},
+    {"Gas Medium", plGpuFluidQuality::Medium, false, "tier-timing-medium.csv"},
+    {"Gas Medium SOR", plGpuFluidQuality::Medium, true, "tier-timing-medium-sor.csv"},
   };
+
+  /// The pressure solver settings in force, for the CSV header and the log.
+  plString PressureSettings()
+  {
+    plStringBuilder s;
+    for (const char* szName : {"GpuFluid.Gas.PressureSolver", "GpuFluid.Gas.PressureCycles", "GpuFluid.Gas.MGShortCycles", "GpuFluid.Gas.MGPreSmooth", "GpuFluid.Gas.MGPostSmooth",
+           "GpuFluid.Gas.VelocityMacCormack", "GpuFluid.Gas.Vorticity"})
+    {
+      plCVar* pCVar = plCVar::FindCVarByName(szName);
+      if (pCVar == nullptr)
+        continue;
+      switch (pCVar->GetType())
+      {
+        case plCVarType::Bool:
+          s.AppendFormat(" {}={}", plStringView(szName).GetSubString(13, 64), static_cast<plCVarBool*>(pCVar)->GetValue() ? 1 : 0);
+          break;
+        case plCVarType::Int:
+          s.AppendFormat(" {}={}", plStringView(szName).GetSubString(13, 64), static_cast<plCVarInt*>(pCVar)->GetValue());
+          break;
+        case plCVarType::Float:
+          s.AppendFormat(" {}={}", plStringView(szName).GetSubString(13, 64), static_cast<plCVarFloat*>(pCVar)->GetValue());
+          break;
+        default:
+          break;
+      }
+    }
+    return s;
+  }
 
   const char* QualityName(plGpuFluidQuality::Enum quality)
   {
@@ -98,6 +130,8 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
   SetCVarForSubTest("Rendering.Profiling.GPUStats", true);
   SetCVarForSubTest("Rendering.Pipeline.Injections", false);
   SetCVarForSubTest("Rendering.DepthOfField.Enable", false);
+  if (s_Tiers[iIdentifier].m_bSOR)
+    SetCVarForSubTest("GpuFluid.Gas.PressureSolver", 0);
 
   PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupSmokeColumnScene());
 
@@ -239,18 +273,22 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
   if (m_iFrame + 1 < s_iWarmupFrames + s_iMeasuredFrames)
     return plTestAppRun::Continue;
 
-  WriteResults(s_Tiers[iIdentifier].m_Quality);
+  WriteResults(iIdentifier);
   return plTestAppRun::Quit;
 }
 
-void plGameEngineTestGpuFluidTierTiming::WriteResults(plGpuFluidQuality::Enum quality)
+void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
 {
   if (!PL_TEST_BOOL_MSG(!m_PhaseNames.IsEmpty(), "No Renderer/GPU/Gas/* stats: are GPU timestamps available?"))
     return;
 
+  const TierCase& tier = s_Tiers[iIdentifier];
+  const plGpuFluidQuality::Enum quality = tier.m_Quality;
   const plUInt32 uiBricks = m_uiActiveBricks;
   const plUInt32 uiTicks = plMath::Max(m_uiTicksPerFrame, 1u);
-  const char* szTier = QualityName(quality);
+  const char* szTier = tier.m_bSOR ? "MediumSOR" : QualityName(quality);
+  const plString sSettings = PressureSettings();
+  plTestFramework::Output(plTestOutput::Message, "Tier %s pressure settings:%s", szTier, sSettings.GetData());
 
   auto Percentile = [](plDynamicArray<double> values, double fFraction)
   {
@@ -261,8 +299,8 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plGpuFluidQuality::Enum qu
 
   plStringBuilder sCsv;
   sCsv.AppendFormat("# GpuFluid tier timing, tier {}, Smoke Column, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, {} build, "
-                    "Rendering.Pipeline.Injections off\n",
-    szTier, uiBricks, uiTicks, s_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD);
+                    "Rendering.Pipeline.Injections off\n# gas settings:{}\n",
+    szTier, uiBricks, uiTicks, s_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
   sCsv.Append("# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs\n");
   sCsv.Append("tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples\n");
 
@@ -295,6 +333,8 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plGpuFluidQuality::Enum qu
 
     sCsv.AppendFormat("{},{},{},{},{},{},{},{}\n", szTier, m_PhaseNames[i], uiRuns, plArgF(fMedian, 4), plArgF(fP90, 4), plArgF(fPerRun, 4), plArgF(fPerBrickRun, 4), values.GetCount());
     plTestFramework::Output(plTestOutput::Message, "Tier %s, %s: median %.3f ms, p90 %.3f ms per frame, %.3f ms per run (%u per frame)", szTier, m_PhaseNames[i].GetData(), fMedian, fP90, fPerRun, uiRuns);
+    if (m_PhaseNames[i] == "Gas/Pressure")
+      plTestFramework::Output(plTestOutput::Message, "Tier %s pressure: %.3f ms per tick (p90 %.3f), %.3f us per brick-tick, %u bricks", szTier, fPerRun, fP90 / uiRuns, fPerBrickRun, uiBricks);
   }
 
   // The per-tick phases together, per frame and per tick; and the whole gas frame, which adds Finalize once.
@@ -326,9 +366,7 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plGpuFluidQuality::Enum qu
     }
   }
 
-  plStringBuilder sFile;
-  sFile.SetFormat("tier-timing-{}.csv", szTier);
-  sFile.ToLower();
+  const plStringBuilder sFile = tier.m_szFile;
 
   // The plan's place, <sdk>/Output/GpuFluid/, and the test output folder.
   {
