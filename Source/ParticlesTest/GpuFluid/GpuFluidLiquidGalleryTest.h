@@ -18,9 +18,15 @@ class plGpuFluidLiquidVolumeComponent;
 ///   tick; N2. With exactly n0 particles per cell this is a discrete equilibrium the solve keeps; it checks that dt
 ///   changes and a partial surface layer do not disturb it.
 /// - "Hydrostatic Tank Random Seed": the same tank with the particles anywhere in the box (cell counts vary), the
-///   same checks. Runs only with PL_GPUFLUID_LIQ_STRICT_N6=1: it fails in P6 (empty cells inside the pool are
-///   classified air, and the hydrostatic pressure drives a jet into each; the level-set classification fixes that).
-/// - "Dam Break Video": 8 s of the dam break as PNG frames, when PL_GPUFLUID_VIDEO=1.
+///   same checks. Runs only with PL_GPUFLUID_LIQ_STRICT_N6=1. The level-set classification (P7) took out the jets into
+///   empty cells inside the pool, and the density correction's dead zone the boiling; what is left fails the 1 cm/s
+///   limit: loose particles at the surface pick up about one substep of gravity (0.04 .. 0.25 m/s, more at fewer
+///   substeps) while the pool's mean speed is below 2 mm/s.
+/// - "Dam Break Video": 8 s of the dam break as PNG frames, the rendered surface, when PL_GPUFLUID_VIDEO=1.
+/// - "Pour Into Glass": a nozzle (an inflow of 0.54 l/s) pours into a glass of analytic box walls for 8 s. Particles ==
+///   seeded - drained exactly, the seeded count against the flow rate, no NaN, everything inside the glass at the
+///   end, and a surface mesh on every tick without overflow.
+/// - "Pour Into Glass Video": the same as PNG frames, when PL_GPUFLUID_VIDEO=1.
 ///
 /// Uses the gallery's application (FluidGallery project); writes shots and CSVs under GpuFluidGallery/Liquid/.
 class plGameEngineTestGpuFluidLiquidGallery : public plGameEngineTest
@@ -38,6 +44,8 @@ protected:
     HydrostaticTank,
     DamBreakVideo,
     HydrostaticTankRandom,
+    PourIntoGlass,
+    PourIntoGlassVideo,
   };
 
   virtual void SetupSubTests() override;
@@ -63,14 +71,30 @@ private:
     float m_fSimTime = 0.0f;       ///< seconds simulated up to this tick (less than tick * dt in slow motion)
     plUInt32 m_uiNaN = 0;
     plUInt32 m_uiOverflow = 0;
+    plUInt32 m_uiAbove1cm = 0;          ///< particles faster than 1 cm/s
+    plUInt32 m_uiSurfaceVertices = 0;   ///< surface-nets mesh of the frame
+    plUInt32 m_uiSurfaceQuads = 0;
+    plUInt32 m_uiSurfaceOverflow = 0;
   };
 
   plResult SetupDamBreak();
   plResult SetupHydrostatic(bool bRandomSeed);
+  plResult SetupPour();
   plGpuFluidLiquidVolumeComponent* GetVolume();
+
+  /// The liquid scenes' stage: a dark floor, a checker of fTile squares over the given area (x/y centre and half
+  /// size) for the refraction to show, the sun and the sky.
+  void AddLiquidStage(const plVec2& vCheckerCenter, const plVec2& vCheckerHalfSize, float fTile, const plVec3& vToSun);
 
   plTestAppRun RunDamBreak(bool bVideo);
   plTestAppRun RunHydrostatic(bool bRandomSeed);
+  plTestAppRun RunPour(bool bVideo);
+
+  /// Saves frame m_iFrame - 1 of a video sub-test (the screenshot of this Run()) and its caption.
+  void SaveVideoFrame(plStringView sFolder, plStringView sTitle);
+
+  /// Surface mesh numbers over the ticks: largest vertex and quad counts, and how many ticks had none or overflowed.
+  void ReportSurface(plStringView sName, plUInt32 uiFirstTick);
 
   /// Reads the newest stats and files them under their tick. False when nothing new arrived.
   bool CollectStats();
@@ -83,6 +107,7 @@ private:
 
   void EvaluateDamBreak();
   void EvaluateHydrostatic(bool bRandomSeed);
+  void EvaluatePour();
 
   plResult SaveShot(plStringView sName);
 
@@ -105,4 +130,9 @@ private:
   plUInt32 m_uiTimedFrames = 0;
   plUInt32 m_uiTimedParticles = 0;
   plUInt32 m_uiTimedSubsteps = 0;
-};
+  plUInt32 m_uiTimedQuads = 0;
+
+  // Pour Into Glass: the glass's inside in domain cells, for the containment check.
+  plVec3 m_vGlassMin = plVec3::MakeZero();
+  plVec3 m_vGlassMax = plVec3::MakeZero();
+  plGpuFluidLiquidStats m_LastStats;};
