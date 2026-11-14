@@ -33,7 +33,8 @@ plCVarInt cvar_GpuFluidGasMGDenseGroupCells("GpuFluid.Gas.MGDenseGroupCells", 40
 plCVarInt cvar_GpuFluidGasVelocityMacCormack("GpuFluid.Gas.VelocityMacCormack", -1, plCVarFlags::Default, "MacCormack correction of the gas velocity's advection: -1 the quality's default (High and up), 0 off, 1 on (from Medium up).");
 plCVarBool cvar_GpuFluidGasMassCorrection("GpuFluid.Gas.MassCorrection", true, plCVarFlags::Default, "Closed gas volumes (every face closed, AllocateAll) scale their density each tick so the advection keeps the total mass.");
 plCVarFloat cvar_GpuFluidGasVorticity("GpuFluid.Gas.Vorticity", -1.0f, plCVarFlags::Default, "Overrides the gas volumes' vorticity confinement epsilon (negative: each volume's own).");
-plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws every allocated gas brick as a line box: orange a source's, green with content, cyan flux, blue proximity, grey idle.");
+plCVarBool cvar_GpuFluidDebugBricks("GpuFluid.Debug.Bricks", false, plCVarFlags::Default, "Draws the edges of every allocated gas brick into the gas, glowing by the bucket that keeps it: pale yellow a source's, orange with content, red-orange flux, dark red proximity, faint idle; the gas itself is shown without its glow.");
+plCVarBool cvar_GpuFluidDebugBrickLines("GpuFluid.Debug.BrickLines", false, plCVarFlags::Default, "Draws every allocated gas brick as a debug line box (orange a source's, green with content, cyan flux, blue proximity, grey idle). On Metal the VDB march then draws no gas in that view.");
 plCVarBool cvar_GpuFluidDebugBrickStats("GpuFluid.Debug.BrickStats", false, plCVarFlags::Default, "Shows the gas volumes' active bricks and pool size on screen.");
 plCVarFloat cvar_GpuFluidGasVorticityRate("GpuFluid.Gas.VorticityRate", 10.0f, plCVarFlags::Default, "Vorticity confinement: the rate k (1/s) of the acceleration eps dx k (N x w).");
 
@@ -348,6 +349,8 @@ void plGpuFluidGasVolumeComponent::DrawBrickDebug() const
       lines.PushBack(plDebugRenderer::Line(c[e[0]], c[e[1]], colours[uiColour]));
   }
 
+  // On Metal the VDB march draws no gas in a view that also draws world-space debug lines (depth tested or not), so
+  // GpuFluid.Debug.Bricks draws the bricks into the gas instead (the brick view); these lines are for the editor.
   plDebugRenderer::DrawLines(GetWorld(), lines, plColor::White, transform);
 }
 
@@ -412,13 +415,14 @@ void plGpuFluidGasVolumeComponent::Update()
     FillSimulation(timeDiff, input.m_Simulation);
 
   input.m_bAllocateAll = m_bAllocateAll;
-  input.m_bDebugGrid = m_bDebugGridReadback || cvar_GpuFluidDebugBricks.GetValue();
+  input.m_bDebugGrid = m_bDebugGridReadback || cvar_GpuFluidDebugBrickLines.GetValue();
+  input.m_Simulation.m_bBrickView = cvar_GpuFluidDebugBricks.GetValue();
   input.m_bDebugGridVirtual = m_bDebugGridReadback;
   input.m_bHashState = m_bDebugHashState;
 
   m_pManager->SetGasFrameInput(m_VolumeId, input);
 
-  if (cvar_GpuFluidDebugBricks.GetValue())
+  if (cvar_GpuFluidDebugBrickLines.GetValue())
     DrawBrickDebug();
 
   if (cvar_GpuFluidDebugBrickStats.GetValue())
@@ -900,12 +904,21 @@ void plGpuFluidGasVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderData
   pRenderData->m_Albedo = m_Albedo;
   pRenderData->m_EmissionColor = m_EmissionColor;
   pRenderData->m_fEmissionScale = m_fEmissionScale;
+  if (publish.m_bBrickView)
+  {
+    // The brick view's edges glow by their bucket through the blackbody ramp of the temperature channel.
+    pRenderData->m_EmissionColor = plColor::White;
+    pRenderData->m_fEmissionScale = 8.0f;
+  }
   pRenderData->m_fAnisotropy = m_fAnisotropy;
   // The march's majorant: the solver clamps density to DensityMax, the analytic sphere peaks at PeakDensity.
   pRenderData->m_fMaxDensity = m_DebugSource == plGpuFluidDebugSource::None ? plMath::Max(m_fDensityMax, 1e-3f) : plMath::Max(m_fPeakDensity, 1e-3f);
   pRenderData->m_uiFrame = 0;
   pRenderData->m_Channels = plVDBVolumeChannel::Density | plVDBVolumeChannel::Temperature;
+  // The coarse taps lose the temperature (design plan F4): the brick view needs the full march.
   pRenderData->m_RenderMode = m_RenderMode;
+  if (publish.m_bBrickView)
+    pRenderData->m_RenderMode = plVDBVolumeRenderMode::RayMarch;
 
   // No procedural detail on simulated gas: the sim carries its own.
   pRenderData->m_fDetailStrength = 0.0f;

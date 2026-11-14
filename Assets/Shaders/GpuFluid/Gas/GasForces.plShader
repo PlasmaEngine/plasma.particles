@@ -90,7 +90,8 @@ float3 Confinement(int3 texel, float epsilon, float dx, float rate)
 groupshared uint gs_uiNaN;
 groupshared uint gs_uiSpeedClamped;
 
-[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+// GPU_FLUID_SLABS groups of 128 threads per brick (the slab dispatch arguments); the counters are summed per group.
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, uint groupIndex : SV_GroupIndex)
 {
   const uint slot = GpuFluidGroupSlot(groupId);
@@ -135,7 +136,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     const float edgeFadeVoxels = p2.w;
     const float edgeFadeRate = p3.x;
 
-    for (uint i = groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
+    for (uint i = groupId.z * (GPU_FLUID_BRICK_CELLS / GPU_FLUID_SLABS) + groupIndex; i < GPU_FLUID_BRICK_TEXELS; i += GPU_FLUID_BRICK_CELLS)
     {
       const int3 stored = int3(i % GPU_FLUID_BRICK_STORE, (i / GPU_FLUID_BRICK_STORE) % GPU_FLUID_BRICK_STORE, i / (GPU_FLUID_BRICK_STORE * GPU_FLUID_BRICK_STORE));
 
@@ -176,7 +177,7 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
 
   // Velocity on the three -side faces of this thread's cell.
   {
-    const int3 local = int3(groupThreadId);
+    const int3 local = int3(groupThreadId.xy, groupThreadId.z + groupId.z * (GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS));
     const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
     const int3 cell = brick * GPU_FLUID_BRICK_SIZE + local;
     const int3 texel = base + local + GPU_FLUID_BRICK_APRON;

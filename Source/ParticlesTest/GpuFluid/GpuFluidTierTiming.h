@@ -33,6 +33,7 @@ private:
 
   plGpuFluidGalleryApplication* m_pOwnApplication = nullptr;
   plInt32 m_iFrame = -1;
+  plInt32 m_iWarmupFrames = 60;
 
   plDynamicArray<plString> m_RestoreCVarNames;
   plDynamicArray<plVariant> m_RestoreCVarValues;

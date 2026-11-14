@@ -21,6 +21,8 @@ static plGameEngineTestGpuFluidTierTiming s_GameEngineTestGpuFluidTierTiming;
 namespace
 {
   constexpr plInt32 s_iWarmupFrames = 60;
+  /// The sparse gate scene's plumes need about four seconds to reach the open top and settle.
+  constexpr plInt32 s_iSparseWarmupFrames = 150;
   constexpr plInt32 s_iMeasuredFrames = 180;
 
   const plVec3 s_vCameraPosition(-5.3f, -11.3f, 1.8f);
@@ -136,6 +138,7 @@ plResult plGameEngineTestGpuFluidTierTiming::InitializeSubTest(plInt32 iIdentifi
   if (s_Tiers[iIdentifier].m_bSOR)
     SetCVarForSubTest("GpuFluid.Gas.PressureSolver", 0);
 
+  m_iWarmupFrames = s_Tiers[iIdentifier].m_bSparse ? s_iSparseWarmupFrames : s_iWarmupFrames;
   m_uiActiveSum = 0;
   m_uiActiveSamples = 0;
   m_uiActiveMin = 0xFFFFFFFFu;
@@ -239,7 +242,7 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
         m_uiActiveBricks = stats.m_uiActiveBricks;
         m_uiTicksPerFrame = stats.m_uiTicks;
         m_uiNaN = plMath::Max(m_uiNaN, stats.m_uiNaNCount);
-        if (m_iFrame >= s_iWarmupFrames)
+        if (m_iFrame >= m_iWarmupFrames)
         {
           m_uiActiveSum += stats.m_uiActiveBricks;
           ++m_uiActiveSamples;
@@ -251,7 +254,7 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
     }
   }
 
-  if (m_iFrame < s_iWarmupFrames)
+  if (m_iFrame < m_iWarmupFrames)
     return plTestAppRun::Continue;
 
   // One value per frame of every Gas/* phase. The profiler names the second run of a pass in a frame "<name> #2", so
@@ -288,7 +291,7 @@ plTestAppRun plGameEngineTestGpuFluidTierTiming::RunSubTest(plInt32 iIdentifier,
       m_PhaseValues[i].PushBack(frameValues[i]);
   }
 
-  if (m_iFrame + 1 < s_iWarmupFrames + s_iMeasuredFrames)
+  if (m_iFrame + 1 < m_iWarmupFrames + s_iMeasuredFrames)
     return plTestAppRun::Continue;
 
   WriteResults(iIdentifier);
@@ -324,7 +327,7 @@ void plGameEngineTestGpuFluidTierTiming::WriteResults(plInt32 iIdentifier)
   plStringBuilder sCsv;
   sCsv.AppendFormat("# GpuFluid tier timing, tier {}, Smoke Column, {} active bricks, {} ticks per frame, {} warm-up + {} measured frames, Metal, {} build, "
                     "Rendering.Pipeline.Injections off\n# gas settings:{}\n",
-    szTier, uiBricks, uiTicks, s_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
+    szTier, uiBricks, uiTicks, m_iWarmupFrames, s_iMeasuredFrames, PL_GPUFLUID_TIMING_BUILD, sSettings);
   sCsv.Append("# runs: how often the phase runs per frame (once per tick, Finalize once per frame); per_run = per_frame / runs\n");
   sCsv.Append("tier,phase,runs_per_frame,median_ms_per_frame,p90_ms_per_frame,median_ms_per_run,us_per_brick_run,samples\n");
 

@@ -134,6 +134,10 @@ struct plGpuFluidGasPublish
   plVec3U32 m_vBrickGrid = plVec3U32::MakeZero();
   plVec3U32 m_vAtlasBricks = plVec3U32::MakeZero();
   plBoundingBox m_BoundsUVW = plBoundingBox::MakeFromMinMax(plVec3::MakeZero(), plVec3(1.0f));
+
+  /// The atlas is the brick view (GpuFluid.Debug.Bricks): temperature is the bucket of the brick's edges, to be drawn as
+  /// emission.
+  bool m_bBrickView = false;
 };
 
 /// \brief Owns the GPU side of every GpuFluid volume of one render world and records their work.

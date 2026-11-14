@@ -180,6 +180,10 @@ struct plGpuFluidGasSimulation
   /// ticks).
   float m_fAllocLookahead = 2.0f * 2.0f / 60.0f;
 
+  /// GpuFluid.Debug.Bricks: GasFinalize writes the brick view (the gas without its heat, the brick edges as gas as hot as
+  /// the bucket that keeps the brick) into Scratch, which the volume then publishes instead of the scalars.
+  bool m_bBrickView = false;
+
   /// Closed-box mass correction (GpuFluid.Gas.MassCorrection, only for volumes with every face closed and the whole
   /// box allocated): GasForces scales the density so the advection does not change the total mass.
   bool m_bMassCorrection = false;
@@ -245,6 +249,9 @@ public:
 
   /// The current scalars, the atlas the VDB march reads.
   plGALTextureHandle GetScalarAtlas() const { return m_hScalar[0]; }
+
+  /// The brick view's atlas (plGpuFluidGasSimulation::m_bBrickView), valid after a frame that wrote it.
+  plGALTextureHandle GetBrickViewAtlas() const { return m_hScratch; }
 
   /// Phase Gas/Alloc, second pass: clears every brick assigned this frame (the new list) in every atlas and buffer, then
   /// fills the new bricks' aprons in the current scalars and velocity from their neighbours. bAllocationChanged:

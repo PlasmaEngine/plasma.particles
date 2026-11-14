@@ -58,12 +58,14 @@
 #define GPU_FLUID_DISPATCH_FOLD 32768
 #define GPU_FLUID_ARGS_WORDS 4 // uint3 groups + the active count
 
-// The dispatch arguments buffer holds three sets of GPU_FLUID_ARGS_WORDS: every active brick (one group each), every
-// active brick in GPU_FLUID_SLABS slabs (z = slabs), and the bricks assigned this frame (the new list).
+// The dispatch arguments buffer holds four sets of GPU_FLUID_ARGS_WORDS: every active brick (one group each), every
+// active brick in GPU_FLUID_SLABS slabs (z = slabs), the bricks assigned this frame (the new list), and the new list in
+// slabs.
 #define GPU_FLUID_ARGS_ACTIVE 0
 #define GPU_FLUID_ARGS_SLABS 4
 #define GPU_FLUID_ARGS_NEW 8
-#define GPU_FLUID_ARGS_TOTAL_WORDS 12
+#define GPU_FLUID_ARGS_NEW_SLABS 12
+#define GPU_FLUID_ARGS_TOTAL_WORDS 16
 
 // Sparse allocation (GasAlloc, GasFinalize; design plan section 3). Requests are one bit per virtual brick in each of
 // four priority buckets, bucket b's words at b * (words per bucket). Slots go to requests in bucket order, then virtual

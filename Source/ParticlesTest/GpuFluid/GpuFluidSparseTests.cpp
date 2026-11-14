@@ -161,12 +161,13 @@ plResult plGpuFluidGalleryApplication::SetupSparsePlumeScene(plUInt32 uiMaxBrick
 plResult plGpuFluidGalleryApplication::SetupCourtyardScene()
 {
   PL_LOCK(m_pWorld->GetWriteMarker());
-  SetupStage(0x47465061u, plVec3(Tune("SUNX", -0.55f), Tune("SUNY", -0.6f), Tune("SUNZ", 0.55f)), false);
+  // A low sun ahead and to the left of the camera, so the smoke is lit from behind and the walls cast long shadows.
+  SetupStage(0x47465061u, plVec3(Tune("SUNX", -0.6f), Tune("SUNY", 0.55f), Tune("SUNZ", 0.4f)), false);
 
-  // The yard's paving: a lighter square under the volume, with darker strips every 4 m for scale.
-  AddBox("Paving", plVec3(0.0f, 0.0f, 0.005f), plVec3(s_vCourtyardExtents.x, s_vCourtyardExtents.y, 0.01f), plColor(0.52f, 0.50f, 0.47f));
+  // The yard's paving: a darker square under the volume, with strips every 4 m for scale.
+  AddBox("Paving", plVec3(0.0f, 0.0f, 0.005f), plVec3(s_vCourtyardExtents.x, s_vCourtyardExtents.y, 0.01f), plColor(0.30f, 0.29f, 0.27f));
   for (plInt32 i = -7; i <= 7; ++i)
-    AddBox("Strip", plVec3(4.0f * i, 0.0f, 0.012f), plVec3(0.12f, s_vCourtyardExtents.y, 0.01f), plColor(0.36f, 0.35f, 0.33f));
+    AddBox("Strip", plVec3(4.0f * i, 0.0f, 0.012f), plVec3(0.15f, s_vCourtyardExtents.y, 0.01f), plColor(0.18f, 0.17f, 0.16f));
 
   plGameObjectDesc desc;
   desc.m_sName.Assign("Courtyard");
@@ -194,16 +195,16 @@ plResult plGpuFluidGalleryApplication::SetupCourtyardScene()
 
   // The travelling source: thick dark smoke, as from a burning cart.
   pGas->m_EmitterShape = plGpuFluidEmitterShape::Sphere;
-  pGas->m_fEmitterRadius = Tune("RADIUS", 0.8f);
+  pGas->m_fEmitterRadius = Tune("RADIUS", 1.0f);
   pGas->m_fEmitterSoftness = 0.4f;
   pGas->m_vEmitterOffset = CourtyardSource(0.0f) - plVec3(0.0f, 0.0f, 0.5f * s_vCourtyardExtents.z);
-  pGas->m_fEmissionRate = Tune("RATE", 6.0f);
+  pGas->m_fEmissionRate = Tune("RATE", 18.0f);
   pGas->m_vEmitterVelocity = plVec3(0.0f, 0.0f, Tune("VELOCITY", 2.5f));
   pGas->m_fEmitterNoise = 0.85f;
   pGas->m_fEmitterNoiseScale = 0.8f;
   pGas->m_fDensityMax = 4.0f;
-  SetSmokeLook(pGas, Tune("DENSITYSCALE", 3.0f));
-  pGas->m_Albedo = plColor(0.62f, 0.61f, 0.60f);
+  SetSmokeLook(pGas, Tune("DENSITYSCALE", 4.0f));
+  pGas->m_Albedo = plColor(0.55f, 0.54f, 0.53f);
   pGas->ResetClock();
 
   // The courtyard: a long north wall the wind pushes the smoke against, an arcade of pillars the source weaves
@@ -256,14 +257,15 @@ plResult plGpuFluidGalleryApplication::SetupGateScene()
   pGas->m_OpenFaces = plGpuFluidFaces::Default;
   pGas->m_fBuoyancy = 6.0f;
   pGas->m_fDensityWeight = 0.1f;
-  pGas->m_fCooling = 0.5f;
-  pGas->m_fDissipation = Tune("GATEDISSIPATION", 0.05f);
+  pGas->m_fCooling = Tune("GATECOOLING", 0.5f);
+  pGas->m_fDissipation = Tune("GATEDISSIPATION", 0.8f);
   pGas->m_fEdgeFade = 0.5f;
   pGas->m_fVorticity = 0.3f;
 
-  // Four plumes on a square, the volume's own source and three more.
+  // Two plumes on a diagonal (up to four on a square with PL_GPUFLUID_TUNE_GATESOURCES), sized so the pool holds about
+  // 60% of its bricks over the measured frames (Tier Timing logs the mean, min and max).
   const float fSpacing = Tune("GATESPACING", 4.0f);
-  const float fRadius = Tune("GATERADIUS", 0.5f);
+  const float fRadius = Tune("GATERADIUS", 0.32f);
   const float fFloor = -0.5f * s_vGateExtents.z + 0.7f;
   pGas->m_EmitterShape = plGpuFluidEmitterShape::Sphere;
   pGas->m_fEmitterRadius = fRadius;
@@ -274,8 +276,11 @@ plResult plGpuFluidGalleryApplication::SetupGateScene()
   pGas->m_fEmitterNoise = 0.8f;
   pGas->m_fEmitterNoiseScale = 0.3f;
   pGas->m_DebugExtraSources.Clear();
-  for (const plVec2 vAt : {plVec2(fSpacing, -fSpacing), plVec2(-fSpacing, fSpacing), plVec2(fSpacing, fSpacing)})
+  const plUInt32 uiSources = static_cast<plUInt32>(plMath::Clamp(Tune("GATESOURCES", 2.0f), 1.0f, 4.0f));
+  const plVec2 extraAt[] = {plVec2(fSpacing, fSpacing), plVec2(fSpacing, -fSpacing), plVec2(-fSpacing, fSpacing)};
+  for (plUInt32 i = 0; i + 1 < uiSources; ++i)
   {
+    const plVec2 vAt = extraAt[i];
     plGpuFluidGasVolumeComponent::ExtraSource& extra = pGas->m_DebugExtraSources.ExpandAndGetRef();
     extra.m_vOffset = plVec3(vAt.x, vAt.y, fFloor);
     extra.m_fRadius = fRadius;
@@ -333,7 +338,7 @@ plResult plGameEngineTestGpuFluidGallery::InitializeP2SubTest(plInt32 iIdentifie
       SetCVarForSubTest("GpuFluid.Debug.BrickStats", true);
       SetCVarForSubTest("GpuFluid.Debug.Bricks", false);
       PL_SUCCEED_OR_RETURN(m_pOwnApplication->SetupCourtyardScene());
-      m_pOwnApplication->SetCamera(plVec3(-30.0f, -44.0f, 24.0f), plVec3(-18.0f, 0.0f, 2.0f), 50.0f);
+      m_pOwnApplication->SetCamera(plVec3(-30.0f, -27.0f, 13.0f), plVec3(-20.0f, 2.0f, 2.5f), 60.0f);
       return PL_SUCCESS;
   }
 
@@ -665,10 +670,10 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunMovingEmitterVideo()
     if (plGpuFluidGasVolumeComponent* pGas = m_pOwnApplication->GetSmokeVolume())
       pGas->m_vEmitterOffset = CourtyardSource(t) - plVec3(0.0f, 0.0f, 0.5f * s_vCourtyardExtents.z);
 
-    // The camera follows the source from the south-west, high up, a little behind it.
+    // The camera follows the source from the south, up high and a little behind it, so the trail is seen.
     const plVec3 vSource = CourtyardSource(t);
-    const float fFollow = plMath::Clamp(vSource.x * 0.6f, -18.0f, 14.0f);
-    m_pOwnApplication->SetCamera(plVec3(fFollow - 10.0f, -46.0f, 24.0f), plVec3(fFollow + 2.0f, 0.0f, 2.0f), 52.0f);
+    const float fFollow = plMath::Clamp(vSource.x * 0.8f, -22.0f, 18.0f);
+    m_pOwnApplication->SetCamera(plVec3(fFollow - Tune("CAMBACK", 9.0f), Tune("CAMY", -27.0f), Tune("CAMZ", 13.0f)), plVec3(fFollow + 1.0f, 2.0f, 2.5f), Tune("FOV", 60.0f));
   }
 
   // The brick overlay for the middle of the clip.
@@ -687,7 +692,7 @@ plTestAppRun plGameEngineTestGpuFluidGallery::RunMovingEmitterVideo()
 
   const plInt32 iVideoFrame = m_iFrame - 1;
   if (iVideoFrame >= 0)
-    SaveVideoFrame("MovingEmitter", iVideoFrame, "P2 Moving Emitter: 64 x 48 m courtyard, 25 cm voxels, sparse bricks in the Medium pool of 1536; brick overlay 4.5 to 10 s");
+    SaveVideoFrame("MovingEmitter", iVideoFrame, "P2 Moving Emitter: 64 m courtyard, sparse bricks, Medium pool 1536; 4.5-10 s brick edges");
 
   if (iVideoFrame + 1 < s_iMovingFrames)
     return plTestAppRun::Continue;

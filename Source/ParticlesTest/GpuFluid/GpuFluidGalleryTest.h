@@ -62,7 +62,7 @@ public:
   plResult SetupCourtyardScene();
 
   /// The performance gate (Tier Timing "Gas Medium Sparse"): a sparse 16 x 16 x 16 m box at 6.25 cm (32 768 virtual
-  /// bricks), the Medium pool of 1536, four sources whose plumes keep about 60% of the pool allocated.
+  /// bricks), the Medium pool of 1536, two sources whose plumes keep about 60% of the pool allocated.
   plResult SetupGateScene();
 
   /// A plGpuFluidColliderComponent with a matching mesh (box or sphere), so the solid is seen.

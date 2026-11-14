@@ -149,6 +149,16 @@ namespace
     pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_NEW * sizeof(plUInt32)).IgnoreResult();
   }
 
+  /// The same, GPU_FLUID_SLABS groups per brick.
+  void DispatchPerNewBrickSlabs(const plRenderGraphContext& ctx, const plGpuFluidSparseGridGraph& grid, const plShaderResourceHandle& hShader, const plGpuFluidGasConstants& constants)
+  {
+    plRenderContext* pContext = ctx.GetRenderContext();
+    pContext->BindShader(hShader);
+    plGpuFluidSparseGrid::BindReadOnly(ctx, pContext->GetBindGroup(), grid);
+    pContext->SetPushConstants("plGpuFluidGasConstants", constants);
+    pContext->DispatchIndirect(ctx.ResolveBuffer(grid.m_hDispatchArgs), GPU_FLUID_ARGS_NEW_SLABS * sizeof(plUInt32)).IgnoreResult();
+  }
+
   /// One group per active brick of one brick colour (Pass.y 0 or 1), or of every brick (2).
   void DispatchPerBrickOfColour(const plRenderGraphContext& ctx, const plGpuFluidSparseGridGraph& grid, const plShaderResourceHandle& hShader, const plGpuFluidGasConstants& constants)
   {
@@ -665,7 +675,7 @@ void plGpuFluidGasSolver::AddClearPass(plRenderGraph& ref_graph, const plGpuFlui
       UavBarrier(pEncoder, hVelocityGAL);
       bindGroup.BindTexture("GpuFluidHaloTarget", hScalarGAL);
       bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocityGAL);
-      DispatchPerNewBrick(ctx, gridGraph, hHalo, halo);
+      DispatchPerNewBrickSlabs(ctx, gridGraph, hHalo, halo);
     });
 
   // The clear zeroes the new bricks' face codes and coefficients.
@@ -1008,7 +1018,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
             case HaloSL:
               bindGroup.BindTexture("GpuFluidHaloTarget", hScalarSLGAL);
               bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocitySLGAL);
-              DispatchPerBrick(ctx, gridGraph, hHalo, haloSL);
+              DispatchPerBrickSlabs(ctx, gridGraph, hHalo, haloSL);
               break;
             case MacCormack:
               // The semi-Lagrangian sides are read through read-only views (the pass holds them for writing); the
@@ -1026,7 +1036,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
             case HaloMC:
               bindGroup.BindTexture("GpuFluidHaloTarget", bMacCormack ? hScratchGAL : hSpareGAL);
               bindGroup.BindTexture("GpuFluidHaloTarget2", hSpareGAL);
-              DispatchPerBrick(ctx, gridGraph, hHalo, haloMC);
+              DispatchPerBrickSlabs(ctx, gridGraph, hHalo, haloMC);
               break;
           }
         }
@@ -1134,13 +1144,13 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
             case CurlHalo:
               bindGroup.BindTexture("GpuFluidHaloTarget", hCurlGAL);
               bindGroup.BindTexture("GpuFluidHaloTarget2", hCurlGAL);
-              DispatchPerBrick(ctx, gridGraph, hHalo, copyHalo);
+              DispatchPerBrickSlabs(ctx, gridGraph, hHalo, copyHalo);
               break;
             case Forces:
               // The curl through a read-only view as well.
               pEncoder->TextureBarrier(hCurlGAL, plGALResourceState::UnorderedAccessWrite, plGALResourceState::ComputeShaderRead);
               bindGroup.BindTexture("GpuFluidCurl", hCurlGAL);
-              DispatchPerBrick(ctx, gridGraph, hForces, forces);
+              DispatchPerBrickSlabs(ctx, gridGraph, hForces, forces);
               pEncoder->TextureBarrier(hCurlGAL, plGALResourceState::ComputeShaderRead, plGALResourceState::UnorderedAccessWrite);
               break;
             case Solids:
@@ -1149,7 +1159,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
             case VelocityHalo:
               bindGroup.BindTexture("GpuFluidHaloTarget", hVelocityGAL);
               bindGroup.BindTexture("GpuFluidHaloTarget2", hVelocityGAL);
-              DispatchPerBrick(ctx, gridGraph, hHalo, velocityHalo);
+              DispatchPerBrickSlabs(ctx, gridGraph, hHalo, velocityHalo);
               break;
           }
         }
@@ -1226,7 +1236,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         {
           DispatchPerBrick(ctx, gridGraph, kernels.m_hProject, base);
           UavBarrier(pEncoder, ctx.ResolveTexture(hVelocityNext));
-          DispatchPerBrick(ctx, gridGraph, kernels.m_hHalo, keepHalo);
+          DispatchPerBrickSlabs(ctx, gridGraph, kernels.m_hHalo, keepHalo);
         }
       };
 
@@ -1269,9 +1279,12 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
 
     plGpuFluidGasConstants finalize = MakeConstants(grid, sim, sim.m_fTime + sim.m_uiTicks * sim.m_fTickSeconds);
     finalize.GpuFluidGasParams0 = plVec4(sim.m_fAllocThreshold, sim.m_fMeanFloor, sim.m_fAllocLookahead, static_cast<float>(grid.GetRequestWords()));
+    finalize.GpuFluidGasPass.w = sim.m_bBrickView ? 1u : 0u;
+    const plRenderGraphTextureHandle hBrickView = res.m_hScratch;
 
     auto pass = ref_graph.AddComputePass("Gas/Finalize");
     plGpuFluidSparseGrid::DeclareReadOnly(pass, gridGraph);
+    pass.WriteTexture(hBrickView);
     pass.WriteTexture(hScalar0);
     pass.WriteTexture(hVelocityCur);
     pass.WriteTexture(gridGraph.m_hIndirection);
@@ -1290,6 +1303,7 @@ void plGpuFluidGasSolver::AddFramePasses(plRenderGraph& ref_graph, const plGpuFl
         bindGroup.BindBuffer("GpuFluidFaceCodes", ctx.ResolveBuffer(hFaceCodes));
         bindGroup.BindBuffer("GpuFluidRequests", ctx.ResolveBuffer(gridGraph.m_hRequests));
         bindGroup.BindBuffer("GpuFluidBrickMeta", ctx.ResolveBuffer(gridGraph.m_hBrickMeta));
+        bindGroup.BindTexture("GpuFluidBrickView", ctx.ResolveTexture(hBrickView));
         DispatchPerBrick(ctx, gridGraph, hShader, finalize);
       });
   }

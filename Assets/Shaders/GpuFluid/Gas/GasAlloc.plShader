@@ -379,6 +379,7 @@ void main(uint3 dispatchThreadId : SV_DispatchThreadID)
     WriteArgs(GPU_FLUID_ARGS_ACTIVE, active, 1);
     WriteArgs(GPU_FLUID_ARGS_SLABS, active, GPU_FLUID_SLABS);
     WriteArgs(GPU_FLUID_ARGS_NEW, assigned, 1);
+    WriteArgs(GPU_FLUID_ARGS_NEW_SLABS, assigned, GPU_FLUID_SLABS);
     WriteColourArgs(0, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR0]);
     WriteColourArgs(GPU_FLUID_ARGS_WORDS, GpuFluidCountersOutput[GPU_FLUID_COUNTER_COLOUR1]);
 

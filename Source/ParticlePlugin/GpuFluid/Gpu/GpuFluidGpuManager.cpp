@@ -50,6 +50,7 @@ struct plGpuFluidGpuManager::GasVolume
   float m_fVoxelSize = 0.0625f;
   bool m_bGridDebugValid = false;
   plGpuFluidGridDebug m_GridDebug;
+  bool m_bPublishBrickView = false; ///< the last frame's Finalize wrote the brick view, which is published instead
 };
 
 struct plGpuFluidGpuManager::LiquidVolume
@@ -238,7 +239,8 @@ bool plGpuFluidGpuManager::GetGasPublish(plGpuFluidVolumeId id, plGpuFluidGasPub
   if (!volume.m_bPublishable)
     return false;
 
-  out_publish.m_hAtlas = volume.m_Solver.GetScalarAtlas();
+  out_publish.m_bBrickView = volume.m_bPublishBrickView;
+  out_publish.m_hAtlas = volume.m_bPublishBrickView ? volume.m_Solver.GetBrickViewAtlas() : volume.m_Solver.GetScalarAtlas();
   out_publish.m_hIndirection = volume.m_Grid.GetIndirection();
   out_publish.m_vBrickGrid = volume.m_Settings.m_vBrickGrid;
   out_publish.m_vAtlasBricks = volume.m_Grid.GetAtlasBricks();
@@ -788,6 +790,8 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
       volume.m_Solver.AddFramePasses(graph, volume.m_Grid, gridGraph, hStats, simulation);
       if (input.m_bHashState && uiTicks > 0)
         volume.m_Solver.AddHashPasses(graph, volume.m_Grid, gridGraph, uiFrame);
+      if (uiTicks > 0)
+        volume.m_bPublishBrickView = simulation.m_bBrickView;
     }
 
     // Stats to the CPU, through a ring of three so nothing waits. A copy is not allowed inside a compute pass.
@@ -814,6 +818,8 @@ void plGpuFluidGpuManager::BeginRender(plUInt64 uiFrame)
 
       auto pass = graph.AddComputePass("GpuFluid Publish");
       pass.ReadTexture(hAtlas, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::ComputeShader);
+      if (volume.m_bPublishBrickView)
+        pass.ReadTexture(graph.ImportTexture(volume.m_Solver.GetBrickViewAtlas()), {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::ComputeShader);
       pass.ReadTexture(hIndirection, {}, plGALResourceState::ShaderRead, plGALShaderStageFlags::ComputeShader);
       pass.HasSideEffects();
       pass.SetExecuteCallback([](const plRenderGraphContext&) {});

@@ -38,8 +38,6 @@ ALL
 RWTexture3D<float4> GpuFluidHaloTarget;
 RWTexture3D<float4> GpuFluidHaloTarget2;
 
-groupshared uint gs_uiNeighbors[GPU_FLUID_NEIGHBOR_COUNT];
-
 /// Stored coordinate (0..9) of apron texel i (0..487): the z faces (2 x 100), then the y faces between them (2 x 80),
 /// then the x faces between those (2 x 64).
 int3 ApronTexel(uint i)
@@ -131,7 +129,9 @@ bool HaloValue(RWTexture3D<float4> target, uint mode, HaloSource source, float4 
   return true;
 }
 
-[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE)]
+// GPU_FLUID_SLABS groups of 128 threads per brick (the slab dispatch arguments): thread t of the brick = slab * 128 +
+// its index; no groupshared memory, each thread reads its neighbour's entry itself.
+[numthreads(GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE, GPU_FLUID_BRICK_SIZE / GPU_FLUID_SLABS)]
 void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 {
   const uint4 pass = GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass);
@@ -140,21 +140,17 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   if (slot == GPU_FLUID_INVALID_SLOT)
     return;
 
+  // One thread per apron texel (488 of the brick's 512).
+  const uint apronIndex = groupId.z * (GPU_FLUID_BRICK_CELLS / GPU_FLUID_SLABS) + groupIndex;
+  if (apronIndex >= GPU_FLUID_BRICK_TEXELS - GPU_FLUID_BRICK_CELLS)
+    return;
+
   const float4 ambient = float4(GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasParams0).xyz, 0.0);
   const int3 brick = int3(GpuFluidUnpackBrick(GpuFluidBrickCoords[slot]));
   const int3 gridVoxels = int3(GpuFluidGrid() * GPU_FLUID_BRICK_SIZE);
   const int3 base = GpuFluidSlotBase(slot);
 
-  // The brick's neighbours once for the group.
-  if (groupIndex < GPU_FLUID_NEIGHBOR_COUNT)
-    gs_uiNeighbors[groupIndex] = GpuFluidNeighbors[slot * GPU_FLUID_NEIGHBOR_COUNT + groupIndex];
-  GroupMemoryBarrierWithGroupSync();
-
-  // One thread per apron texel (488 of the 512).
-  if (groupIndex >= GPU_FLUID_BRICK_TEXELS - GPU_FLUID_BRICK_CELLS)
-    return;
-
-  const int3 stored = ApronTexel(groupIndex);
+  const int3 stored = ApronTexel(apronIndex);
   const int3 local = stored - GPU_FLUID_BRICK_APRON;
 
   HaloSource source;
@@ -164,7 +160,7 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
 
   const int3 sourceBrick = clampedCell / GPU_FLUID_BRICK_SIZE;
   const int3 d = sourceBrick - brick;
-  source.m_uiSlot = all(d == 0) ? slot : gs_uiNeighbors[GpuFluidNeighborIndex(d)];
+  source.m_uiSlot = all(d == 0) ? slot : GpuFluidNeighbor(slot, d);
   source.m_iLocal = clampedCell - sourceBrick * GPU_FLUID_BRICK_SIZE;
 
   float4 value;

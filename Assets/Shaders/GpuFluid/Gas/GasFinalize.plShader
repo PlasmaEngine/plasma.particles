@@ -29,6 +29,11 @@ ALL
 //   neighbour within the lookahead (bucket 2; at most one brick away). The neighbour mask and the alive flag also go to
 //   the slot's meta (N1 checks the allocation against them).
 //
+// - Brick view (Pass.w bit 0, GpuFluid.Debug.Bricks): a copy of the scalars into GpuFluidBrickView (the free Scratch atlas)
+//   with the temperature cleared, and the brick's twelve edges drawn in as gas whose temperature says which bucket keeps
+//   the brick (source 1.0, content 0.6, flux 0.4, proximity 0.22, idle 0.1); the volume publishes this copy with a
+//   blackbody emission, so the march draws the allocation in the same picture as the gas.
+//
 // Params: 0 x allocation threshold, y brick mean floor, z lookahead (s), w request words per bucket
 
 RWTexture3D<float4> GpuFluidScalarTarget;
@@ -38,22 +43,22 @@ RWByteAddressBuffer GpuFluidStats;
 RWStructuredBuffer<uint> GpuFluidFaceCodes; // only read here
 RWByteAddressBuffer GpuFluidRequests;
 RWStructuredBuffer<uint> GpuFluidBrickMeta;
+RWTexture3D<float4> GpuFluidBrickView;
 
 groupshared uint gs_uiContent;
 groupshared uint gs_uiProximityMask;
 groupshared uint gs_uiFluxMask;
 
-/// The 27-bit neighbour mask of the offsets allowed per axis (bit i of each mask: offset i - 1).
+/// The 27-bit neighbour mask of the offsets allowed per axis (bit i of each axis' 3 bits: offset i - 1), neighbour n =
+/// x + 3 y + 9 z. Built as the product of three per-axis masks: x's bits repeat every 3 positions, y's every 9 in runs
+/// of 3, z's in runs of 9.
 uint NeighbourMask(uint3 allowed)
 {
-  uint mask = 0;
-  [unroll] for (uint n = 0; n < GPU_FLUID_NEIGHBOR_COUNT; ++n)
-  {
-    const uint3 o = uint3(n % 3, (n / 3) % 3, n / 9);
-    if ((allowed.x & (1u << o.x)) != 0 && (allowed.y & (1u << o.y)) != 0 && (allowed.z & (1u << o.z)) != 0)
-      mask |= 1u << n;
-  }
-  return mask & ~(1u << GPU_FLUID_NEIGHBOR_SELF);
+  const uint maskX = allowed.x * 0x1249249u;
+  const uint runsY = ((allowed.y & 1u) != 0 ? 0x7u : 0u) | ((allowed.y & 2u) != 0 ? 0x38u : 0u) | ((allowed.y & 4u) != 0 ? 0x1C0u : 0u);
+  const uint maskY = runsY * 0x40201u;
+  const uint maskZ = ((allowed.z & 1u) != 0 ? 0x1FFu : 0u) | ((allowed.z & 2u) != 0 ? 0x3FE00u : 0u) | ((allowed.z & 4u) != 0 ? 0x7FC0000u : 0u);
+  return maskX & maskY & maskZ & ~(1u << GPU_FLUID_NEIGHBOR_SELF);
 }
 
 void Request(uint bucket, uint brickLinear, uint words)
@@ -125,6 +130,18 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
       if (bInterior)
         InterlockedAdd(gs_uiNaN, 1u);
     }
+
+    // The brick view: the gas without its heat, and the brick's edges as gas as hot as its bucket.
+    if ((GET_PUSH_CONSTANT(plGpuFluidGasConstants, GpuFluidGasPass).w & 1u) != 0)
+    {
+      const uint buckets = GpuFluidBrickMeta[slot * 4 + GPU_FLUID_META_BUCKETS];
+      const float heat = (buckets & 1u) != 0 ? 1.0 : ((buckets & 2u) != 0 ? 0.6 : ((buckets & 4u) != 0 ? 0.4 : ((buckets & 8u) != 0 ? 0.22 : 0.1)));
+      const int3 local = stored - GPU_FLUID_BRICK_APRON;
+      const int3 onEdge = int3(local == 0) | int3(local == GPU_FLUID_BRICK_SIZE - 1);
+      const bool bEdge = bInterior && (onEdge.x + onEdge.y + onEdge.z) >= 2;
+      const float density = GpuFluidScalarTarget[base + stored].r;
+      GpuFluidBrickView[base + stored] = bEdge ? float4(max(density, 0.3), heat, 0.0, 0.0) : float4(density, 0.0, 0.0, 0.0);
+    }
   }
   GroupMemoryBarrierWithGroupSync();
 
@@ -166,18 +183,24 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID, ui
     // Requests: content near a face (proximity), and where its velocity takes it within the lookahead (flux).
     if (max(max(density, s.g), s.b) > rules.x)
     {
-      InterlockedOr(gs_uiContent, 1u);
+      // Most cells add nothing new to the masks; the unsynchronised reads only skip atomics that would change nothing.
+      if (gs_uiContent == 0)
+        InterlockedOr(gs_uiContent, 1u);
 
       const uint3 lo = uint3(local < GPU_FLUID_ALLOC_PROXIMITY);
       const uint3 hi = uint3(local >= GPU_FLUID_BRICK_SIZE - GPU_FLUID_ALLOC_PROXIMITY);
       const uint3 proximity = uint3(2 | lo.x | (hi.x << 2), 2 | lo.y | (hi.y << 2), 2 | lo.z | (hi.z << 2));
-      InterlockedOr(gs_uiProximityMask, NeighbourMask(proximity));
+      const uint proximityMask = NeighbourMask(proximity);
+      if ((proximityMask & ~gs_uiProximityMask) != 0)
+        InterlockedOr(gs_uiProximityMask, proximityMask);
 
       const float3 velocity = 0.5 * (minus + float3(plusX, plusY, plusZ));
       const float3 target = float3(local) + 0.5 + velocity * (rules.z * invDx);
       const int3 reach = GpuFluidIsFinite(float4(target, 0.0)) ? clamp(int3(floor(target / GPU_FLUID_BRICK_SIZE)), -1, 1) : int3(0, 0, 0);
       const uint3 flux = uint3(2u | (1u << uint(reach.x + 1)), 2u | (1u << uint(reach.y + 1)), 2u | (1u << uint(reach.z + 1)));
-      InterlockedOr(gs_uiFluxMask, NeighbourMask(flux));
+      const uint fluxMask = NeighbourMask(flux);
+      if ((fluxMask & ~gs_uiFluxMask) != 0)
+        InterlockedOr(gs_uiFluxMask, fluxMask);
     }
   }
   GroupMemoryBarrierWithGroupSync();
