@@ -23,7 +23,7 @@
 
 // Above the two type bits a liquid cell of the fine level holds, per neighbour n (0..5: -x, +x, -y, +y, -z, +z), five
 // bits of the ghost-fluid fraction theta of the free surface towards that neighbour, when it is air (LiquidClassify,
-// from the level set: theta = phi_i / (phi_i - phi_j), clamped below by the classify dispatch). Code 1 <= q <= 30:
+// from the level set: theta = (phi_i - tau) / (phi_i - phi_j), clamped below by the classify dispatch). Code 1 <= q <= 30:
 // theta = q / 30; code 31: the constant theta of the push constants (no level set, or an open domain side).
 #define GPU_FLUID_LIQUID_THETA_SHIFT 2u
 #define GPU_FLUID_LIQUID_THETA_BITS 5u

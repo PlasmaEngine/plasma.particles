@@ -16,7 +16,7 @@ ALL
 // particles; air otherwise.
 //
 // A liquid cell's type word also holds the free surface's theta towards each air neighbour (GpuFluidLiquidConstants.h):
-// theta = phi_i / (phi_i - phi_j) from the level set, at least the dispatch's minimum, which is also what a cell with
+// theta = (phi_i - tau) / (phi_i - phi_j) from the level set, at least the dispatch's minimum, which is also what a cell with
 // particles but its centre outside the surface (phi_i >= 0: spray) gets; the constant code without the level set and
 // towards an open domain side.
 //
