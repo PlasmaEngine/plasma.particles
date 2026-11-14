@@ -66,13 +66,21 @@ struct plGpuFluidLiquidFrameInput
   float m_fSubstepDownMargin = 0.8f;
 
   /// Pressure solve: MGPCG (conjugate gradients, one multigrid V-cycle as the preconditioner per iteration) or, when
-  /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep.
+  /// false, plain V-cycles. Either way m_uiPressureCycles V-cycles per substep, a fixed count (no readback). Measured
+  /// in P8 (relative residual max|r| / max|rhs| of a tick's last substep, median / 95th percentile / max over the ticks):
+  /// - Medium room (128 x 96 x 64, 393K particles): 3 iterations 9.7e-4 / 2.8e-3 / 6.1e-3, 4: 1.9e-4 / 6.9e-4 /
+  ///   1.8e-3, 6: 9e-6 / 2.9e-5 / 5.9e-5;
+  /// - dam break (2 cm, 230K particles): 3: 2.1e-3 / 9.3e-3 / 4.5e-2, 4: 3.8e-4 / 1.9e-3 / 1.3e-2, 6: 2e-5 / 7.7e-5 /
+  ///   5.3e-4.
+  /// The volume component takes the tier's count (Medium 4) unless PressureCycles is set.
   bool m_bPcg = true;
-  plUInt32 m_uiPressureCycles = 8;
+  plUInt32 m_uiPressureCycles = 4;
 
-  plUInt32 m_uiPreSmooth = 2;        ///< red-black Gauss-Seidel sweeps before restriction
+  plUInt32 m_uiPreSmooth = 2;        ///< red-black Gauss-Seidel sweeps before restriction (1: the residual is 25x worse)
   plUInt32 m_uiPostSmooth = 2;       ///< and after prolongation
-  plUInt32 m_uiCoarsestSweeps = 48;  ///< sweeps on the coarsest level, in one dispatch
+  /// Sweeps on the coarsest level, in one dispatch of one group. 48 (P7) gave the same residuals at the Medium room
+  /// as 16, which saves about 0.5 ms there.
+  plUInt32 m_uiCoarsestSweeps = 16;
   /// Coarse right-hand side = this * sum of the 8 fine residuals. 0.5 (four times the mean) matches the unit-spacing
   /// stencil rediscretised on the coarse level.
   float m_fCoarseScale = 0.5f;
@@ -138,6 +146,10 @@ struct plGpuFluidLiquidFrameInput
   /// Surface mesh (Liquid/Surface, once per frame that steps): the level set again from the final particles, blended
   /// with the last frame's surface carried along the flow, smoothed, then surface nets.
   bool m_bSurface = true;
+  /// The surface sorts the final particles again and computes its own level set from them (P7). False: it takes the
+  /// last substep's level set, computed from the particles at that substep's start, so the mesh lags the particles by
+  /// one substep (1/90 s at 3 substeps) and the frame saves a sort and a level-set gather (about 0.7 ms at Medium).
+  bool m_bSurfaceOwnLevelSet = false;
   float m_fSurfaceBlend = 0.3f;          ///< share of the advected last frame (0: no temporal blend)
   plUInt32 m_uiSurfaceSmoothSteps = 4;   ///< clamped Laplacian steps
   float m_fSurfaceSmoothGain = 0.5f;     ///< k of a step
@@ -146,6 +158,11 @@ struct plGpuFluidLiquidFrameInput
   plHybridArray<plGpuFluidLiquidFill, 4> m_Fills;
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_Shapes;
   plHybridArray<plGpuFluidLiquidSource, 4> m_Sources; ///< at most s_uiMaxSources are used
+
+  /// Splits Liquid/P2G (level set apart: "P2G LevelSet") and Liquid/Solve ("Solve Setup": classify, forces, right-hand
+  /// side; "Solve": the pressure; "Solve Project": residual, projection, extrapolation) into passes of their own, so
+  /// each is timed. Costs a few barriers more.
+  bool m_bProfileKernels = false;
 
   /// Front histogram along +x of particles below this height (domain metres), in bins of this size. 0 bins: off.
   float m_fFrontHeight = 0.0f;

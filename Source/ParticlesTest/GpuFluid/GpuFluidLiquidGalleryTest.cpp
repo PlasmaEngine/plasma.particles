@@ -139,8 +139,10 @@ namespace
   constexpr plUInt32 s_uiPourFillTicks = 15;
   constexpr float s_fPourFillTolerance = 0.05f;
 
-  const char* s_szPhases[] = {"GpuFluid Liquid/Begin", "GpuFluid Liquid/Seed", "GpuFluid Liquid/Source", "GpuFluid Liquid/Sort", "GpuFluid Liquid/P2G", "GpuFluid Liquid/Solve",
-    "GpuFluid Liquid/G2P", "GpuFluid Liquid/Render", "GpuFluid Liquid/Surface Sort", "GpuFluid Liquid/Surface", "GpuFluid Liquid/Readback", "GpuFluid Liquid Copy Scene Color",
+  // "P2G LevelSet", "Solve Setup" and "Solve Project" are passes of their own only with PL_GPUFLUID_LIQ_PROFILE=1
+  // (m_bProfileKernels); otherwise they are part of P2G and Solve.
+  const char* s_szPhases[] = {"GpuFluid Liquid/Begin", "GpuFluid Liquid/Seed", "GpuFluid Liquid/Source", "GpuFluid Liquid/Sort", "GpuFluid Liquid/P2G", "GpuFluid Liquid/P2G LevelSet",
+    "GpuFluid Liquid/Solve Setup", "GpuFluid Liquid/Solve", "GpuFluid Liquid/Solve Project", "GpuFluid Liquid/G2P", "GpuFluid Liquid/Render", "GpuFluid Liquid/Surface Sort", "GpuFluid Liquid/Surface", "GpuFluid Liquid/Readback", "GpuFluid Liquid Copy Scene Color",
     "GpuFluid Liquid Copy Depth", "GpuFluid Liquid Back Faces", "GpuFluid Liquid Surface"};
 
   // Phases not summed into the solver total: Seed keeps its first-tick value; the last four draw the surface in the view.
@@ -166,6 +168,11 @@ namespace
   void ApplyTuningOverrides(plGpuFluidLiquidVolumeComponent* pLiquid)
   {
     pLiquid->m_uiPressureCycles = static_cast<plUInt32>(TuningFloat("CYCLES", static_cast<float>(pLiquid->m_uiPressureCycles)));
+    pLiquid->m_Tuning.m_bSurfaceOwnLevelSet = TuningFloat("SURFACE_OWN_LEVEL_SET", pLiquid->m_Tuning.m_bSurfaceOwnLevelSet ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_bProfileKernels =TuningFloat("PROFILE", pLiquid->m_Tuning.m_bProfileKernels ? 1.0f : 0.0f) != 0.0f;
+    pLiquid->m_Tuning.m_uiPreSmooth = static_cast<plUInt32>(TuningFloat("PRE_SMOOTH", static_cast<float>(pLiquid->m_Tuning.m_uiPreSmooth)));
+    pLiquid->m_Tuning.m_uiPostSmooth = static_cast<plUInt32>(TuningFloat("POST_SMOOTH", static_cast<float>(pLiquid->m_Tuning.m_uiPostSmooth)));
+    pLiquid->m_Tuning.m_uiCoarsestSweeps = static_cast<plUInt32>(TuningFloat("COARSEST_SWEEPS", static_cast<float>(pLiquid->m_Tuning.m_uiCoarsestSweeps)));
     pLiquid->m_Tuning.m_bPcg = TuningFloat("PCG", pLiquid->m_Tuning.m_bPcg ? 1.0f : 0.0f) != 0.0f;
     pLiquid->m_Tuning.m_fVolumeGain = TuningFloat("VOLUME_GAIN", pLiquid->m_Tuning.m_fVolumeGain);
     pLiquid->m_Tuning.m_fDensityGain = TuningFloat("DENSITY_GAIN", pLiquid->m_Tuning.m_fDensityGain);
@@ -280,8 +287,11 @@ plResult plGameEngineTestGpuFluidLiquidGallery::InitializeSubTest(plInt32 iIdent
   m_LastStats = plGpuFluidLiquidStats();
   m_bPourStopped = false;
 
-  // Per-phase GPU times are exported as stats while this is on.
+  // Per-phase GPU times are exported as stats while this is on. A stat keeps its last value when its pass stops
+  // running, so the earlier sub-tests' values are removed first.
   SetCVarBool(s_szGpuStatsCVar, true);
+  for (const char* szPhase : s_szPhases)
+    plStats::RemoveStat(plStringBuilder("Renderer/GPU/", szPhase, "[ms]"));
 
   switch (iIdentifier)
   {
@@ -469,7 +479,8 @@ plResult plGameEngineTestGpuFluidLiquidGallery::SetupPour()
   pLiquid->m_uiParticlesPerCell = 4;
   pLiquid->m_uiMaxParticles = 320 * 1024;
   pLiquid->m_uiMaxSubsteps = 14;
-  pLiquid->m_uiPressureCycles = 12;
+  // 12 reached 1.1e-3 on the tick the stream's tail lands once the nozzle stopped (N2 asks for 1e-3 on every tick).
+  pLiquid->m_uiPressureCycles = 16;
   pLiquid->m_fFlipBlend = 0.1f;
   pLiquid->m_fDebugTopSpeed = 3.0f;
   PL_TEST_BOOL((pLiquid->GetDomainSize() - vDomain).IsZero(1e-5f));
@@ -729,7 +740,8 @@ void plGameEngineTestGpuFluidLiquidGallery::ReportTimings(plStringBuilder& ref_s
   const double fSubsteps = static_cast<double>(m_uiTimedSubsteps) / fFrames;
   const double fBricks = static_cast<double>(m_uiTimedActiveBricks) / fFrames;
   auto Mean = [&](const char* szPhase) { return m_PhaseMs.GetValueOrDefault(szPhase, 0.0) / fFrames; };
-  const double fSubstepMs = Mean("GpuFluid Liquid/Sort") + Mean("GpuFluid Liquid/P2G") + Mean("GpuFluid Liquid/Solve") + Mean("GpuFluid Liquid/G2P");
+  const double fSubstepMs = Mean("GpuFluid Liquid/Sort") + Mean("GpuFluid Liquid/P2G") + Mean("GpuFluid Liquid/P2G LevelSet") + Mean("GpuFluid Liquid/Solve Setup") +
+                            Mean("GpuFluid Liquid/Solve") + Mean("GpuFluid Liquid/Solve Project") + Mean("GpuFluid Liquid/G2P");
   const double fSurfaceMs = Mean("GpuFluid Liquid/Surface Sort") + Mean("GpuFluid Liquid/Surface");
   const double fNsPerParticleSubstep = m_uiTimedParticles > 0 && fSubsteps > 0.0 ? fSubstepMs * 1.0e6 / (static_cast<double>(m_uiTimedParticles) * fSubsteps) : 0.0;
   const double fUsPerBrickSubstep = fBricks > 0.0 && fSubsteps > 0.0 ? Mean("GpuFluid Liquid/Solve") * 1.0e3 / (fBricks * fSubsteps) : 0.0;

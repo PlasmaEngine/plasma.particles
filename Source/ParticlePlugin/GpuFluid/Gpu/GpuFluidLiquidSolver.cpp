@@ -823,6 +823,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   const plVec4 vDensityParams(fDensityDeadZone, input.m_bDensityTwoSided ? 1.0f : 0.0f, plMath::Clamp(input.m_fDensityMaxError, 0.0f, 1.0f), 0.0f);
   const plUInt32 uiClassifyFlags = bLevelSetTheta ? 1u : 0u;
   const plUInt32 uiLiquidMinCount = plMath::Clamp<plUInt32>(input.m_uiLiquidMinCount, 1, 64);
+  const bool bProfileKernels = input.m_bProfileKernels;
   const plGALBufferHandle hPhiRaw = m_hPhiRaw;
   const plGALBufferHandle hPhiTmp = m_hPhiTmp;
   const plUInt32 uiLevelSetSmoothPairs = (plMath::Min<plUInt32>(input.m_uiLevelSetSmoothSteps, 8) + 1) / 2;
@@ -844,9 +845,11 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     // Liquid/Sort
     AddSortPass(src, dst, c, "GpuFluid Liquid/Sort");
 
-    // Liquid/P2G
+    // Liquid/P2G. With m_bProfileKernels its parts are passes of their own (stage 1: gather and extrapolation, 2: level
+    // set), so each is timed.
+    auto AddP2GPass = [&](const char* szName, plUInt32 uiStages)
     {
-      auto pass = ref_graph.AddComputePass("GpuFluid Liquid/P2G");
+      auto pass = ref_graph.AddComputePass(szName);
       pass.ReadBuffer(G(hBrickArgs), indirect);
       for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hCellStart, hPos, hVel, hAff, hShapes})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
@@ -856,25 +859,28 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
         {
           Recorder rec(ctx);
-          rec.RunIndirect(pShaders->m_hP2G, c, hBrickArgs,
-            {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart),
-              R("GpuFluidLiqPositions", hPos), R("GpuFluidLiqVelocities", hVel), R("GpuFluidLiqAffine", hAff), W("GpuFluidLiqVelOut", hVelT),
-              W("GpuFluidLiqValidOut", hValid0), W("GpuFluidLiqCounters", hCounters)});
-
-          // Three layers into the air: T -> G -> T -> G.
-          const plGALBufferHandle from[3] = {hVelT, hVelG, hVelT};
-          const plGALBufferHandle to[3] = {hVelG, hVelT, hVelG};
-          const plGALBufferHandle validFrom[3] = {hValid0, hValid1, hValid0};
-          const plGALBufferHandle validTo[3] = {hValid1, hValid0, hValid1};
-          for (plUInt32 i = 0; i < 3; ++i)
+          if ((uiStages & 1u) != 0)
           {
-            rec.RunIndirect(pShaders->m_hExtrapolate, c, hBrickArgs,
-              {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), W("GpuFluidLiqVelIn", from[i]), W("GpuFluidLiqValidIn", validFrom[i]),
-                W("GpuFluidLiqVelOut", to[i]), W("GpuFluidLiqValidOut", validTo[i])});
+            rec.RunIndirect(pShaders->m_hP2G, c, hBrickArgs,
+              {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart),
+                R("GpuFluidLiqPositions", hPos), R("GpuFluidLiqVelocities", hVel), R("GpuFluidLiqAffine", hAff), W("GpuFluidLiqVelOut", hVelT),
+                W("GpuFluidLiqValidOut", hValid0), W("GpuFluidLiqCounters", hCounters)});
+
+            // Three layers into the air: T -> G -> T -> G.
+            const plGALBufferHandle from[3] = {hVelT, hVelG, hVelT};
+            const plGALBufferHandle to[3] = {hVelG, hVelT, hVelG};
+            const plGALBufferHandle validFrom[3] = {hValid0, hValid1, hValid0};
+            const plGALBufferHandle validTo[3] = {hValid1, hValid0, hValid1};
+            for (plUInt32 i = 0; i < 3; ++i)
+            {
+              rec.RunIndirect(pShaders->m_hExtrapolate, c, hBrickArgs,
+                {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), W("GpuFluidLiqVelIn", from[i]), W("GpuFluidLiqValidIn", validFrom[i]),
+                  W("GpuFluidLiqVelOut", to[i]), W("GpuFluidLiqValidOut", validTo[i])});
+            }
           }
 
           // The level set the classification reads.
-          if (bLevelSet)
+          if (bLevelSet && (uiStages & 2u) != 0)
           {
             plGpuFluidLiquidConstants lc = c;
             lc.GpuFluidLiqPassF = vLevelSetParams;
@@ -894,6 +900,15 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             }
           }
         });
+    };
+    if (bProfileKernels)
+    {
+      AddP2GPass("GpuFluid Liquid/P2G", 1u);
+      AddP2GPass("GpuFluid Liquid/P2G LevelSet", 2u);
+    }
+    else
+    {
+      AddP2GPass("GpuFluid Liquid/P2G", 3u);
     }
 
     // Liquid/Solve
@@ -919,7 +934,11 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       const bool bPcg = input.m_bPcg && uiLevels > 1;
       const plGALBufferHandle hPcgR = m_hPcgR, hPcgZ = m_hPcgZ, hPcgP = m_hPcgP, hPcgQ = m_hPcgQ, hPcgPartials = m_hPcgPartials, hPcgScalars = m_hPcgScalars;
 
-      auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Solve");
+      // With m_bProfileKernels the stages are passes of their own: 1 classify, forces, right-hand side; 2 the pressure
+      // solve; 4 residual, projection, extrapolation.
+      auto AddSolvePass = [&](const char* szName, plUInt32 uiStages)
+      {
+      auto pass = ref_graph.AddComputePass(szName);
       pass.ReadBuffer(G(hBrickArgs), indirect);
       for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hCellStart, hPos, hShapes, hPhiRaw})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
@@ -939,21 +958,24 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
           const Bind brickList = R("GpuFluidLiqBrickList", hBrickList);
           const Bind brickActive = R("GpuFluidLiqBrickActive", hBrickActive);
 
-          plGpuFluidLiquidConstants classifyConstants = c;
-          classifyConstants.GpuFluidLiqPass = plVec4U32(uiClassifyFlags, uiLiquidMinCount, 0, 0);
-          classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, fLiquidPhi, fSprayPhi, 0.0f);
-          rec.RunIndirect(pShaders->m_hClassify, classifyConstants, hBrickArgs,
-            {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqPhi", hPhiRaw), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqCellType", hCellType),
-              W("GpuFluidLiqCounters", hCounters)});
+          if ((uiStages & 1u) != 0)
+          {
+            plGpuFluidLiquidConstants classifyConstants = c;
+            classifyConstants.GpuFluidLiqPass = plVec4U32(uiClassifyFlags, uiLiquidMinCount, 0, 0);
+            classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, fLiquidPhi, fSprayPhi, 0.0f);
+            rec.RunIndirect(pShaders->m_hClassify, classifyConstants, hBrickArgs,
+              {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqPhi", hPhiRaw), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqCellType", hCellType),
+                W("GpuFluidLiqCounters", hCounters)});
 
-          rec.RunIndirect(pShaders->m_hForces, c, hBrickArgs,
-            {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqVelStar", hVelS)});
+            rec.RunIndirect(pShaders->m_hForces, c, hBrickArgs,
+              {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqVelStar", hVelS)});
 
-          plGpuFluidLiquidConstants rhsConstants = c;
-          rhsConstants.GpuFluidLiqPassF = vDensityParams;
-          rec.RunIndirect(pShaders->m_hRhs, rhsConstants, hBrickArgs,
-            {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart), R("GpuFluidLiqPositions", hPos),
-              W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqPressure", hPressure), W("GpuFluidLiqRhs", hRhs), W("GpuFluidLiqCounters", hCounters)});
+            plGpuFluidLiquidConstants rhsConstants = c;
+            rhsConstants.GpuFluidLiqPassF = vDensityParams;
+            rec.RunIndirect(pShaders->m_hRhs, rhsConstants, hBrickArgs,
+              {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart), R("GpuFluidLiqPositions", hPos),
+                W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqPressure", hPressure), W("GpuFluidLiqRhs", hRhs), W("GpuFluidLiqCounters", hCounters)});
+          }
 
           auto LevelConstants = [&](plUInt32 uiLevel, plUInt32 uiColour, float fOmega)
           {
@@ -1026,7 +1048,8 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             }
           };
 
-          if (bPcg)
+          const bool bPressureStage = (uiStages & 2u) != 0;
+          if (bPressureStage && bPcg)
           {
             // MGPCG with the warm start as x0, one V-cycle (from zero) as the preconditioner; uiCycles V-cycles in
             // all. The scalars never leave the GPU.
@@ -1068,29 +1091,43 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
               }
             }
           }
-          else
+          else if (bPressureStage)
           {
             for (plUInt32 uiCycle = 0; uiCycle < uiCycles; ++uiCycle)
               VCycle(levelX[0], levelB[0]);
           }
 
-          rec.RunIndirect(pShaders->m_hResidual, LevelConstants(0, 0, 1.0f), hBrickArgs,
-            {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgB", levelB[0]), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqCounters", hCounters)});
-
-          rec.RunIndirect(pShaders->m_hProject, c, hBrickArgs,
-            {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqPressure", hPressure), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqValidOut", hValid0)});
-
-          // Three layers into the air again: G -> T -> G -> T. The result is in T.
-          const plGALBufferHandle from[3] = {hVelG, hVelT, hVelG};
-          const plGALBufferHandle to[3] = {hVelT, hVelG, hVelT};
-          const plGALBufferHandle validFrom[3] = {hValid0, hValid1, hValid0};
-          const plGALBufferHandle validTo[3] = {hValid1, hValid0, hValid1};
-          for (plUInt32 i = 0; i < 3; ++i)
+          if ((uiStages & 4u) != 0)
           {
-            rec.RunIndirect(pShaders->m_hExtrapolate, c, hBrickArgs,
-              {brickArgs, brickList, W("GpuFluidLiqVelIn", from[i]), W("GpuFluidLiqValidIn", validFrom[i]), W("GpuFluidLiqVelOut", to[i]), W("GpuFluidLiqValidOut", validTo[i])});
+            rec.RunIndirect(pShaders->m_hResidual, LevelConstants(0, 0, 1.0f), hBrickArgs,
+              {brickArgs, brickList, brickActive, W("GpuFluidLiqMgX", levelX[0]), W("GpuFluidLiqMgB", levelB[0]), W("GpuFluidLiqMgType", levelType[0]), W("GpuFluidLiqCounters", hCounters)});
+
+            rec.RunIndirect(pShaders->m_hProject, c, hBrickArgs,
+              {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqPressure", hPressure), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqValidOut", hValid0)});
+
+            // Three layers into the air again: G -> T -> G -> T. The result is in T.
+            const plGALBufferHandle from[3] = {hVelG, hVelT, hVelG};
+            const plGALBufferHandle to[3] = {hVelT, hVelG, hVelT};
+            const plGALBufferHandle validFrom[3] = {hValid0, hValid1, hValid0};
+            const plGALBufferHandle validTo[3] = {hValid1, hValid0, hValid1};
+            for (plUInt32 i = 0; i < 3; ++i)
+            {
+              rec.RunIndirect(pShaders->m_hExtrapolate, c, hBrickArgs,
+                {brickArgs, brickList, W("GpuFluidLiqVelIn", from[i]), W("GpuFluidLiqValidIn", validFrom[i]), W("GpuFluidLiqVelOut", to[i]), W("GpuFluidLiqValidOut", validTo[i])});
+            }
           }
         });
+      };
+      if (bProfileKernels)
+      {
+        AddSolvePass("GpuFluid Liquid/Solve Setup", 1u);
+        AddSolvePass("GpuFluid Liquid/Solve", 2u);
+        AddSolvePass("GpuFluid Liquid/Solve Project", 4u);
+      }
+      else
+      {
+        AddSolvePass("GpuFluid Liquid/Solve", 7u);
+      }
     }
 
     // Liquid/G2P
@@ -1145,13 +1182,16 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   if (bReset)
     m_bHasSurface = false;
 
-  // Liquid/Surface: once per frame that steps. The particles moved since the last substep's sort, so they are sorted
-  // again (the next substep's sort then finds them in order); then the level set at their final positions, the
-  // temporal blend with last frame's surface, smoothing and surface nets over the active bricks.
+  // Liquid/Surface: once per frame that steps. By default the level set of the last substep (from the particles at its
+  // start, one substep before the final positions) is the raw surface. With m_bSurfaceOwnLevelSet the particles are
+  // sorted again (the next substep's sort then finds them in order) and the level set is computed at their final
+  // positions. Then the temporal blend with last frame's surface, smoothing and surface nets over the active bricks.
+  const bool bSurfaceLevelSet = input.m_bSurfaceOwnLevelSet || !bLevelSet;
   if (input.m_bSurface && bStep && uiSubsteps > 0)
   {
     const plUInt32 src = m_uiCurrentSet;
-    const plUInt32 dst = 1 - src;
+    const plUInt32 dst = bSurfaceLevelSet ? 1 - src : src;
+    if (bSurfaceLevelSet)
     {
       plGpuFluidLiquidConstants c = base;
       c.GpuFluidLiqPass = plVec4U32(1, 0, 0, 0);
@@ -1196,9 +1236,12 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
         const Bind shapes = R("GpuFluidLiqShapes", hShapes);
 
         plGpuFluidLiquidConstants c = base;
-        c.GpuFluidLiqPassF = vLevelSetParams;
-        rec.RunIndirect(pShaders->m_hLevelSet, c, hBrickArgs,
-          {brickArgs, brickList, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart), R("GpuFluidLiqPositions", hPos), W("GpuFluidLiqPhiOut", hPhiRaw)});
+        if (bSurfaceLevelSet)
+        {
+          c.GpuFluidLiqPassF = vLevelSetParams;
+          rec.RunIndirect(pShaders->m_hLevelSet, c, hBrickArgs,
+            {brickArgs, brickList, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart), R("GpuFluidLiqPositions", hPos), W("GpuFluidLiqPhiOut", hPhiRaw)});
+        }
 
         c.GpuFluidLiqPass = plVec4U32(uiTag, 0, 0, 0);
         c.GpuFluidLiqPassF = plVec4(fOutside, fFar, fBlend, fCellsPerVelocity);
