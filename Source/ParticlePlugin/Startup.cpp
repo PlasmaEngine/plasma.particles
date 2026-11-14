@@ -3,6 +3,7 @@
 #include <Core/ResourceManager/ResourceManager.h>
 #include <Foundation/Configuration/Startup.h>
 #include <ParticlePlugin/GpuFluid/Gpu/GpuFluidGpuManager.h>
+#include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidPass.h>
 #include <ParticlePlugin/Renderer/ParticleDistortionPass.h>
 #include <ParticlePlugin/Resources/ParticleEffectResource.h>
 #include <RendererCore/Pipeline/RenderPipelineInjection.h>
@@ -24,6 +25,19 @@ namespace
     // Without it the particles are not depth tested, which is what a pipeline without resolved depth gets.
     distortion.Read("ResolvedDepth", "ResolvedDepth", false);
     plRenderPipelineInjections::Register(distortion).IgnoreResult();
+
+    // GpuFluid liquid surfaces in front of the transparent pass, behind plasma.water's surface (order 0): they read the
+    // opaque scene and write depth, so fog, the VDB march and transparency composite at the liquid.
+    plRenderPipelineInjectionDesc liquid;
+    liquid.m_sName.Assign("plasma.particles/GpuFluidLiquid");
+    liquid.m_sOwner.Assign(s_szInjectionOwner);
+    liquid.m_sPoint.Assign(plRenderPipelineInjectionPoints::BeforeTransparent);
+    liquid.m_pPassType = plGetStaticRTTI<plGpuFluidLiquidPass>();
+    liquid.Bind("Color", "Color", "Color");
+    liquid.Bind("DepthStencil", "DepthStencil", "DepthStencil");
+    liquid.Read("ResolvedDepth", "ResolvedDepth");
+    liquid.m_fOrder = 1.0f;
+    plRenderPipelineInjections::Register(liquid).IgnoreResult();
   }
 } // namespace
 

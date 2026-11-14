@@ -1,0 +1,113 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidSurface.hlsli>
+
+// Surface nets, vertices: every cube of the dual grid whose corners are not all on one side of the surface gets one
+// vertex at the mean of the points where its 12 edges cross phi = 0, with the normal of the trilinear phi there
+// (pointing out of the liquid). Its index (from an atomic counter) goes into the cube-to-vertex map; cubes without a
+// vertex get GPU_FLUID_LIQUID_SURFACE_NO_VERTEX.
+//
+// The thread of cell c handles cube c - 1, and the cells on the high side of the domain also the cubes beyond them,
+// so the cubes from -1 to n - 1 are all covered once.
+//
+// Vertex: float4 (domain-relative position in metres, 1), float4 (normal, 0). GpuFluidLiqPass.x: vertex capacity.
+// GpuFluidLiqPassF: x outside value, y far value.
+
+RWByteAddressBuffer GpuFluidLiqSurfVertices;
+RWByteAddressBuffer GpuFluidLiqSurfCubeMap;
+RWByteAddressBuffer GpuFluidLiqSurfCounters;
+
+void ProcessCube(int3 m, uint capacity)
+{
+  float corner[8];
+  uint inside = 0;
+  [unroll] for (uint i = 0; i < 8; ++i)
+  {
+    corner[i] = SurfPhi(m + int3(i & 1, (i >> 1) & 1, (i >> 2) & 1));
+    inside |= corner[i] < 0.0 ? (1u << i) : 0u;
+  }
+
+  const uint mapIndex = SurfCubeIndex(m);
+  if (inside == 0 || inside == 0xFFu)
+  {
+    GpuFluidLiqSurfCubeMap.Store(mapIndex * 4, GPU_FLUID_LIQUID_SURFACE_NO_VERTEX);
+    return;
+  }
+
+  // The 12 edges as corner pairs: 4 along x, 4 along y, 4 along z.
+  static const uint2 s_Edges[12] = {
+    uint2(0, 1), uint2(2, 3), uint2(4, 5), uint2(6, 7),
+    uint2(0, 2), uint2(1, 3), uint2(4, 6), uint2(5, 7),
+    uint2(0, 4), uint2(1, 5), uint2(2, 6), uint2(3, 7)};
+
+  float3 sum = float3(0, 0, 0);
+  float crossings = 0.0;
+  [unroll] for (uint e = 0; e < 12; ++e)
+  {
+    const uint a = s_Edges[e].x;
+    const uint b = s_Edges[e].y;
+    if (((inside >> a) & 1u) == ((inside >> b) & 1u))
+      continue;
+    const float t = saturate(corner[a] / (corner[a] - corner[b]));
+    const float3 pa = float3(a & 1, (a >> 1) & 1, (a >> 2) & 1);
+    const float3 pb = float3(b & 1, (b >> 1) & 1, (b >> 2) & 1);
+    sum += lerp(pa, pb, t);
+    crossings += 1.0;
+  }
+  const float3 local = sum / max(crossings, 1.0);
+
+  // The normal: central differences of phi at the 8 corners, interpolated trilinearly to the vertex. Smoother than the
+  // gradient of the cube's own trilinear phi, which jumps from one cube to the next.
+  const float3 f = local;
+  float3 g = float3(0, 0, 0);
+  [unroll] for (uint k = 0; k < 8; ++k)
+  {
+    const int3 o = int3(k & 1, (k >> 1) & 1, (k >> 2) & 1);
+    const int3 s = m + o;
+    const float3 gradient = 0.5 * float3(SurfPhi(s + int3(1, 0, 0)) - SurfPhi(s - int3(1, 0, 0)), SurfPhi(s + int3(0, 1, 0)) - SurfPhi(s - int3(0, 1, 0)),
+                                    SurfPhi(s + int3(0, 0, 1)) - SurfPhi(s - int3(0, 0, 1)));
+    const float3 w3 = lerp(1.0 - f, f, float3(o));
+    g += gradient * (w3.x * w3.y * w3.z);
+  }
+  const float len = length(g);
+  const float3 normal = len > 1.0e-8 ? g / len : float3(0, 0, 1);
+
+  uint vertex;
+  GpuFluidLiqSurfCounters.InterlockedAdd(GPU_FLUID_LIQUID_SURFACE_CTR_VERTICES * 4, 1u, vertex);
+  if (vertex >= capacity)
+  {
+    GpuFluidLiqSurfCounters.InterlockedAdd(GPU_FLUID_LIQUID_SURFACE_CTR_VERTEX_OVERFLOW * 4, 1u);
+    GpuFluidLiqSurfCubeMap.Store(mapIndex * 4, GPU_FLUID_LIQUID_SURFACE_NO_VERTEX);
+    return;
+  }
+
+  // Sample s sits at the centre of cell s, (s + 0.5) cells from the domain's corner.
+  const float3 position = (float3(m) + 0.5 + local) * LiqDx();
+  GpuFluidLiqSurfVertices.Store4(vertex * GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES, asuint(float4(position, 1.0)));
+  GpuFluidLiqSurfVertices.Store4(vertex * GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES + 16, asuint(float4(normal, 0.0)));
+  GpuFluidLiqSurfCubeMap.Store(mapIndex * 4, vertex);
+}
+
+[numthreads(GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK, GPU_FLUID_LIQUID_BRICK)]
+void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
+{
+  int3 cell;
+  if (!LiqBrickCell(groupId, groupThreadId, cell))
+    return;
+
+  const uint capacity = LIQ_CONST(GpuFluidLiqPass).x;
+  const int3 last = int3(LiqCells()) - 1;
+
+  [loop] for (uint i = 0; i < 8; ++i)
+  {
+    const int3 o = int3(i & 1, (i >> 1) & 1, (i >> 2) & 1);
+    if ((o.x != 0 && cell.x != last.x) || (o.y != 0 && cell.y != last.y) || (o.z != 0 && cell.z != last.z))
+      continue;
+    ProcessCube(cell - 1 + o, capacity);
+  }
+}

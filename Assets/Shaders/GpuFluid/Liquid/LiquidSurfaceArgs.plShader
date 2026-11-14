@@ -1,0 +1,38 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// One thread. GpuFluidLiqPass.x = 0: zero the surface counters before the vertices and quads are written.
+// GpuFluidLiqPass.x = 1: the draw arguments of the surface, {6 * quads, 1, 0, 0} with the quads capped at the
+// capacity (GpuFluidLiqPass.y), and the counts into the stats that are read back.
+
+RWByteAddressBuffer GpuFluidLiqSurfCounters;
+RWByteAddressBuffer GpuFluidLiqSurfDrawArgs;
+RWByteAddressBuffer GpuFluidLiqStats;
+
+[numthreads(1, 1, 1)]
+void main()
+{
+  if (LIQ_CONST(GpuFluidLiqPass).x == 0)
+  {
+    [unroll] for (uint i = 0; i < GPU_FLUID_LIQUID_SURFACE_CTR_WORDS; ++i)
+      GpuFluidLiqSurfCounters.Store(i * 4, 0u);
+    return;
+  }
+
+  const uint vertexCapacity = LIQ_CONST(GpuFluidLiqPass).z;
+  const uint quadCapacity = LIQ_CONST(GpuFluidLiqPass).y;
+  const uint vertices = min(GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_VERTICES * 4), vertexCapacity);
+  const uint quads = min(GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_QUADS * 4), quadCapacity);
+  const uint overflow = GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_VERTEX_OVERFLOW * 4) + GpuFluidLiqSurfCounters.Load(GPU_FLUID_LIQUID_SURFACE_CTR_QUAD_OVERFLOW * 4);
+
+  GpuFluidLiqSurfDrawArgs.Store4(0, uint4(quads * 6, 1, 0, 0));
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES * 4, vertices);
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_QUADS * 4, quads);
+  GpuFluidLiqStats.Store(GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW * 4, overflow);
+}

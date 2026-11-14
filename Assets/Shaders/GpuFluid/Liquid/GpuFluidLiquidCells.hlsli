@@ -20,6 +20,24 @@ uint LiqTypeAt(RWByteAddressBuffer types, int3 c, uint3 dims, bool bFine)
   return types.Load(LiqCellIndexIn(c, dims) * 4) & 3u;
 }
 
+/// The whole type word of fine cell c (type bits and the theta codes), or air past the domain and in inactive bricks.
+uint LiqTypeWordAt(RWByteAddressBuffer types, int3 c)
+{
+  if (!LiqInside(c) || GpuFluidLiqBrickActive.Load(LiqBrickIndex(c) * 4) == 0)
+    return GPU_FLUID_LIQUID_CELL_AIR;
+  return types.Load(LiqCellIndex(c) * 4);
+}
+
+/// 1 / theta of the free surface between a liquid cell with type word typeWord and its air neighbour n (see
+/// GPU_FLUID_LIQUID_THETA_SHIFT). The stencil, the residual and the projection all take it from here, so they agree.
+float LiqAirInvTheta(uint typeWord, uint n)
+{
+  const uint code = (typeWord >> (GPU_FLUID_LIQUID_THETA_SHIFT + GPU_FLUID_LIQUID_THETA_BITS * n)) & ((1u << GPU_FLUID_LIQUID_THETA_BITS) - 1u);
+  if (code == GPU_FLUID_LIQUID_THETA_CONSTANT)
+    return LiqInvTheta();
+  return GPU_FLUID_LIQUID_THETA_STEPS / float(max(code, 1u));
+}
+
 /// Neighbour n (0..5: -x, +x, -y, +y, -z, +z) of a cell.
 int3 LiqNeighbourOffset(uint n)
 {

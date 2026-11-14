@@ -21,6 +21,30 @@
 #define GPU_FLUID_LIQUID_CELL_LIQUID 1u
 #define GPU_FLUID_LIQUID_CELL_SOLID 2u
 
+// Above the two type bits a liquid cell of the fine level holds, per neighbour n (0..5: -x, +x, -y, +y, -z, +z), five
+// bits of the ghost-fluid fraction theta of the free surface towards that neighbour, when it is air (LiquidClassify,
+// from the level set: theta = phi_i / (phi_i - phi_j), clamped below by the classify dispatch). Code 1 <= q <= 30:
+// theta = q / 30; code 31: the constant theta of the push constants (no level set, or an open domain side).
+#define GPU_FLUID_LIQUID_THETA_SHIFT 2u
+#define GPU_FLUID_LIQUID_THETA_BITS 5u
+#define GPU_FLUID_LIQUID_THETA_CONSTANT 31u
+#define GPU_FLUID_LIQUID_THETA_STEPS 30.0
+
+// GpuFluidLiqCells.w: bits 0..5 open faces, 8..15 shape count, bit 16: liquid cells and the free surface's theta come
+// from the level set (phi < 0 is liquid as well as a cell holding particles).
+#define GPU_FLUID_LIQUID_FLAG_LEVEL_SET (1u << 16)
+
+// Surface extraction (Liquid/Surface): per vertex two float4 (world position, 1; normal, 0), per quad four vertex
+// indices. The counters buffer: vertices, quads, and how many of each did not fit.
+#define GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES 32
+#define GPU_FLUID_LIQUID_SURFACE_QUAD_BYTES 16
+#define GPU_FLUID_LIQUID_SURFACE_CTR_VERTICES 0
+#define GPU_FLUID_LIQUID_SURFACE_CTR_QUADS 1
+#define GPU_FLUID_LIQUID_SURFACE_CTR_VERTEX_OVERFLOW 2
+#define GPU_FLUID_LIQUID_SURFACE_CTR_QUAD_OVERFLOW 3
+#define GPU_FLUID_LIQUID_SURFACE_CTR_WORDS 4
+#define GPU_FLUID_LIQUID_SURFACE_NO_VERTEX 0xFFFFFFFFu
+
 // Face validity: one word per padded face index, one bit per MAC component.
 #define GPU_FLUID_LIQUID_VALID_U 1u
 #define GPU_FLUID_LIQUID_VALID_V 2u
@@ -127,6 +151,9 @@
 #define GPU_FLUID_LIQUID_STAT_CENTROID_HI 28       // 3 words: the carries out of those sums (high 32 bits)
 #define GPU_FLUID_LIQUID_STAT_SIM_TIME 31          // simulated time since the reset, microseconds
 #define GPU_FLUID_LIQUID_STAT_HIST_COUNT 32        // bins used by the front histogram
+#define GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES 33  // surface vertices written this frame (Liquid/Surface)
+#define GPU_FLUID_LIQUID_STAT_SURFACE_QUADS 34     // surface quads written this frame
+#define GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW 35  // vertices and quads that did not fit
 #define GPU_FLUID_LIQUID_STAT_HIST 64              // front histogram along +x
 #define GPU_FLUID_LIQUID_HIST_BINS 1024
 #define GPU_FLUID_LIQUID_STAT_WORD_COUNT (GPU_FLUID_LIQUID_STAT_HIST + GPU_FLUID_LIQUID_HIST_BINS)

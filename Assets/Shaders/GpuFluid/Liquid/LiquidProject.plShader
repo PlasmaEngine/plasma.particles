@@ -9,7 +9,8 @@ ALL
 #include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCells.hlsli>
 
 // Projection: u -= phi(b) - phi(a) on every face next to a liquid cell, with the ghost value phi_liquid * (1 - 1/theta)
-// on the air side (the same ghost the multigrid stencil uses, so the projected divergence is its residual). Faces on
+// on the air side, theta of that face from the liquid cell's type word (the same ghost the multigrid stencil uses, so
+// the projected divergence is its residual). Faces on
 // walls or next to solids take the solid velocity (zero). Faces with liquid on neither side become invalid, for the
 // extrapolation that follows.
 
@@ -56,9 +57,12 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     {
       const float phiA = ta == GPU_FLUID_LIQUID_CELL_LIQUID ? asfloat(GpuFluidLiqPressure.Load(LiqCellIndex(a) * 4)) : 0.0;
       const float phiB = tb == GPU_FLUID_LIQUID_CELL_LIQUID ? asfloat(GpuFluidLiqPressure.Load(LiqCellIndex(b) * 4)) : 0.0;
-      const float ghost = 1.0 - LiqInvTheta();
-      const float pa = ta == GPU_FLUID_LIQUID_CELL_LIQUID ? phiA : phiB * ghost;
-      const float pb = tb == GPU_FLUID_LIQUID_CELL_LIQUID ? phiB : phiA * ghost;
+      // The ghost of the air side, with the theta of the liquid side's word towards it: a's +axis neighbour is b
+      // (n = 2 comp + 1), b's -axis neighbour is a (n = 2 comp).
+      const float ghostOfB = 1.0 - LiqAirInvTheta(LiqTypeWordAt(GpuFluidLiqCellType, a), comp * 2 + 1);
+      const float ghostOfA = 1.0 - LiqAirInvTheta(LiqTypeWordAt(GpuFluidLiqCellType, b), comp * 2);
+      const float pa = ta == GPU_FLUID_LIQUID_CELL_LIQUID ? phiA : phiB * ghostOfA;
+      const float pb = tb == GPU_FLUID_LIQUID_CELL_LIQUID ? phiB : phiA * ghostOfB;
       u = asfloat(GpuFluidLiqVel.Load(address)) - (pb - pa);
     }
     else

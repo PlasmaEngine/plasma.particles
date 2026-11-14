@@ -91,11 +91,28 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
   const float3 gMid = g + 0.5 * dt * uNew * invDx;
   float3 xNew = x + dt * SampleVelocity(GpuFluidLiqVelNew, gMid);
 
-  // Walls: closed domain faces keep the particle a margin inside; the inward normal velocity goes, friction slows the
-  // tangential part.
   const float4 wall = LIQ_CONST(GpuFluidLiqWall);
   const float margin = wall.x * dx;
   const float friction = wall.y;
+
+  // Analytic solids first: a solid that ends on a domain wall (a glass standing on the floor) has a face in that wall,
+  // and the push out through it would leave the domain. The walls below have the last word.
+  if (LiqShapeCount() > 0)
+  {
+    const float d = LiqShapeDistance(xNew);
+    if (d < margin)
+    {
+      const float3 n = LiqShapeNormal(xNew);
+      xNew += (margin - d) * n;
+      const float vn = dot(v, n);
+      if (vn < 0.0)
+        v -= vn * n;
+      v = lerp(v, dot(v, n) * n, friction);
+    }
+  }
+
+  // Walls: closed domain faces keep the particle a margin inside; the inward normal velocity goes, friction slows the
+  // tangential part.
   const float3 extent = float3(LiqCells()) * dx;
   const uint open = LiqOpenMask();
   [unroll] for (uint axis = 0; axis < 3; ++axis)
@@ -123,21 +140,6 @@ void main(uint3 groupId : SV_GroupID, uint groupIndex : SV_GroupIndex)
         if (t != axis)
           v[t] *= keep;
       }
-    }
-  }
-
-  // Analytic solids.
-  if (LiqShapeCount() > 0)
-  {
-    const float d = LiqShapeDistance(xNew);
-    if (d < margin)
-    {
-      const float3 n = LiqShapeNormal(xNew);
-      xNew += (margin - d) * n;
-      const float vn = dot(v, n);
-      if (vn < 0.0)
-        v -= vn * n;
-      v = lerp(v, dot(v, n) * n, friction);
     }
   }
 

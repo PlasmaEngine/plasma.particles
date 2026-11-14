@@ -5,7 +5,9 @@
 #include <Core/WorldSerializer/WorldReader.h>
 #include <Core/WorldSerializer/WorldWriter.h>
 #include <ParticlePlugin/GpuFluid/Components/GpuFluidLiquidVolumeComponent.h>
+#include <Foundation/Configuration/CVar.h>
 #include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidDebugRenderer.h>
+#include <ParticlePlugin/GpuFluid/Rendering/GpuFluidLiquidSurfaceRenderer.h>
 #include <RendererCore/Pipeline/RenderData.h>
 #include <RendererCore/Pipeline/RenderDataManager.h>
 #include <RendererCore/RenderWorld/RenderWorld.h>
@@ -47,7 +49,26 @@ PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidObstacle, plNoBase, 1, plRTTIDefa
 }
 PL_END_STATIC_REFLECTED_TYPE
 
-PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 2, plComponentMode::Static)
+PL_BEGIN_STATIC_REFLECTED_TYPE(plGpuFluidLiquidInflow, plNoBase, 1, plRTTIDefaultAllocator<plGpuFluidLiquidInflow>)
+{
+  PL_BEGIN_PROPERTIES
+  {
+    PL_MEMBER_PROPERTY("Center", m_vCenter),
+    PL_MEMBER_PROPERTY("Velocity", m_vVelocity)->AddAttributes(new plDefaultValueAttribute(plVec3(0.0f, 0.0f, -1.0f)), new plSuffixAttribute(" m/s")),
+    PL_MEMBER_PROPERTY("Radius", m_fRadius)->AddAttributes(new plDefaultValueAttribute(0.02f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" m")),
+    PL_MEMBER_PROPERTY("FlowRate", m_fFlowRate)->AddAttributes(new plDefaultValueAttribute(0.0f), new plClampValueAttribute(0.0f, plVariant()), new plSuffixAttribute(" l/s")),
+  }
+  PL_END_PROPERTIES;
+}
+PL_END_STATIC_REFLECTED_TYPE
+
+PL_BEGIN_STATIC_REFLECTED_ENUM(plGpuFluidLiquidRenderMode, 1)
+  PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::Surface),
+  PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::Points),
+  PL_ENUM_CONSTANT(plGpuFluidLiquidRenderMode::SurfaceAndPoints),
+PL_END_STATIC_REFLECTED_ENUM;
+
+PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 3, plComponentMode::Static)
 {
   PL_BEGIN_PROPERTIES
   {
@@ -59,6 +80,12 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 2, plComponentMode::Sta
     PL_BITFLAGS_MEMBER_PROPERTY("OpenFaces", plGpuFluidDomainFaces, m_OpenFaces),
     PL_ARRAY_MEMBER_PROPERTY("FillBoxes", m_FillBoxes),
     PL_ARRAY_MEMBER_PROPERTY("Obstacles", m_Obstacles),
+    PL_ARRAY_MEMBER_PROPERTY("Inflows", m_Inflows),
+    PL_ENUM_MEMBER_PROPERTY("RenderMode", plGpuFluidLiquidRenderMode, m_RenderMode)->AddAttributes(new plGroupAttribute("Look")),
+    PL_MEMBER_PROPERTY("Absorption", m_vAbsorption)->AddAttributes(new plDefaultValueAttribute(plVec3(0.45f, 0.07f, 0.04f)), new plClampValueAttribute(plVec3(0.0f), plVariant()), new plSuffixAttribute(" 1/m")),
+    PL_MEMBER_PROPERTY("ScatterColor", m_ScatterColor)->AddAttributes(new plDefaultValueAttribute(plColor(0.03f, 0.09f, 0.11f))),
+    PL_MEMBER_PROPERTY("SurfaceRoughness", m_fSurfaceRoughness)->AddAttributes(new plDefaultValueAttribute(0.04f), new plClampValueAttribute(0.02f, 1.0f)),
+    PL_MEMBER_PROPERTY("RefractionStrength", m_fRefractionStrength)->AddAttributes(new plDefaultValueAttribute(1.0f), new plClampValueAttribute(0.0f, 2.0f)),
     PL_MEMBER_PROPERTY("FlipBlend", m_fFlipBlend)->AddAttributes(new plGroupAttribute("Solver"), new plDefaultValueAttribute(0.1f), new plClampValueAttribute(0.0f, 1.0f)),
     PL_MEMBER_PROPERTY("MaxSubsteps", m_uiMaxSubsteps)->AddAttributes(new plDefaultValueAttribute(4), new plClampValueAttribute(1, 16)),
     PL_MEMBER_PROPERTY("PressureCycles", m_uiPressureCycles)->AddAttributes(new plDefaultValueAttribute(8), new plClampValueAttribute(0, 32)),
@@ -83,6 +110,9 @@ PL_BEGIN_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, 2, plComponentMode::Sta
 }
 PL_END_COMPONENT_TYPE
 // clang-format on
+
+plCVarBool cvar_GpuFluidLiquidShowPoints("GpuFluid.Liquid.ShowPoints", false, plCVarFlags::Default, "Draws every liquid volume's particles as well, whatever its RenderMode.");
+plCVarInt cvar_GpuFluidLiquidSurfaceDebug("GpuFluid.Liquid.SurfaceDebug", 0, plCVarFlags::Default, "Liquid surface debug view: 0 off, 1 normals, 2 path length through the liquid.");
 
 plGpuFluidLiquidVolumeComponent::plGpuFluidLiquidVolumeComponent() = default;
 plGpuFluidLiquidVolumeComponent::~plGpuFluidLiquidVolumeComponent() = default;
@@ -125,6 +155,21 @@ void plGpuFluidLiquidVolumeComponent::SerializeComponent(plWorldWriter& inout_st
   s << m_bAlwaysSimulate;
   s << m_fDebugPointRadius;
   s << m_fDebugTopSpeed;
+
+  // Version 3.
+  s << m_Inflows.GetCount();
+  for (const plGpuFluidLiquidInflow& inflow : m_Inflows)
+  {
+    s << inflow.m_vCenter;
+    s << inflow.m_vVelocity;
+    s << inflow.m_fRadius;
+    s << inflow.m_fFlowRate;
+  }
+  s << m_RenderMode;
+  s << m_vAbsorption;
+  s << m_ScatterColor;
+  s << m_fSurfaceRoughness;
+  s << m_fRefractionStrength;
 }
 
 void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_stream)
@@ -170,6 +215,24 @@ void plGpuFluidLiquidVolumeComponent::DeserializeComponent(plWorldReader& inout_
   s >> m_bAlwaysSimulate;
   s >> m_fDebugPointRadius;
   s >> m_fDebugTopSpeed;
+
+  if (uiVersion >= 3)
+  {
+    s >> uiCount;
+    m_Inflows.SetCount(uiCount);
+    for (plGpuFluidLiquidInflow& inflow : m_Inflows)
+    {
+      s >> inflow.m_vCenter;
+      s >> inflow.m_vVelocity;
+      s >> inflow.m_fRadius;
+      s >> inflow.m_fFlowRate;
+    }
+    s >> m_RenderMode;
+    s >> m_vAbsorption;
+    s >> m_ScatterColor;
+    s >> m_fSurfaceRoughness;
+    s >> m_fRefractionStrength;
+  }
 }
 
 void plGpuFluidLiquidVolumeComponent::OnActivated()
@@ -351,6 +414,20 @@ void plGpuFluidLiquidVolumeComponent::Update()
     shape.Size = bSphere ? plVec4(obstacle.m_fRadius, 0, 0, 0) : plVec4(obstacle.m_vHalfExtents.x, obstacle.m_vHalfExtents.y, obstacle.m_vHalfExtents.z, 0.0f);
   }
 
+  input.m_Sources.Clear();
+  for (const plGpuFluidLiquidInflow& inflow : m_Inflows)
+  {
+    if (input.m_Sources.GetCount() >= 4)
+      break;
+    plGpuFluidLiquidSource& source = input.m_Sources.ExpandAndGetRef();
+    source.m_vCenter = inflow.m_vCenter + vHalf;
+    source.m_vVelocity = inflow.m_vVelocity;
+    source.m_fRadius = inflow.m_fRadius;
+    source.m_fFlowRate = inflow.m_fFlowRate * 1.0e-3f;
+  }
+
+  input.m_bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points;
+
   m_pManager->SetLiquidFrameInput(m_VolumeId, input);
 }
 
@@ -379,19 +456,47 @@ void plGpuFluidLiquidVolumeComponent::OnMsgExtractRenderData(plMsgExtractRenderD
     return;
   }
 
-  auto pRenderData = msg.m_pRenderDataManager->CreateRenderDataForThisFrame<plGpuFluidLiquidDebugRenderData>(GetOwner());
-  pRenderData->m_hPoints = publish.m_hPoints;
-  pRenderData->m_hDrawArgs = publish.m_hDrawArgs;
-  pRenderData->m_uiMaxParticles = publish.m_uiMaxParticles;
-  pRenderData->m_fRadius = m_fDebugPointRadius > 0.0f ? m_fDebugPointRadius : 0.45f * m_ActiveSettings.m_fCellSize / plMath::Pow(static_cast<float>(plMath::Max(1u, m_ActiveSettings.m_uiParticlesPerCell)), 1.0f / 3.0f);
-  pRenderData->m_fTopSpeed = m_fDebugTopSpeed;
-
   m_bPublished = true;
 
-  // Rewritten on the GPU every tick, so never cached.
-  msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::SimpleOpaque, plRenderData::Caching::Never);
-  msg.AddDependency(publish.m_hPoints, plDefaultRenderDataCategories::SimpleOpaque, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
-  msg.AddDependency(publish.m_hDrawArgs, plDefaultRenderDataCategories::SimpleOpaque, plGALResourceState::IndirectArgument);
+  const bool bPoints = m_RenderMode != plGpuFluidLiquidRenderMode::Surface || cvar_GpuFluidLiquidShowPoints;
+  const bool bSurface = m_RenderMode != plGpuFluidLiquidRenderMode::Points && publish.m_bHasSurface;
+
+  // Both are rewritten on the GPU every tick, so never cached.
+  if (bSurface)
+  {
+    const plRenderData::Category category = plGpuFluidLiquidSurfaceRenderData::LiquidSurface;
+    auto pSurface = msg.m_pRenderDataManager->CreateRenderDataForThisFrame<plGpuFluidLiquidSurfaceRenderData>(GetOwner());
+    pSurface->m_vGlobalPosition = GetOwner()->GetGlobalPosition();
+    pSurface->m_hVertices = publish.m_hSurfaceVertices;
+    pSurface->m_hQuads = publish.m_hSurfaceQuads;
+    pSurface->m_hDrawArgs = publish.m_hSurfaceDrawArgs;
+    pSurface->m_uiMaxQuads = publish.m_uiMaxSurfaceQuads;
+    pSurface->m_vDomainOrigin = publish.m_vDomainOrigin;
+    pSurface->m_vAbsorption = m_vAbsorption;
+    pSurface->m_vScatterColor = plVec3(m_ScatterColor.r, m_ScatterColor.g, m_ScatterColor.b);
+    pSurface->m_fRoughness = m_fSurfaceRoughness;
+    pSurface->m_fRefractionStrength = m_fRefractionStrength;
+    pSurface->m_uiDebugView = static_cast<plUInt32>(plMath::Max(0, cvar_GpuFluidLiquidSurfaceDebug.GetValue()));
+
+    msg.AddRenderData(pSurface, category, plRenderData::Caching::Never);
+    msg.AddDependency(publish.m_hSurfaceVertices, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+    msg.AddDependency(publish.m_hSurfaceQuads, category, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+    msg.AddDependency(publish.m_hSurfaceDrawArgs, category, plGALResourceState::IndirectArgument);
+  }
+
+  if (bPoints)
+  {
+    auto pRenderData = msg.m_pRenderDataManager->CreateRenderDataForThisFrame<plGpuFluidLiquidDebugRenderData>(GetOwner());
+    pRenderData->m_hPoints = publish.m_hPoints;
+    pRenderData->m_hDrawArgs = publish.m_hDrawArgs;
+    pRenderData->m_uiMaxParticles = publish.m_uiMaxParticles;
+    pRenderData->m_fRadius = m_fDebugPointRadius > 0.0f ? m_fDebugPointRadius : 0.45f * m_ActiveSettings.m_fCellSize / plMath::Pow(static_cast<float>(plMath::Max(1u, m_ActiveSettings.m_uiParticlesPerCell)), 1.0f / 3.0f);
+    pRenderData->m_fTopSpeed = m_fDebugTopSpeed;
+
+    msg.AddRenderData(pRenderData, plDefaultRenderDataCategories::SimpleOpaque, plRenderData::Caching::Never);
+    msg.AddDependency(publish.m_hPoints, plDefaultRenderDataCategories::SimpleOpaque, plGALResourceState::ShaderRead, plGALShaderStageFlags::VertexShader);
+    msg.AddDependency(publish.m_hDrawArgs, plDefaultRenderDataCategories::SimpleOpaque, plGALResourceState::IndirectArgument);
+  }
 }
 
 PL_STATICLINK_FILE(ParticlePlugin, ParticlePlugin_GpuFluid_Components_GpuFluidLiquidVolumeComponent);

@@ -68,6 +68,35 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidObstacleShape
 
 PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidObstacleShape);
 
+/// \brief An inflow of liquid: a disc (a nozzle) across its velocity, in the volume's space. A minimal source; the
+/// full inflow and drain component comes with the flooding work.
+struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidInflow
+{
+  plVec3 m_vCenter = plVec3::MakeZero();
+  plVec3 m_vVelocity = plVec3(0.0f, 0.0f, -1.0f); ///< m/s
+  float m_fRadius = 0.02f;                        ///< m
+  float m_fFlowRate = 0.0f;                       ///< litres per second; 0: the disc's area times the speed
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidInflow);
+
+/// \brief How a liquid volume is drawn.
+struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidRenderMode
+{
+  using StorageType = plUInt8;
+
+  enum Enum
+  {
+    Surface,           ///< the extracted surface, refracting and reflecting (plGpuFluidLiquidPass)
+    Points,            ///< the particles as small spheres coloured by speed (debug)
+    SurfaceAndPoints,  ///< both
+
+    Default = Surface
+  };
+};
+
+PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidRenderMode);
+
 /// \brief A static analytic solid inside the domain, in the volume's space.
 struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidObstacle
 {
@@ -85,7 +114,9 @@ PL_DECLARE_REFLECTABLE_TYPE(PL_PARTICLEPLUGIN_DLL, plGpuFluidLiquidObstacle);
 /// gravity always points the same way through it). It spans Extents rounded up to whole bricks of 8 cells of
 /// CellSize. The fill boxes are seeded when the component activates and on ResetSimulation().
 ///
-/// P6 draws the particles as small spheres coloured by speed (plGpuFluidLiquidDebugRenderer); the surface comes later.
+/// The surface is extracted on the GPU every frame (surface nets on a smoothed level set) and drawn by
+/// plGpuFluidLiquidPass in front of the transparent pass. RenderMode (or the cvar GpuFluid.Liquid.ShowPoints) also or
+/// instead draws the particles as small spheres coloured by speed (plGpuFluidLiquidDebugRenderer).
 class PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidVolumeComponent final : public plComponent
 {
   PL_DECLARE_COMPONENT_TYPE(plGpuFluidLiquidVolumeComponent, plComponent, plGpuFluidLiquidVolumeComponentManager);
@@ -116,12 +147,19 @@ public:
   plBitflags<plGpuFluidDomainFaces> m_OpenFaces;                        // [ property ] closed by default
   plDynamicArray<plGpuFluidLiquidFillBox> m_FillBoxes;                  // [ property ]
   plDynamicArray<plGpuFluidLiquidObstacle> m_Obstacles;                 // [ property ]
+  plDynamicArray<plGpuFluidLiquidInflow> m_Inflows;                     // [ property ]
 
   float m_fFlipBlend = 0.1f;                                            // [ property ]
   plUInt32 m_uiMaxSubsteps = 4;                                         // [ property ]
   plUInt32 m_uiPressureCycles = 8;                                      // [ property ] V-cycles per substep (MGPCG: one per iteration)
   float m_fWallFriction = 0.0f;                                         // [ property ]
   bool m_bAlwaysSimulate = true;                                        // [ property ]
+
+  plEnum<plGpuFluidLiquidRenderMode> m_RenderMode;                      // [ property ]
+  plVec3 m_vAbsorption = plVec3(0.45f, 0.07f, 0.04f);                   // [ property ] sigma_a per colour, 1/m (clear water)
+  plColor m_ScatterColor = plColor(0.03f, 0.09f, 0.11f);                // [ property ] the water's own glow from its depth
+  float m_fSurfaceRoughness = 0.04f;                                    // [ property ]
+  float m_fRefractionStrength = 1.0f;                                 // [ property ] how far the bent ray is followed, per m of thickness
 
   float m_fDebugPointRadius = 0.0f;                                     // [ property ] 0: from the cell size
   float m_fDebugTopSpeed = 3.0f;                                        // [ property ] m/s at the top of the colour ramp

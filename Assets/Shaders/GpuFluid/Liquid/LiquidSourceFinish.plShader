@@ -1,0 +1,28 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+[COMPUTESHADER]
+
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidCommon.hlsli>
+
+// One thread, after LiquidSource: the GpuFluidLiqPass.x particles it appended join the alive count (as many as the
+// capacity holds), the dispatch arguments follow, and the seeded counter grows by the same number, so
+// alive == seeded - drained stays exact.
+
+RWByteAddressBuffer GpuFluidLiqParticleArgs;
+RWByteAddressBuffer GpuFluidLiqCounters;
+
+[numthreads(1, 1, 1)]
+void main()
+{
+  const uint alive = GpuFluidLiqParticleArgs.Load(12);
+  const uint count = min(alive + LIQ_CONST(GpuFluidLiqPass).x, LiqCapacity());
+  const uint groups = (count + GPU_FLUID_LIQUID_PARTICLE_GROUP - 1) / GPU_FLUID_LIQUID_PARTICLE_GROUP;
+  const uint groupsX = min(groups, (uint)GPU_FLUID_SCAN_MAX_GROUPS_X);
+  const uint groupsY = groupsX > 0 ? (groups + groupsX - 1) / groupsX : 1u;
+
+  GpuFluidLiqParticleArgs.Store4(0, uint4(groupsX, max(groupsY, 1u), 1u, count));
+  GpuFluidLiqCounters.InterlockedAdd(GPU_FLUID_LIQUID_CTR_SEEDED * 4, count - alive);
+}

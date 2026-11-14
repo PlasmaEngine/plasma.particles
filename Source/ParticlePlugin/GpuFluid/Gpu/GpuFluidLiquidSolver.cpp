@@ -55,6 +55,14 @@ void plGpuFluidLiquidShaders::Load()
   m_hPcgReduce = Load("LiquidPcgReduce");
   m_hPcgUpdateX = Load("LiquidPcgUpdateX");
   m_hPcgUpdateP = Load("LiquidPcgUpdateP");
+  m_hLevelSet = Load("LiquidLevelSet");
+  m_hSurfaceBlend = Load("LiquidSurfaceBlend");
+  m_hSurfaceSmooth = Load("LiquidSurfaceSmooth");
+  m_hSurfaceVerts = Load("LiquidSurfaceVerts");
+  m_hSurfaceQuads = Load("LiquidSurfaceQuads");
+  m_hSurfaceArgs = Load("LiquidSurfaceArgs");
+  m_hSource = Load("LiquidSource");
+  m_hSourceFinish = Load("LiquidSourceFinish");
   m_Scan.Initialize();
 }
 
@@ -253,6 +261,26 @@ bool plGpuFluidLiquidSolver::Create(const plGpuFluidLiquidSettings& settings)
   m_hCounters = Make(GPU_FLUID_LIQUID_CTR_WORDS * 4, "GpuFluid Liquid Counters");
   m_hStats = Make(GPU_FLUID_LIQUID_STATS_BYTES, "GpuFluid Liquid Stats");
 
+  // Surface: the mesh holds at most half a vertex and half a quad per cell, between 64K and 1M of each (the plan's
+  // cap). A pool's surface is a small share of its cells.
+  m_uiMaxSurfaceVertices = plMath::Clamp<plUInt32>(m_uiCellCount / 2, 64 * 1024, 1024 * 1024);
+  m_uiMaxSurfaceQuads = m_uiMaxSurfaceVertices;
+  m_hPhiRaw = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid Phi");
+  m_hPhiTmp = Make(plUInt64(m_uiCellCount) * 4, "GpuFluid Liquid Phi Scratch");
+  for (plUInt32 i = 0; i < 2; ++i)
+  {
+    m_hSurfacePhi[i] = Make(plUInt64(m_uiCellCount) * 4, i == 0 ? "GpuFluid Liquid Surface Phi A" : "GpuFluid Liquid Surface Phi B");
+    m_hSurfaceStamp[i] = Make(plUInt64(m_uiBrickCount) * 4, i == 0 ? "GpuFluid Liquid Surface Stamp A" : "GpuFluid Liquid Surface Stamp B");
+  }
+  m_hSurfaceVertices = Make(plUInt64(m_uiMaxSurfaceVertices) * GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES, "GpuFluid Liquid Surface Vertices");
+  m_hSurfaceQuads = Make(plUInt64(m_uiMaxSurfaceQuads) * GPU_FLUID_LIQUID_SURFACE_QUAD_BYTES, "GpuFluid Liquid Surface Quads");
+  m_hSurfaceCubeMap = Make(plUInt64(m_uiFaceCount) * 4, "GpuFluid Liquid Surface Cube Map"); // (n + 1)^3 cubes, as many as padded faces
+  m_hSurfaceCounters = Make(GPU_FLUID_LIQUID_SURFACE_CTR_WORDS * 4, "GpuFluid Liquid Surface Counters");
+  m_hSurfaceDrawArgs = Make(16, "GpuFluid Liquid Surface Draw Args", true);
+  m_uiSurfaceTag = 2; // the stamps start at 0: tag - 1 of the first extraction never matches
+  m_uiSurfaceCurrent = 0;
+  m_bHasSurface = false;
+
   {
     plGALBufferCreationDescription desc;
     desc.m_uiStructSize = sizeof(plGpuFluidLiquidShape);
@@ -336,6 +364,19 @@ void plGpuFluidLiquidSolver::Destroy()
   Free(m_hCounters);
   Free(m_hStats);
   Free(m_hShapes);
+  Free(m_hPhiRaw);
+  Free(m_hPhiTmp);
+  for (plUInt32 i = 0; i < 2; ++i)
+  {
+    Free(m_hSurfacePhi[i]);
+    Free(m_hSurfaceStamp[i]);
+  }
+  Free(m_hSurfaceVertices);
+  Free(m_hSurfaceQuads);
+  Free(m_hSurfaceCubeMap);
+  Free(m_hSurfaceCounters);
+  Free(m_hSurfaceDrawArgs);
+  m_bHasSurface = false;
 
   m_bCreated = false;
   m_bRecorded = false;
@@ -348,6 +389,11 @@ void plGpuFluidLiquidSolver::GetPublish(plGpuFluidLiquidPublish& out_publish) co
   out_publish.m_uiMaxParticles = m_uiCapacity;
   out_publish.m_vDomainOrigin = m_vDomainOrigin;
   out_publish.m_vDomainSize = plVec3(static_cast<float>(m_vCells.x), static_cast<float>(m_vCells.y), static_cast<float>(m_vCells.z)) * m_fDx;
+  out_publish.m_bHasSurface = m_bHasSurface;
+  out_publish.m_hSurfaceVertices = m_hSurfaceVertices;
+  out_publish.m_hSurfaceQuads = m_hSurfaceQuads;
+  out_publish.m_hSurfaceDrawArgs = m_hSurfaceDrawArgs;
+  out_publish.m_uiMaxSurfaceQuads = m_uiMaxSurfaceQuads;
 }
 
 void plGpuFluidLiquidSolver::DecodeStats(plArrayPtr<const plUInt8> data, plGpuFluidLiquidStats& out_stats) const
@@ -384,6 +430,9 @@ void plGpuFluidLiquidSolver::DecodeStats(plArrayPtr<const plUInt8> data, plGpuFl
   out_stats.m_vBoundsMaxCell.Set(pWords[GPU_FLUID_LIQUID_STAT_BOUNDS_MAX + 0], pWords[GPU_FLUID_LIQUID_STAT_BOUNDS_MAX + 1], pWords[GPU_FLUID_LIQUID_STAT_BOUNDS_MAX + 2]);
   out_stats.m_uiAbove1cm = pWords[GPU_FLUID_LIQUID_STAT_ABOVE_1CM];
   out_stats.m_uiAbove1mm = pWords[GPU_FLUID_LIQUID_STAT_ABOVE_1MM];
+  out_stats.m_uiSurfaceVertices = pWords[GPU_FLUID_LIQUID_STAT_SURFACE_VERTICES];
+  out_stats.m_uiSurfaceQuads = pWords[GPU_FLUID_LIQUID_STAT_SURFACE_QUADS];
+  out_stats.m_uiSurfaceOverflow = pWords[GPU_FLUID_LIQUID_STAT_SURFACE_OVERFLOW];
 
   const double fAlive = plMath::Max(1u, out_stats.m_uiAlive);
   out_stats.m_fMeanSpeed = static_cast<float>(pWords[GPU_FLUID_LIQUID_STAT_SPEED_SUM] / GPU_FLUID_LIQUID_SPEED_SUM_SCALE / fAlive);
@@ -531,7 +580,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
   // Base constants of this tick.
   plGpuFluidLiquidConstants base = {};
   const plUInt32 uiShapeCount = m_UploadedShapes.GetCount();
-  base.GpuFluidLiqCells = plVec4U32(m_vCells.x, m_vCells.y, m_vCells.z, (input.m_uiOpenFaces & 0x3Fu) | (uiShapeCount << 8));
+  base.GpuFluidLiqCells = plVec4U32(m_vCells.x, m_vCells.y, m_vCells.z, (input.m_uiOpenFaces & 0x3Fu) | (uiShapeCount << 8) | (input.m_bLevelSet ? GPU_FLUID_LIQUID_FLAG_LEVEL_SET : 0u));
   base.GpuFluidLiqBricks = plVec4U32(m_vBricks.x, m_vBricks.y, m_vBricks.z, m_uiCapacity);
   base.GpuFluidLiqGrid = plVec4(m_fDx, 1.0f / m_fDx, fSubDt, plMath::Clamp(input.m_fFlipBlend, 0.0f, 1.0f));
   base.GpuFluidLiqGravity = plVec4(input.m_vGravity.x, input.m_vGravity.y, input.m_vGravity.z, static_cast<float>(plMath::Max(1u, m_Settings.m_uiParticlesPerCell)));
@@ -641,6 +690,119 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
       });
   }
 
+  // Inflow: each source's share of this tick (flow rate * simulated time / particle volume, the fractions carried to
+  // the next tick) appended to the current set before the substeps.
+  if (bReset)
+  {
+    for (float& fCarry : m_SourceCarry)
+      fCarry = 0.0f;
+  }
+  if (bStep && !input.m_Sources.IsEmpty())
+  {
+    struct SourceJob
+    {
+      plGpuFluidLiquidConstants m_Constants;
+      plUInt32 m_uiCount;
+    };
+    plHybridArray<SourceJob, s_uiMaxSources> jobs;
+    const float fParticleVolume = m_fDx * m_fDx * m_fDx / static_cast<float>(plMath::Max(1u, m_Settings.m_uiParticlesPerCell));
+    for (plUInt32 i = 0; i < plMath::Min<plUInt32>(input.m_Sources.GetCount(), s_uiMaxSources); ++i)
+    {
+      const plGpuFluidLiquidSource& source = input.m_Sources[i];
+      const float fSpeed = source.m_vVelocity.GetLength();
+      const float fRate = source.m_fFlowRate > 0.0f ? source.m_fFlowRate : plMath::Pi<float>() * source.m_fRadius * source.m_fRadius * fSpeed;
+      const float fWanted = fRate * fSimDt / fParticleVolume + m_SourceCarry[i];
+      const plUInt32 uiCount = static_cast<plUInt32>(plMath::Min(plMath::Floor(fWanted), 1.0e6f));
+      m_SourceCarry[i] = fWanted - static_cast<float>(uiCount);
+      if (uiCount == 0)
+        continue;
+
+      SourceJob& job = jobs.ExpandAndGetRef();
+      job.m_uiCount = uiCount;
+      job.m_Constants = base;
+      job.m_Constants.GpuFluidLiqPassF = plVec4(source.m_vCenter.x, source.m_vCenter.y, source.m_vCenter.z, plMath::Max(source.m_fRadius, 0.0f));
+      plUInt32 uiStream = 0;
+      plMemoryUtils::Copy(&uiStream, reinterpret_cast<const plUInt32*>(&fSimDt), 1);
+      job.m_Constants.GpuFluidLiqPass = plVec4U32(uiCount, 0x9E3779B9u * static_cast<plUInt32>(m_uiTicksSinceReset + 1) + i * 0x85EBCA6Bu, uiStream, 0);
+      job.m_Constants.GpuFluidLiqWall = plVec4(source.m_vVelocity.x, source.m_vVelocity.y, source.m_vVelocity.z, 0.0f);
+    }
+
+    if (!jobs.IsEmpty())
+    {
+      const plUInt32 cur = m_uiCurrentSet;
+      const plGALBufferHandle hPos = m_hPositions[cur], hVel = m_hVelocities[cur], hAff = m_hAffine[cur], hArgs = m_hParticleArgs[cur], hCtr = m_hCounters;
+      auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Source");
+      for (plGALBufferHandle h : {hPos, hVel, hAff, hArgs, hCtr})
+        pass.WriteBuffer(G(h));
+      pass.HasSideEffects();
+      pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
+        {
+          Recorder rec(ctx);
+          for (const SourceJob& job : jobs)
+          {
+            rec.Run(pShaders->m_hSource, job.m_Constants, LinearGroups(job.m_uiCount, GPU_FLUID_LIQUID_PARTICLE_GROUP),
+              {W("GpuFluidLiqParticleArgs", hArgs), W("GpuFluidLiqPositions", hPos), W("GpuFluidLiqVelocities", hVel), W("GpuFluidLiqAffine", hAff)});
+            rec.Run(pShaders->m_hSourceFinish, job.m_Constants, plVec3U32(1, 1, 1), {W("GpuFluidLiqParticleArgs", hArgs), W("GpuFluidLiqCounters", hCtr)});
+          }
+        });
+    }
+  }
+
+  // Counting sort of particle set src into dst by cell, and the active bricks of the result. Each substep starts with
+  // one; Liquid/Surface runs one more after the last substep (c.GpuFluidLiqPass.x = 1 keeps the solver's counters).
+  const plGpuFluidScan::Layout scanLayout = m_ScanLayout;
+  auto AddSortPass = [&](plUInt32 src, plUInt32 dst, const plGpuFluidLiquidConstants& c, const char* szName)
+  {
+    const plGALBufferHandle hSrcPos = m_hPositions[src], hSrcVel = m_hVelocities[src], hSrcAff = m_hAffine[src], hSrcArgs = m_hParticleArgs[src];
+    const plGALBufferHandle hPos = m_hPositions[dst], hVel = m_hVelocities[dst], hAff = m_hAffine[dst], hArgs = m_hParticleArgs[dst];
+
+    auto pass = ref_graph.AddComputePass(szName);
+    pass.ReadBuffer(G(hSrcArgs), indirect);
+    pass.ReadBuffer(G(hSrcPos), plGALResourceState::ComputeShaderRead);
+    pass.ReadBuffer(G(hSrcVel), plGALResourceState::ComputeShaderRead);
+    pass.ReadBuffer(G(hSrcAff), plGALResourceState::ComputeShaderRead);
+    for (plGALBufferHandle h : {hPos, hVel, hAff, hArgs, hRank, hCellCount, hCellStart, hScratch, hCounters, hBrickOcc, hBrickActive, hBrickList, hBrickArgs})
+      pass.WriteBuffer(G(h));
+    pass.HasSideEffects();
+    pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
+      {
+        Recorder rec(ctx);
+        rec.Run(pShaders->m_hClear, c, LinearGroups(plMath::Max(uiCellCount, uiBrickCount), 256),
+          {W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqCounters", hCounters)});
+
+        rec.RunIndirect(pShaders->m_hCount, c, hSrcArgs,
+          {R("GpuFluidLiqParticleArgs", hSrcArgs), R("GpuFluidLiqPositions", hSrcPos), W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqRank", hRank),
+            W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqCounters", hCounters)});
+
+        pShaders->m_Scan.RecordExclusiveScan(rec.m_pContext, rec.m_pEncoder, scanLayout, hCellCount, 0, hCellStart, 0, hScratch);
+        pShaders->m_Scan.RecordIndirectArgs(rec.m_pContext, hScratch, scanLayout.GetTotalOffset(), GPU_FLUID_LIQUID_PARTICLE_GROUP, hArgs, 0);
+        rec.After({W("", hArgs)});
+
+        rec.RunIndirect(pShaders->m_hScatter, c, hSrcArgs,
+          {R("GpuFluidLiqParticleArgs", hSrcArgs), R("GpuFluidLiqPositions", hSrcPos), R("GpuFluidLiqVelocities", hSrcVel), R("GpuFluidLiqAffine", hSrcAff),
+            W("GpuFluidLiqRank", hRank), W("GpuFluidLiqCellStart", hCellStart), W("GpuFluidLiqPositionsOut", hPos), W("GpuFluidLiqVelocitiesOut", hVel),
+            W("GpuFluidLiqAffineOut", hAff)});
+
+        rec.Run(pShaders->m_hBricks, c, LinearGroups(uiBrickCount, 256),
+          {W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqBrickActive", hBrickActive), W("GpuFluidLiqBrickListOut", hBrickList), W("GpuFluidLiqCounters", hCounters)});
+
+        pShaders->m_Scan.RecordIndirectArgs(rec.m_pContext, hCounters, GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS * 4, 1, hBrickArgs, 0);
+        rec.After({W("", hBrickArgs)});
+      });
+  };
+
+  // The level set kernel's radii (cells): kernel radius, particle radius, far value.
+  const float fLevelSetRadius = plMath::Clamp(input.m_fLevelSetRadius, 0.5f, 1.5f);
+  const plVec4 vLevelSetParams(fLevelSetRadius, plMath::Clamp(input.m_fParticleRadius, 0.0f, fLevelSetRadius), fLevelSetRadius, 0.0f);
+  const bool bLevelSet = input.m_bLevelSet;
+  const bool bLevelSetTheta = input.m_bLevelSetTheta;
+  const bool bLevelSetOnly = input.m_bLevelSetOnly;
+  const float fThetaMin = plMath::Clamp(input.m_fThetaMin, 1.0f / 30.0f, 1.0f);
+  const float fDensityDeadZone = plMath::Max(input.m_fDensityDeadZone, 0.0f);
+  const plGALBufferHandle hPhiRaw = m_hPhiRaw;
+  const plGALBufferHandle hPhiTmp = m_hPhiTmp;
+  const plUInt32 uiLevelSetSmoothPairs = (plMath::Min<plUInt32>(input.m_uiLevelSetSmoothSteps, 8) + 1) / 2;
+
   for (plUInt32 uiSub = 0; uiSub < uiSubsteps; ++uiSub)
   {
     const plUInt32 src = m_uiCurrentSet;
@@ -653,54 +815,18 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
     c.GpuFluidLiqSolve.w = m_fLastSubstepDt > 0.0f ? fSubDt / m_fLastSubstepDt : 0.0f;
     m_fLastSubstepDt = fSubDt;
 
-    const plGALBufferHandle hSrcPos = m_hPositions[src], hSrcVel = m_hVelocities[src], hSrcAff = m_hAffine[src], hSrcArgs = m_hParticleArgs[src];
     const plGALBufferHandle hPos = m_hPositions[dst], hVel = m_hVelocities[dst], hAff = m_hAffine[dst], hArgs = m_hParticleArgs[dst];
-    const plGpuFluidScan::Layout scanLayout = m_ScanLayout;
 
     // Liquid/Sort
-    {
-      auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Sort");
-      pass.ReadBuffer(G(hSrcArgs), indirect);
-      pass.ReadBuffer(G(hSrcPos), plGALResourceState::ComputeShaderRead);
-      pass.ReadBuffer(G(hSrcVel), plGALResourceState::ComputeShaderRead);
-      pass.ReadBuffer(G(hSrcAff), plGALResourceState::ComputeShaderRead);
-      for (plGALBufferHandle h : {hPos, hVel, hAff, hArgs, hRank, hCellCount, hCellStart, hScratch, hCounters, hBrickOcc, hBrickActive, hBrickList, hBrickArgs})
-        pass.WriteBuffer(G(h));
-      pass.HasSideEffects();
-      pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
-        {
-          Recorder rec(ctx);
-          rec.Run(pShaders->m_hClear, c, LinearGroups(plMath::Max(uiCellCount, uiBrickCount), 256),
-            {W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqCounters", hCounters)});
-
-          rec.RunIndirect(pShaders->m_hCount, c, hSrcArgs,
-            {R("GpuFluidLiqParticleArgs", hSrcArgs), R("GpuFluidLiqPositions", hSrcPos), W("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqRank", hRank),
-              W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqCounters", hCounters)});
-
-          pShaders->m_Scan.RecordExclusiveScan(rec.m_pContext, rec.m_pEncoder, scanLayout, hCellCount, 0, hCellStart, 0, hScratch);
-          pShaders->m_Scan.RecordIndirectArgs(rec.m_pContext, hScratch, scanLayout.GetTotalOffset(), GPU_FLUID_LIQUID_PARTICLE_GROUP, hArgs, 0);
-          rec.After({W("", hArgs)});
-
-          rec.RunIndirect(pShaders->m_hScatter, c, hSrcArgs,
-            {R("GpuFluidLiqParticleArgs", hSrcArgs), R("GpuFluidLiqPositions", hSrcPos), R("GpuFluidLiqVelocities", hSrcVel), R("GpuFluidLiqAffine", hSrcAff),
-              W("GpuFluidLiqRank", hRank), W("GpuFluidLiqCellStart", hCellStart), W("GpuFluidLiqPositionsOut", hPos), W("GpuFluidLiqVelocitiesOut", hVel),
-              W("GpuFluidLiqAffineOut", hAff)});
-
-          rec.Run(pShaders->m_hBricks, c, LinearGroups(uiBrickCount, 256),
-            {W("GpuFluidLiqBrickOccupied", hBrickOcc), W("GpuFluidLiqBrickActive", hBrickActive), W("GpuFluidLiqBrickListOut", hBrickList), W("GpuFluidLiqCounters", hCounters)});
-
-          pShaders->m_Scan.RecordIndirectArgs(rec.m_pContext, hCounters, GPU_FLUID_LIQUID_CTR_ACTIVE_BRICKS * 4, 1, hBrickArgs, 0);
-          rec.After({W("", hBrickArgs)});
-        });
-    }
+    AddSortPass(src, dst, c, "GpuFluid Liquid/Sort");
 
     // Liquid/P2G
     {
       auto pass = ref_graph.AddComputePass("GpuFluid Liquid/P2G");
       pass.ReadBuffer(G(hBrickArgs), indirect);
-      for (plGALBufferHandle h : {hBrickList, hCellCount, hCellStart, hPos, hVel, hAff})
+      for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hCellStart, hPos, hVel, hAff, hShapes})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
-      for (plGALBufferHandle h : {hVelG, hVelT, hValid0, hValid1, hCounters})
+      for (plGALBufferHandle h : {hVelG, hVelT, hValid0, hValid1, hCounters, hPhiRaw, hPhiTmp})
         pass.WriteBuffer(G(h));
       pass.HasSideEffects();
       pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
@@ -721,6 +847,27 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
             rec.RunIndirect(pShaders->m_hExtrapolate, c, hBrickArgs,
               {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), W("GpuFluidLiqVelIn", from[i]), W("GpuFluidLiqValidIn", validFrom[i]),
                 W("GpuFluidLiqVelOut", to[i]), W("GpuFluidLiqValidOut", validTo[i])});
+          }
+
+          // The level set the classification reads.
+          if (bLevelSet)
+          {
+            plGpuFluidLiquidConstants lc = c;
+            lc.GpuFluidLiqPassF = vLevelSetParams;
+            rec.RunIndirect(pShaders->m_hLevelSet, lc, hBrickArgs,
+              {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart),
+                R("GpuFluidLiqPositions", hPos), W("GpuFluidLiqPhiOut", hPhiRaw)});
+
+            lc.GpuFluidLiqPassF = plVec4(vLevelSetParams.y, vLevelSetParams.z, 0.5f, 0.4f);
+            for (plUInt32 i = 0; i < uiLevelSetSmoothPairs; ++i)
+            {
+              rec.RunIndirect(pShaders->m_hSurfaceSmooth, lc, hBrickArgs,
+                {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqBrickActive", hBrickActive), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqSurfPhi", hPhiRaw),
+                  W("GpuFluidLiqPhiOut", hPhiTmp)});
+              rec.RunIndirect(pShaders->m_hSurfaceSmooth, lc, hBrickArgs,
+                {R("GpuFluidLiqBrickArgs", hBrickArgs), R("GpuFluidLiqBrickList", hBrickList), R("GpuFluidLiqBrickActive", hBrickActive), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqSurfPhi", hPhiTmp),
+                  W("GpuFluidLiqPhiOut", hPhiRaw)});
+            }
           }
         });
     }
@@ -750,7 +897,7 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
 
       auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Solve");
       pass.ReadBuffer(G(hBrickArgs), indirect);
-      for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hShapes})
+      for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hShapes, hPhiRaw})
         pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
       for (plGALBufferHandle h : {hCellType, hVelG, hVelS, hVelT, hValid0, hValid1, hPressure, hRhs, hCounters, hPcgR, hPcgZ, hPcgP, hPcgQ, hPcgPartials, hPcgScalars})
         pass.WriteBuffer(G(h));
@@ -768,13 +915,18 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
           const Bind brickList = R("GpuFluidLiqBrickList", hBrickList);
           const Bind brickActive = R("GpuFluidLiqBrickActive", hBrickActive);
 
-          rec.RunIndirect(pShaders->m_hClassify, c, hBrickArgs,
-            {brickArgs, brickList, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqCounters", hCounters)});
+          plGpuFluidLiquidConstants classifyConstants = c;
+          classifyConstants.GpuFluidLiqPassF = plVec4(fThetaMin, bLevelSetTheta ? 1.0f : 0.0f, bLevelSetOnly ? 1.0f : 0.0f, 0.0f);
+          rec.RunIndirect(pShaders->m_hClassify, classifyConstants, hBrickArgs,
+            {brickArgs, brickList, brickActive, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqPhi", hPhiRaw), R("GpuFluidLiqShapes", hShapes), W("GpuFluidLiqCellType", hCellType),
+              W("GpuFluidLiqCounters", hCounters)});
 
           rec.RunIndirect(pShaders->m_hForces, c, hBrickArgs,
             {brickArgs, brickList, brickActive, W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqVelStar", hVelS)});
 
-          rec.RunIndirect(pShaders->m_hRhs, c, hBrickArgs,
+          plGpuFluidLiquidConstants rhsConstants = c;
+          rhsConstants.GpuFluidLiqPassF = plVec4(fDensityDeadZone, 0.0f, 0.0f, 0.0f);
+          rec.RunIndirect(pShaders->m_hRhs, rhsConstants, hBrickArgs,
             {brickArgs, brickList, R("GpuFluidLiqCellCount", hCellCount), W("GpuFluidLiqCellType", hCellType), W("GpuFluidLiqVel", hVelG), W("GpuFluidLiqPressure", hPressure),
               W("GpuFluidLiqRhs", hRhs), W("GpuFluidLiqCounters", hCounters)});
 
@@ -961,6 +1113,96 @@ void plGpuFluidLiquidSolver::Record(plRenderGraph& ref_graph, const plGpuFluidLi
         rec.Run(pShaders->m_hFrameEnd, c, plVec3U32(1, 1, 1),
           {R("GpuFluidLiqParticleArgs", hArgs), W("GpuFluidLiqCounters", hCounters), W("GpuFluidLiqStats", hStats), W("GpuFluidLiqDrawArgs", hDrawArgs)});
       });
+  }
+
+  if (bReset)
+    m_bHasSurface = false;
+
+  // Liquid/Surface: once per frame that steps. The particles moved since the last substep's sort, so they are sorted
+  // again (the next substep's sort then finds them in order); then the level set at their final positions, the
+  // temporal blend with last frame's surface, smoothing and surface nets over the active bricks.
+  if (input.m_bSurface && bStep && uiSubsteps > 0)
+  {
+    const plUInt32 src = m_uiCurrentSet;
+    const plUInt32 dst = 1 - src;
+    {
+      plGpuFluidLiquidConstants c = base;
+      c.GpuFluidLiqPass = plVec4U32(1, 0, 0, 0);
+      AddSortPass(src, dst, c, "GpuFluid Liquid/Surface Sort");
+    }
+    m_uiCurrentSet = dst;
+
+    const plUInt32 uiPrev = m_uiSurfaceCurrent;
+    const plUInt32 uiCur = 1 - uiPrev;
+    const plUInt32 uiTag = m_uiSurfaceTag++;
+    m_uiSurfaceCurrent = uiCur;
+
+    const plGALBufferHandle hPos = m_hPositions[dst];
+    const plGALBufferHandle hPhiPrev = m_hSurfacePhi[uiPrev], hPhiCur = m_hSurfacePhi[uiCur];
+    const plGALBufferHandle hStampPrev = m_hSurfaceStamp[uiPrev], hStampCur = m_hSurfaceStamp[uiCur];
+    const plGALBufferHandle hVertices = m_hSurfaceVertices, hQuads = m_hSurfaceQuads, hCubeMap = m_hSurfaceCubeMap, hSurfCounters = m_hSurfaceCounters,
+                            hSurfArgs = m_hSurfaceDrawArgs;
+    const plUInt32 uiMaxVertices = m_uiMaxSurfaceVertices, uiMaxQuads = m_uiMaxSurfaceQuads;
+    // The time since the last extraction, for carrying last frame's surface along (0 when there was none).
+    const float fBlend = m_bHasSurface ? plMath::Clamp(input.m_fSurfaceBlend, 0.0f, 0.9f) : 0.0f;
+    const float fCellsPerVelocity = fSimDt / m_fDx;
+    const plUInt32 uiSmoothPairs = (plMath::Min<plUInt32>(input.m_uiSurfaceSmoothSteps, 8) + 1) / 2;
+    const float fSmoothGain = plMath::Clamp(input.m_fSurfaceSmoothGain, 0.0f, 1.0f);
+    const float fSmoothClamp = plMath::Clamp(input.m_fSurfaceSmoothClamp, 0.0f, 1.0f);
+    // Outside the domain the surface closes at about the wall: phi there is the particle radius.
+    const float fOutside = plMath::Max(vLevelSetParams.y, 0.05f);
+    const float fFar = vLevelSetParams.z;
+
+    auto pass = ref_graph.AddComputePass("GpuFluid Liquid/Surface");
+    pass.ReadBuffer(G(hBrickArgs), indirect);
+    for (plGALBufferHandle h : {hBrickList, hBrickActive, hCellCount, hCellStart, hPos, hVelT, hPhiPrev, hStampPrev, hShapes})
+      pass.ReadBuffer(G(h), plGALResourceState::ComputeShaderRead);
+    for (plGALBufferHandle h : {hPhiRaw, hPhiTmp, hPhiCur, hStampCur, hVertices, hQuads, hCubeMap, hSurfCounters, hSurfArgs, hStats})
+      pass.WriteBuffer(G(h));
+    pass.HasSideEffects();
+    pass.SetExecuteCallback([=](const plRenderGraphContext& ctx)
+      {
+        Recorder rec(ctx);
+        const Bind brickArgs = R("GpuFluidLiqBrickArgs", hBrickArgs);
+        const Bind brickList = R("GpuFluidLiqBrickList", hBrickList);
+        const Bind brickActive = R("GpuFluidLiqBrickActive", hBrickActive);
+        const Bind shapes = R("GpuFluidLiqShapes", hShapes);
+
+        plGpuFluidLiquidConstants c = base;
+        c.GpuFluidLiqPassF = vLevelSetParams;
+        rec.RunIndirect(pShaders->m_hLevelSet, c, hBrickArgs,
+          {brickArgs, brickList, R("GpuFluidLiqCellCount", hCellCount), R("GpuFluidLiqCellStart", hCellStart), R("GpuFluidLiqPositions", hPos), W("GpuFluidLiqPhiOut", hPhiRaw)});
+
+        c.GpuFluidLiqPass = plVec4U32(uiTag, 0, 0, 0);
+        c.GpuFluidLiqPassF = plVec4(fOutside, fFar, fBlend, fCellsPerVelocity);
+        rec.RunIndirect(pShaders->m_hSurfaceBlend, c, hBrickArgs,
+          {brickArgs, brickList, brickActive, shapes, W("GpuFluidLiqSurfPhi", hPhiRaw), R("GpuFluidLiqPhiPrev", hPhiPrev), R("GpuFluidLiqStampPrev", hStampPrev), R("GpuFluidLiqVel", hVelT),
+            W("GpuFluidLiqPhiOut", hPhiCur), W("GpuFluidLiqStampOut", hStampCur)});
+
+        c.GpuFluidLiqPassF = plVec4(fOutside, fFar, fSmoothGain, fSmoothClamp);
+        for (plUInt32 i = 0; i < uiSmoothPairs; ++i)
+        {
+          rec.RunIndirect(pShaders->m_hSurfaceSmooth, c, hBrickArgs, {brickArgs, brickList, brickActive, shapes, W("GpuFluidLiqSurfPhi", hPhiCur), W("GpuFluidLiqPhiOut", hPhiTmp)});
+          rec.RunIndirect(pShaders->m_hSurfaceSmooth, c, hBrickArgs, {brickArgs, brickList, brickActive, shapes, W("GpuFluidLiqSurfPhi", hPhiTmp), W("GpuFluidLiqPhiOut", hPhiCur)});
+        }
+
+        c.GpuFluidLiqPass = plVec4U32(0, uiMaxQuads, uiMaxVertices, 0);
+        rec.Run(pShaders->m_hSurfaceArgs, c, plVec3U32(1, 1, 1), {W("GpuFluidLiqSurfCounters", hSurfCounters), W("GpuFluidLiqSurfDrawArgs", hSurfArgs), W("GpuFluidLiqStats", hStats)});
+
+        c.GpuFluidLiqPass = plVec4U32(uiMaxVertices, uiMaxQuads, 0, 0);
+        c.GpuFluidLiqPassF = plVec4(fOutside, fFar, 0.0f, 0.0f);
+        rec.RunIndirect(pShaders->m_hSurfaceVerts, c, hBrickArgs,
+          {brickArgs, brickList, brickActive, shapes, W("GpuFluidLiqSurfPhi", hPhiCur), W("GpuFluidLiqSurfVertices", hVertices), W("GpuFluidLiqSurfCubeMap", hCubeMap),
+            W("GpuFluidLiqSurfCounters", hSurfCounters)});
+        rec.RunIndirect(pShaders->m_hSurfaceQuads, c, hBrickArgs,
+          {brickArgs, brickList, brickActive, shapes, W("GpuFluidLiqSurfPhi", hPhiCur), W("GpuFluidLiqSurfCubeMap", hCubeMap), W("GpuFluidLiqSurfQuads", hQuads),
+            W("GpuFluidLiqSurfCounters", hSurfCounters)});
+
+        c.GpuFluidLiqPass = plVec4U32(1, uiMaxQuads, uiMaxVertices, 0);
+        rec.Run(pShaders->m_hSurfaceArgs, c, plVec3U32(1, 1, 1), {W("GpuFluidLiqSurfCounters", hSurfCounters), W("GpuFluidLiqSurfDrawArgs", hSurfArgs), W("GpuFluidLiqStats", hStats)});
+      });
+
+    m_bHasSurface = true;
   }
 
   m_bRecorded = true;

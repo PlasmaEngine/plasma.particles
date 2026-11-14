@@ -52,6 +52,7 @@ bool LiqIsFinite3(float3 v) { return !any(isnan(v)) && !any(isinf(v)); }
 uint3 LiqCells() { return LIQ_CONST(GpuFluidLiqCells).xyz; }
 uint LiqOpenMask() { return LIQ_CONST(GpuFluidLiqCells).w & 0xFFu; }
 uint LiqShapeCount() { return (LIQ_CONST(GpuFluidLiqCells).w >> 8) & 0xFFu; }
+bool LiqLevelSetEnabled() { return (LIQ_CONST(GpuFluidLiqCells).w & GPU_FLUID_LIQUID_FLAG_LEVEL_SET) != 0; }
 uint3 LiqBricks() { return LIQ_CONST(GpuFluidLiqBricks).xyz; }
 uint LiqCapacity() { return LIQ_CONST(GpuFluidLiqBricks).w; }
 float LiqDx() { return LIQ_CONST(GpuFluidLiqGrid).x; }

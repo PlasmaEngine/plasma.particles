@@ -25,6 +25,15 @@ struct plGpuFluidLiquidFill
   float m_fTopLayerFill = 1.0f;
 };
 
+/// An inflow: a disc of liquid entering at a flow rate with a velocity (a nozzle). Domain-relative metres.
+struct plGpuFluidLiquidSource
+{
+  plVec3 m_vCenter = plVec3::MakeZero();
+  plVec3 m_vVelocity = plVec3(0.0f, 0.0f, -1.0f); ///< m/s, also the direction the disc faces
+  float m_fRadius = 0.02f;                        ///< m
+  float m_fFlowRate = 0.0f;                       ///< m^3/s; 0: the disc's area times the speed
+};
+
 /// Everything a liquid volume's GPU work needs for one tick, gathered on the update thread.
 struct plGpuFluidLiquidFrameInput
 {
@@ -72,6 +81,9 @@ struct plGpuFluidLiquidFrameInput
   /// k of the local density correction: target divergence k * max(n/n0 - 1, 0) in 1/s, at most 0.5 / dt. A rate,
   /// so the packing it holds does not depend on the substep count.
   float m_fDensityGain = 25.0f;
+  /// The density correction acts on n/n0 - 1 - this: the Poisson spread of particles scattered at random (about 0.1 for
+  /// the 3x3x3 mean at n0 = 4) is left alone, so a settled pool comes to rest.
+  float m_fDensityDeadZone = 0.3f;
   /// c of the global volume control: target divergence c * (V_target - V) / V_target, in 1/s (the share of the
   /// volume error corrected per second, independent of the substep count).
   float m_fVolumeGain = 8.0f;
@@ -84,8 +96,32 @@ struct plGpuFluidLiquidFrameInput
 
   plUInt8 m_uiOpenFaces = 0; ///< GPU_FLUID_LIQUID_OPEN_* bits; closed faces are walls
 
+  /// Level set (Zhu & Bridson) from the particles every substep: a cell is liquid when it holds particles or phi < 0
+  /// at its centre, and the free surface's ghost-fluid theta is phi_i / (phi_i - phi_j) per face. False: liquid cells
+  /// are the cells with particles and theta is m_fTheta (P6).
+  bool m_bLevelSet = true;
+  float m_fLevelSetRadius = 1.5f;    ///< kernel radius R in cells (at most 1.5: the gather covers 3x3x3 cells)
+  /// r in cells. 0.25 R would put the zero of a flat, full surface where it belongs; a little less keeps the pool's
+  /// packing (the dam break's rest depth) at the seeded volume, because the cells with particles count as liquid too.
+  float m_fParticleRadius = 0.28f;
+  bool m_bLevelSetTheta = true;      ///< theta from the level set; false: m_fTheta with the level-set liquid cells
+  bool m_bLevelSetOnly = false;      ///< liquid cells are phi < 0 alone, not also every cell holding particles
+  float m_fThetaMin = 0.25f;         ///< smallest theta from the level set
+  /// Clamped Laplacian steps on the substep's level set before it classifies (pairs; 0: none). They take the particles'
+  /// noise out of theta, which otherwise keeps a resting surface jittering.
+  plUInt32 m_uiLevelSetSmoothSteps = 0;
+
+  /// Surface mesh (Liquid/Surface, once per frame that steps): the level set again from the final particles, blended
+  /// with the last frame's surface carried along the flow, smoothed, then surface nets.
+  bool m_bSurface = true;
+  float m_fSurfaceBlend = 0.3f;          ///< share of the advected last frame (0: no temporal blend)
+  plUInt32 m_uiSurfaceSmoothSteps = 4;   ///< clamped Laplacian steps
+  float m_fSurfaceSmoothGain = 0.5f;     ///< k of a step
+  float m_fSurfaceSmoothClamp = 0.4f;    ///< most a step moves phi, in cells
+
   plHybridArray<plGpuFluidLiquidFill, 4> m_Fills;
   plHybridArray<plGpuFluidLiquidShape, GPU_FLUID_LIQUID_MAX_SHAPES> m_Shapes;
+  plHybridArray<plGpuFluidLiquidSource, 4> m_Sources; ///< at most s_uiMaxSources are used
 
   /// Front histogram along +x of particles below this height (domain metres), in bins of this size. 0 bins: off.
   float m_fFrontHeight = 0.0f;
@@ -132,6 +168,10 @@ struct PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidStats
 
   float m_fFrontBinSize = 0.0f;
   plDynamicArray<plUInt32> m_FrontHistogram;
+
+  plUInt32 m_uiSurfaceVertices = 0; ///< surface-nets vertices of the frame (0 when the surface is off)
+  plUInt32 m_uiSurfaceQuads = 0;    ///< and quads, both capped at their capacity
+  plUInt32 m_uiSurfaceOverflow = 0; ///< vertices and quads that did not fit
 };
 
 /// What the debug renderer needs to draw a liquid volume's particles this frame.
@@ -142,6 +182,14 @@ struct plGpuFluidLiquidPublish
   plUInt32 m_uiMaxParticles = 0;
   plVec3 m_vDomainOrigin = plVec3::MakeZero();
   plVec3 m_vDomainSize = plVec3::MakeZero();
+
+  /// The surface mesh, when one was extracted: vertices (float4 domain-relative position, float4 normal), quads (4
+  /// vertex indices) and the draw arguments {6 * quads, 1, 0, 0}.
+  bool m_bHasSurface = false;
+  plGALBufferHandle m_hSurfaceVertices;
+  plGALBufferHandle m_hSurfaceQuads;
+  plGALBufferHandle m_hSurfaceDrawArgs;
+  plUInt32 m_uiMaxSurfaceQuads = 0;
 };
 
 /// Shaders of the liquid solver, loaded once per manager.
@@ -176,6 +224,14 @@ struct plGpuFluidLiquidShaders
   plShaderResourceHandle m_hPcgReduce;
   plShaderResourceHandle m_hPcgUpdateX;
   plShaderResourceHandle m_hPcgUpdateP;
+  plShaderResourceHandle m_hLevelSet;
+  plShaderResourceHandle m_hSurfaceBlend;
+  plShaderResourceHandle m_hSurfaceSmooth;
+  plShaderResourceHandle m_hSurfaceVerts;
+  plShaderResourceHandle m_hSurfaceQuads;
+  plShaderResourceHandle m_hSurfaceArgs;
+  plShaderResourceHandle m_hSource;
+  plShaderResourceHandle m_hSourceFinish;
   plGpuFluidScan m_Scan;
 
   void Load();
@@ -188,11 +244,15 @@ struct plGpuFluidLiquidShaders
 /// Per substep (one render-graph pass per phase, so each phase is timed):
 /// - Liquid/Sort: clear, count particles per cell (removing those that left), scan, scatter into the other set,
 ///   active bricks (occupied plus one around) and their dispatch arguments;
-/// - Liquid/P2G: gather of momentum and weight per face in int32 registers, normalise, extrapolate 3 layers;
-/// - Liquid/Solve: classify, gravity, right-hand side with density and volume correction, MGPCG (multigrid V-cycle
+/// - Liquid/P2G: gather of momentum and weight per face in int32 registers, normalise, extrapolate 3 layers, and the
+///   level set at the cell centres;
+/// - Liquid/Solve: classify (level set), gravity, right-hand side with density and volume correction, MGPCG (multigrid V-cycle
 ///   preconditioner with red-black Gauss-Seidel smoothing; warm started, ghost fluid at the free surface), project,
 ///   extrapolate;
 /// - Liquid/G2P: APIC/FLIP update, RK2 advection, push out of walls and solids.
+///
+/// Once per frame that steps, Liquid/Surface: sort the final particles, level set, temporal blend with the advected
+/// last surface, clamped Laplacian smoothing, surface nets (vertices, quads, draw arguments) over the active bricks.
 ///
 /// Render thread only.
 class PL_PARTICLEPLUGIN_DLL plGpuFluidLiquidSolver
@@ -287,6 +347,27 @@ private:
   plGALBufferHandle m_hCounters;
   plGALBufferHandle m_hStats;
   plGALBufferHandle m_hShapes;
+
+  // Level set: the raw phi of the substep (and of the frame's surface), the smoothing scratch, the surface of the
+  // last two frames with a per-brick tag of the extraction that wrote it; the surface-nets mesh.
+  plGALBufferHandle m_hPhiRaw;
+  plGALBufferHandle m_hPhiTmp;
+  plGALBufferHandle m_hSurfacePhi[2];
+  plGALBufferHandle m_hSurfaceStamp[2];
+  plGALBufferHandle m_hSurfaceVertices;
+  plGALBufferHandle m_hSurfaceQuads;
+  plGALBufferHandle m_hSurfaceCubeMap;
+  plGALBufferHandle m_hSurfaceCounters;
+  plGALBufferHandle m_hSurfaceDrawArgs;
+  plUInt32 m_uiMaxSurfaceVertices = 0;
+  plUInt32 m_uiMaxSurfaceQuads = 0;
+  plUInt32 m_uiSurfaceTag = 0;      ///< extractions so far; the tag of the next one
+  plUInt32 m_uiSurfaceCurrent = 0;  ///< which m_hSurfacePhi holds the last extracted surface
+  bool m_bHasSurface = false;
+
+  // Inflow: the share of a particle each source owes from earlier ticks, so a low flow rate still arrives.
+  static constexpr plUInt32 s_uiMaxSources = 4;
+  float m_SourceCarry[s_uiMaxSources] = {};
 
   // Render-thread state between ticks.
   plUInt32 m_uiCurrentSet = 0;       ///< set holding the particles after the last recorded tick

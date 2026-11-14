@@ -1,0 +1,298 @@
+[PLATFORMS]
+ALL
+
+[PERMUTATIONS]
+
+CAMERA_MODE
+RENDER_PASS
+GPU_FLUID_LIQUID_DRAW
+SHADING_QUALITY = SHADING_QUALITY_NORMAL
+
+[RENDERSTATE]
+
+// The surface-nets quads are wound counter-clockwise seen from outside the liquid in world space. The engine's
+// projection mirrors that on screen, so they are front faces under the default (clockwise) rule.
+
+#if GPU_FLUID_LIQUID_DRAW == GPU_FLUID_LIQUID_DRAW_BACK
+// Back faces into the linear-depth target, keeping the farthest; no depth buffer is attached.
+CullMode = CullMode_Front
+DepthTest = false
+DepthWrite = false
+BlendingEnabled0 = true
+BlendOp0 = BlendOp_Max
+SourceBlend0 = Blend_One
+DestBlend0 = Blend_One
+BlendOpAlpha0 = BlendOp_Max
+SourceBlendAlpha0 = Blend_One
+DestBlendAlpha0 = Blend_One
+#else
+// Front faces into colour, depth tested against the opaque scene and written, so what comes after composites at the
+// liquid's depth.
+CullMode = CullMode_Back
+DepthTest = true
+DepthWrite = true
+BlendingEnabled0 = false
+#endif
+
+[VERTEXSHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Common/CameraConstantsAccess.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidConstants.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDrawConstants.h>
+
+// Vertex pulling: six vertices per quad of the surface nets mesh (two triangles 0 1 2 and 0 2 3), read from the
+// solver's quad and vertex buffers. Drawn indirectly with the GPU's quad count.
+
+ByteAddressBuffer GpuFluidLiqSurfVertices BIND_GROUP(BG_DRAW_CALL);
+ByteAddressBuffer GpuFluidLiqSurfQuads BIND_GROUP(BG_DRAW_CALL);
+
+struct VS_OUT
+{
+  float4 Position : SV_Position;
+  float3 WorldPosition : TEXCOORD0;
+  float3 Normal : TEXCOORD1;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint RenderTargetArrayIndex : SV_RenderTargetArrayIndex;
+#endif
+};
+
+static const uint s_QuadCorner[6] = {0, 1, 2, 0, 2, 3};
+
+VS_OUT main(uint VertexID : SV_VertexID, uint InstanceID : SV_InstanceID)
+{
+  VS_OUT ret;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = InstanceID % 2;
+  ret.RenderTargetArrayIndex = InstanceID % 2;
+#endif
+
+  const uint quad = VertexID / 6;
+  const uint4 indices = GpuFluidLiqSurfQuads.Load4(quad * GPU_FLUID_LIQUID_SURFACE_QUAD_BYTES);
+  const uint corner = s_QuadCorner[VertexID % 6];
+  const uint vertex = corner == 0 ? indices.x : (corner == 1 ? indices.y : (corner == 2 ? indices.z : indices.w));
+
+  const float4 position = asfloat(GpuFluidLiqSurfVertices.Load4(vertex * GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES));
+  const float4 normal = asfloat(GpuFluidLiqSurfVertices.Load4(vertex * GPU_FLUID_LIQUID_SURFACE_VERTEX_BYTES + 16));
+
+  const float3 world = position.xyz + GET_PUSH_CONSTANT(plGpuFluidLiquidDrawConstants, GpuFluidDrawOrigin).xyz;
+  ret.Position = mul(GetWorldToScreenMatrix(), float4(world, 1.0));
+  ret.WorldPosition = world;
+  ret.Normal = normal.xyz;
+  return ret;
+}
+
+[PIXELSHADER]
+
+#include <Shaders/Common/Common.h>
+#include <Shaders/Common/GlobalConstants.h>
+#include <Shaders/Common/CameraConstantsAccess.h>
+#include <Shaders/GpuFluid/Liquid/GpuFluidLiquidDrawConstants.h>
+
+struct PS_IN
+{
+  float4 Position : SV_Position;
+  float3 WorldPosition : TEXCOORD0;
+  float3 Normal : TEXCOORD1;
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  uint RenderTargetArrayIndex : SV_RenderTargetArrayIndex;
+#endif
+};
+
+// The opaque scene's raw depth (LiquidDepthCopy).
+Texture2DArray GpuFluidLiqSceneDepth BIND_GROUP(BG_RENDER_PASS);
+
+float LoadOpaqueLinearDepth(int2 pixel)
+{
+  return LinearizeZBufferDepth(GpuFluidLiqSceneDepth.Load(int4(pixel, s_ActiveCameraEyeIndex, 0)).r);
+}
+
+#if GPU_FLUID_LIQUID_DRAW == GPU_FLUID_LIQUID_DRAW_BACK
+
+// The back face's linear depth, at most the opaque scene's: liquid behind a wall ends at the wall.
+float main(PS_IN input) : SV_Target0
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
+#endif
+  return min(LinearizeZBufferDepth(input.Position.z), LoadOpaqueLinearDepth(int2(input.Position.xy)));
+}
+
+#else
+
+#include <Shaders/Materials/MaterialData.h>
+#include <Shaders/Common/Lighting.h>
+#include <Shaders/Common/ExposureAccess.h>
+
+Texture2DArray GpuFluidLiqSceneColor BIND_GROUP(BG_RENDER_PASS);
+Texture2DArray GpuFluidLiqBackDepth BIND_GROUP(BG_RENDER_PASS);
+
+#define LIQ_DRAW(Name) GET_PUSH_CONSTANT(plGpuFluidLiquidDrawConstants, Name)
+
+float3 ProjectToScreen(float3 worldPosition, out bool out_bValid)
+{
+  const float4 clip = mul(GetWorldToScreenMatrix(), float4(worldPosition, 1.0));
+  out_bValid = clip.w > 1.0e-4;
+  const float3 ndc = clip.xyz / max(clip.w, 1.0e-4);
+  return float3(ndc.xy * float2(0.5, -0.5) + 0.5, ndc.z);
+}
+
+/// Fresnel reflectance of a dielectric (unpolarised), light arriving from the side with index 1.
+float DielectricFresnel(float cosI, float ior)
+{
+  const float sinT2 = (1.0 - cosI * cosI) / (ior * ior);
+  if (sinT2 >= 1.0)
+    return 1.0;
+  const float cosT = sqrt(1.0 - sinT2);
+  const float rs = (cosI - ior * cosT) / (cosI + ior * cosT);
+  const float rp = (ior * cosI - cosT) / (ior * cosI + cosT);
+  return saturate(0.5 * (rs * rs + rp * rp));
+}
+
+/// GGX specular of a light of unit irradiance (times n.l), with the Smith height-correlated visibility.
+float GgxSpecular(float3 n, float3 v, float3 l, float alpha)
+{
+  const float3 h = normalize(v + l);
+  const float noh = saturate(dot(n, h));
+  const float nol = saturate(dot(n, l));
+  const float nov = max(dot(n, v), 1.0e-4);
+  const float a2 = alpha * alpha;
+  const float d = noh * noh * (a2 - 1.0) + 1.0;
+  const float distribution = a2 / (PI * d * d);
+  const float lambdaV = nol * sqrt(nov * nov * (1.0 - a2) + a2);
+  const float lambdaL = nov * sqrt(nol * nol * (1.0 - a2) + a2);
+  const float visibility = 0.5 / max(lambdaV + lambdaL, 1.0e-5);
+  return distribution * visibility * nol;
+}
+
+float4 main(PS_IN input) : SV_Target0
+{
+#if CAMERA_MODE == CAMERA_MODE_STEREO
+  s_ActiveCameraEyeIndex = input.RenderTargetArrayIndex;
+#endif
+  const uint eye = s_ActiveCameraEyeIndex;
+  const int2 pixel = int2(input.Position.xy);
+  const float2 uv = input.Position.xy * ViewportSize.zw;
+
+  const float ior = max(LIQ_DRAW(GpuFluidDrawOrigin).w, 1.0);
+  const float3 sigma = max(LIQ_DRAW(GpuFluidDrawAbsorption).xyz, 0.0);
+  const float refractionStrength = LIQ_DRAW(GpuFluidDrawAbsorption).w;
+  const float3 scatterColor = LIQ_DRAW(GpuFluidDrawScatter).xyz;
+  const float roughness = clamp(LIQ_DRAW(GpuFluidDrawScatter).w, 0.02, 1.0);
+  const float maxThickness = LIQ_DRAW(GpuFluidDrawParams).x;
+  const uint debugView = (uint)LIQ_DRAW(GpuFluidDrawParams).y;
+
+  const float3 worldPosition = input.WorldPosition;
+  const float3 viewDirection = normalize(GetCameraPosition() - worldPosition);
+  const float3 cameraForward = normalize(GetCameraDirForwards());
+
+  // The normal of the level set, turned towards the camera where interpolation tipped it away at a silhouette.
+  float3 normal = normalize(input.Normal);
+  const float facing = dot(normal, viewDirection);
+  if (facing < 0.05)
+    normal = normalize(normal + viewDirection * (0.05 - facing));
+  const float noV = saturate(dot(normal, viewDirection));
+
+  // Thickness along the view ray: from this front face to the farthest back face, or to the opaque scene where that
+  // is nearer (or where no back face was drawn: the liquid's bottom lies under the floor).
+  const float frontDepth = LinearizeZBufferDepth(input.Position.z);
+  const float opaqueDepth = LoadOpaqueLinearDepth(pixel);
+  const float backDepth = GpuFluidLiqBackDepth.Load(int4(pixel, eye, 0)).r;
+  const float exitDepth = backDepth > frontDepth ? min(backDepth, opaqueDepth) : opaqueDepth;
+  const float rayPerDepth = 1.0 / max(dot(-viewDirection, cameraForward), 0.1);
+  const float pathLength = clamp((exitDepth - frontDepth) * rayPerDepth, 0.0, maxThickness);
+
+  // Refraction: follow the bent ray to the scene behind and look it up there. For a pool that is the floor through the
+  // water; for a thin stream in front of a wall it is the wall, far behind, which the stream's edges bend strongly, as
+  // a lens does (the second bend where the ray leaves is left out). The scene there must lie behind the surface
+  // (foreground reject), else the straight view is used.
+  const float3 refracted = refract(-viewDirection, normal, 1.0 / ior);
+  const float traceLength = clamp((opaqueDepth - frontDepth) * rayPerDepth, 0.0, maxThickness) * refractionStrength;
+  float2 refractedUv = uv;
+  float refractedOpaqueDepth = opaqueDepth;
+  if (dot(refracted, refracted) > 0.5)
+  {
+    bool bValid;
+    const float3 target = worldPosition + refracted * traceLength;
+    const float3 projected = ProjectToScreen(target, bValid);
+    if (bValid && all(projected.xy > 0.001) && all(projected.xy < 0.999))
+    {
+      const float candidateDepth = LoadOpaqueLinearDepth(int2(projected.xy * ViewportSize.xy));
+      if (candidateDepth > frontDepth + 0.005)
+      {
+        refractedUv = projected.xy;
+        refractedOpaqueDepth = candidateDepth;
+      }
+    }
+  }
+  const float3 behind = GpuFluidLiqSceneColor.SampleLevel(LinearClampSampler, float3(refractedUv, eye), 0).rgb * SceneColorToAbsolute();
+
+  // Beer-Lambert over the path through the liquid (to the back face, or to the opaque scene seen along the bent ray,
+  // whichever is nearer).
+  const float refractedPath = clamp((refractedOpaqueDepth - frontDepth) * rayPerDepth, 0.0, maxThickness);
+  const float path = refractedPath > 0.0 ? min(pathLength, refractedPath) : pathLength;
+  const float3 transmittance = exp(-sigma * path);
+
+  // The sun: the brightest directional light, its shadow at the surface.
+  float3 sunDirection = float3(0, 0, 1);
+  float3 sunRadiance = float3(0, 0, 0);
+  if (BrightestDirectionalLightIndex < NumLights)
+  {
+    const plPerLightData lightData = perLightDataBuffer[BrightestDirectionalLightIndex];
+    if (GetLightType(lightData) == LIGHT_TYPE_DIR)
+    {
+      sunDirection = GetLightDirection(lightData);
+      float shadow = 1.0;
+      if (lightData.shadowDataOffsetAndFadeOut != 0)
+      {
+        const float noise = InterleavedGradientNoise(input.Position.xy);
+        float2 randomAngle;
+        sincos(noise * 2.0 * PI, randomAngle.x, randomAngle.y);
+        const float2x2 randomRotation = {randomAngle.x, -randomAngle.y, randomAngle.y, randomAngle.x};
+        float subsurfaceShadow = 1.0;
+        float3 debugColor;
+        shadow = saturate(CalculateShadowTerm(worldPosition, normal, sunDirection, 1.0, LIGHT_TYPE_DIR, lightData.shadowDataOffsetAndFadeOut, noise, randomRotation, 1.0,
+          subsurfaceShadow, debugColor));
+      }
+      sunRadiance = GetLightColor(lightData) * GetIntensity(lightData) * shadow;
+    }
+  }
+
+  // In-scatter: the water's own faint glow, light from the sky and the sun scattered back out of the depth it has. A
+  // grey scattering of 2/m sets how fast it builds up with the path, the scatter colour (an albedo) its tint.
+  const float3 skyIrradiance = EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, float3(0, 0, 1)).rgb;
+  const float3 volumeIrradiance = skyIrradiance + sunRadiance * saturate(sunDirection.z);
+  const float3 inScatter = scatterColor * volumeIrradiance * INV_PI * (1.0 - exp(-2.0 * path));
+  const float3 transmitted = behind * transmittance + inScatter;
+
+  // Reflection: the probes / sky light along the mirror direction (turned up when it points into the ground, which a
+  // pool's surface would show as more liquid), and the sun's specular.
+  const plPerClusterData clusterData = GetClusterData(input.Position.xyw);
+  float3 reflectionNormal = normal;
+  {
+    float3 r = reflect(-viewDirection, normal);
+    if (r.z < 0.05)
+    {
+      r.z = 0.05 + abs(r.z) * 0.5;
+      r = normalize(r);
+      reflectionNormal = normalize(r + viewDirection);
+    }
+  }
+  float3 environment = ComputeReflection(worldPosition, reflectionNormal, roughness, viewDirection, clusterData);
+  if (dot(environment, float3(1, 1, 1)) <= 1.0e-6)
+    environment = EvaluateAmbientCube(SkyIrradianceTexture, SkyIrradianceIndex, reflect(-viewDirection, reflectionNormal)).rgb * INV_PI;
+  const float fresnel = DielectricFresnel(noV, ior);
+  const float3 sunSpecular = sunRadiance * GgxSpecular(normal, viewDirection, sunDirection, roughness * roughness) * DielectricFresnel(saturate(dot(viewDirection, normalize(viewDirection + sunDirection))), ior);
+
+  float3 color = transmitted * (1.0 - fresnel) + environment * fresnel + sunSpecular;
+
+  if (debugView == 1)
+    color = (normal * 0.5 + 0.5) * 0.2 / max(PreExposure, 1.0e-30);
+  else if (debugView == 2)
+    color = saturate(path / max(maxThickness, 1.0e-3)).xxx * 0.2 / max(PreExposure, 1.0e-30);
+
+  return float4(PreExpose(color), 1.0);
+}
+
+#endif

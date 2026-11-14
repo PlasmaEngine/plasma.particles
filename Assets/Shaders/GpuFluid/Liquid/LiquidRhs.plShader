@@ -72,7 +72,10 @@ void main(uint3 groupId : SV_GroupID, uint3 groupThreadId : SV_GroupThreadID)
     }
   }
   const float n = countSum / max(cellsInside, 1.0);
-  const float excess = clamp(n / n0 - 1.0, 0.0, 1.0);
+  // GpuFluidLiqPassF.x: a dead zone on top of n0. Particles scattered at random keep the Poisson spread of their counts
+  // however they move (they do not repel each other), so without it a settled pool is pushed apart and pulled back by
+  // the volume control everywhere, all the time, and never comes to rest.
+  const float excess = clamp(n / n0 - 1.0 - max(LIQ_CONST(GpuFluidLiqPassF).x, 0.0), 0.0, 1.0);
   float target = min(solve.y, 0.5 / dt) * excess;
 
   const float seeded = float(GpuFluidLiqCounters.Load(GPU_FLUID_LIQUID_CTR_SEEDED * 4));

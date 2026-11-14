@@ -4,7 +4,8 @@
 // (phi_i - phi_nb) = b, where
 // - a liquid neighbour adds 1 to the diagonal and phi_nb to the sum;
 // - an air neighbour (or an open domain side) is the free surface: ghost fluid with phi = 0 at a fraction theta of
-//   the way, which adds 1 / theta to the diagonal;
+//   the way, which adds 1 / theta to the diagonal (on the fine level theta per face from the level set, see
+//   LiqAirInvTheta);
 // - a solid neighbour or a wall adds nothing (Neumann).
 // Coarse levels use the same stencil on their own cell types: a coarse cell is liquid when it has a liquid child and
 // no air child, solid when it has neither, air otherwise (LiquidRestrict). Their right-hand side is the restricted
@@ -28,7 +29,9 @@ float MgRestrictScale() { return LIQ_CONST(GpuFluidLiqPassF).y; }
 /// Diagonal and the sum of the liquid neighbours' solution of cell c.
 void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 dims, bool bFine, out float out_diag, out float out_sum)
 {
-  const float air = LiqInvTheta();
+  // The fine level takes theta per face from the cell's type word (the level set's free surface); the coarse levels,
+  // which only precondition, use the constant.
+  const uint ownWord = bFine ? types.Load(LiqCellIndexIn(c, dims) * 4) : 0u;
   out_diag = 0.0;
   out_sum = 0.0;
 
@@ -36,6 +39,7 @@ void MgStencil(RWByteAddressBuffer types, RWByteAddressBuffer xs, int3 c, uint3 
   {
     const int3 nb = c + LiqNeighbourOffset(n);
     const uint t = LiqTypeAt(types, nb, dims, bFine);
+    const float air = bFine ? LiqAirInvTheta(ownWord, n) : LiqInvTheta();
     if (t == GPU_FLUID_LIQUID_CELL_OUTSIDE)
     {
       if (LiqNeighbourSideOpen(n))
